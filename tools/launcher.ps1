@@ -4,6 +4,9 @@
 # Run it through Play.bat (or: powershell -ExecutionPolicy Bypass -File tools\launcher.ps1).
 
 $ErrorActionPreference = 'Continue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$UserAgent = 'PixelHorde/0.3 (+https://github.com/Littlebutta/Horde-defence-game)'
+$Overpass = @('https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter')
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Game = (Resolve-Path (Join-Path $Root 'game')).Path
 $PullEverySeconds = 60
@@ -43,6 +46,64 @@ function Send-Bytes($res, [byte[]]$bytes, $type, $status = 200) {
     $res.OutputStream.Write($bytes, 0, $bytes.Length)
 }
 
+# Fetches from OpenStreetMap on the game's behalf, so the browser never has to talk to those servers directly.
+function Invoke-Remote([string]$url, [string]$method = 'GET', [string]$body = $null, [int]$timeoutMs = 180000) {
+    $req = [System.Net.HttpWebRequest]::Create($url)
+    $req.Method = $method
+    $req.UserAgent = $UserAgent
+    $req.Timeout = $timeoutMs
+    $req.ReadWriteTimeout = $timeoutMs
+    $req.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
+    if ($body) {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($body)
+        $req.ContentType = 'application/x-www-form-urlencoded'
+        $req.ContentLength = $bytes.Length
+        $s = $req.GetRequestStream(); $s.Write($bytes, 0, $bytes.Length); $s.Close()
+    }
+    $resp = $req.GetResponse()
+    try {
+        $reader = New-Object IO.StreamReader($resp.GetResponseStream(), [Text.Encoding]::UTF8)
+        return $reader.ReadToEnd()
+    } finally { $resp.Close() }
+}
+
+function Invoke-Osm($ctx, $path) {
+    $res = $ctx.Response
+    try {
+        if ($path -eq '/__osm/ping') {
+            Send-Bytes $res ([Text.Encoding]::UTF8.GetBytes('ok')) 'text/plain; charset=utf-8'
+            return
+        }
+        if ($path -eq '/__osm/geocode') {
+            $q = $ctx.Request.QueryString['q']
+            Write-Info "Looking up '$q' on OpenStreetMap..."
+            $json = Invoke-Remote ("https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=" + [Uri]::EscapeDataString($q)) 'GET' $null 30000
+            Send-Bytes $res ([Text.Encoding]::UTF8.GetBytes($json)) 'application/json; charset=utf-8'
+            return
+        }
+        if ($path -eq '/__osm/overpass') {
+            $reader = New-Object IO.StreamReader($ctx.Request.InputStream, [Text.Encoding]::UTF8)
+            $query = $reader.ReadToEnd()
+            $last = $null
+            foreach ($u in $Overpass) {
+                try {
+                    Write-Info "Downloading map data from $([Uri]$u | Select-Object -ExpandProperty Host)..."
+                    $json = Invoke-Remote $u 'POST' ('data=' + [Uri]::EscapeDataString($query))
+                    Send-Bytes $res ([Text.Encoding]::UTF8.GetBytes($json)) 'application/json; charset=utf-8'
+                    Write-Info "Map data downloaded ($([Math]::Round($json.Length / 1MB, 1)) MB)."
+                    return
+                } catch { $last = $_.Exception.Message; Write-Info "Map server failed: $last" }
+            }
+            throw $last
+        }
+        Send-Bytes $res ([Text.Encoding]::UTF8.GetBytes('Not found')) 'text/plain' 404
+    } catch {
+        $msg = "$($_.Exception.Message)"
+        Write-Info "Map request failed: $msg"
+        Send-Bytes $res ([Text.Encoding]::UTF8.GetBytes($msg)) 'text/plain; charset=utf-8' 502
+    }
+}
+
 function Invoke-Request($ctx) {
     $res = $ctx.Response
     # Cross-origin isolation unlocks SharedArrayBuffer, which later builds use for zero-copy threading.
@@ -50,6 +111,7 @@ function Invoke-Request($ctx) {
     $res.Headers.Add('Cross-Origin-Embedder-Policy', 'credentialless')
     $res.Headers.Add('Cache-Control', 'no-store')
     $path = [Uri]::UnescapeDataString($ctx.Request.Url.AbsolutePath)
+    if ($path.StartsWith('/__osm/')) { Invoke-Osm $ctx $path; return }
     if ($path -eq '/__version') {
         Send-Bytes $res ([Text.Encoding]::UTF8.GetBytes((Get-GameVersion))) 'text/plain; charset=utf-8'
         return

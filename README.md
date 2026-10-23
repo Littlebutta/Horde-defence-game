@@ -21,18 +21,22 @@ You can also open `game/index.html` directly in a browser, but then it won't upd
 
 | Input | Action |
 | --- | --- |
-| 1 to 6 | Wall, gun turret, cannon, scrap extractor, ammo plant, missile silo |
-| R | Rescue squad: escorts civilians home for 100 points each |
-| Q / E | Airstrike / ICBM (needs a silo). Both flatten buildings |
-| T | Switch between 2.5D and top-down |
-| H / F | Jump to HQ / fit the whole map |
+| 1 to 7 | Wall, gun turret, cannon, scrap extractor, ammo plant, missile silo, extraction pad |
+| 8 / 9 | Rifle squad / tank, deployed from the HQ to where you click |
+| Left click / drag | Place. Drag walls along a street; drag other buildings to lay a row or grid |
+| R / Q / E | Rescue squad / airstrike / ICBM (the panel on the right; greyed out until ready) |
 | X | Sell a structure for 50% |
-| Left click / drag | Place (drag to paint walls) |
 | Right drag, WASD | Pan |
 | Scroll | Zoom |
+| T | Switch between 2.5D and top-down |
+| H / F | Jump to HQ / fit the whole map |
 | Space | Pause |
 
-Turrets placed fully on a rooftop get +60% range, but they fall with the building. Factories and silos must go inside the base zone (the dashed ring around the HQ).
+- Click a rooftop with a turret selected to mount it there: +60% range, but it falls with the building. Rifle squads sent to a building garrison it the same way.
+- Turrets placed outside the base zone (the dashed ring) are flown in from the HQ by helicopter.
+- Factories, silos and extraction pads must go inside the base zone.
+- Rescued civilians wait at the HQ until an extraction pad flies them out: +100 score, +20 scrap and +10 ammo each.
+- Hordes and civilians only move along streets, plazas, parks, airport ground and rubble.
 
 ## Factions
 
@@ -46,7 +50,7 @@ Turrets placed fully on a rooftop get +60% range, but they fall with the buildin
 - **Pathing:** one flow field (bucketed Dijkstra from the HQ) is shared by every unit. Units step to the cheapest neighbour cell, with a crowding penalty that makes them spill around each other like a fluid. Player structures are passable at a high cost, so the horde goes around walls when it can and chews through them when it can't.
 - **Rendering:** one pixel per map cell, darker where the crowd is denser, plus a glow that grows with swarm size. Streets and buildings are drawn as vectors in a Google Maps style; buildings are extruded to their height (2.5D) and cached in tiles that redraw when something is destroyed.
 - **Destruction:** every city building has hit points. The horde chews through buildings and walls when there's no way around, and big explosions flatten them, which re-routes the flow field.
-- **Real maps:** Nominatim finds the place, Overpass downloads streets, buildings, water, parks and airport runways for a 4 km square, and the same rasteriser used for generated cities turns it into the battlefield. Street widths are exaggerated so the swarm has room to flow.
+- **Real maps:** when the game runs through `Play.bat`, the launcher downloads map data on the game's behalf (browsers often block direct requests). Nominatim finds the place, Overpass downloads streets, buildings, water, parks and airport runways for a 4 km square, and the same rasteriser used for generated cities turns it into the battlefield. Street widths are exaggerated so the swarm has room to flow.
 - **Economy:** extractors make scrap, ammo plants turn scrap into ammo, turrets burn ammo.
 
 ## Roadmap
