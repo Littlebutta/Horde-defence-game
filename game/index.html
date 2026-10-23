@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Pixel Horde</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: full-bleed city canvas; thin tactical HUD strips pinned to the top and bottom edges. Single dark look by design. */
+:root{
+  --ground:#0a0c0f; --panel:rgba(13,16,21,.9); --line:#283040; --text:#dde2ea; --dim:#8a93a6;
+  --accent:#ffd35a; --hazard:#ff5a3c; --ok:#5fe08a;
+  --display:"Chakra Petch","Segoe UI",system-ui,sans-serif; --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+[hidden]{display:none!important}
+html,body{height:100%;margin:0;overflow:hidden;background:var(--ground);color:var(--text);font-family:var(--display)}
+canvas#c{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair;touch-action:none}
+.strip{position:fixed;left:0;right:0;display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  background:var(--panel);border-color:var(--line);border-style:solid;border-width:0;backdrop-filter:blur(4px)}
+#top{top:0;padding-block:calc(8px + env(safe-area-inset-top,0px)) 8px;border-bottom-width:1px}
+#bar{bottom:0;padding-block:8px calc(8px + env(safe-area-inset-bottom,0px));border-top-width:1px;gap:6px}
+.stat{display:flex;flex-direction:column;min-width:0}
+.stat b{font:600 15px/1.1 var(--mono);font-variant-numeric:tabular-nums}
+.stat span{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+.brand{font-weight:700;letter-spacing:.18em;text-transform:uppercase;font-size:13px;color:var(--accent)}
+.grow{flex:1}
+button,select{font:500 12px/1 var(--display);color:var(--text);background:#151a22;border:1px solid var(--line);border-radius:3px;padding:7px 9px;cursor:pointer}
+button:hover{border-color:#4a5568}
+button:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+button.on{border-color:var(--accent);background:#2a2412;color:var(--accent)}
+button.no{opacity:.45}
+.tool{display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-width:84px;text-align:left}
+.tool kbd{font:400 10px var(--mono);color:var(--dim)}
+.tool small{font:400 10px var(--mono);color:var(--dim)}
+.sep{width:1px;align-self:stretch;background:var(--line);margin:0 4px}
+#tip{position:fixed;left:max(16px,env(safe-area-inset-left,0px));bottom:84px;font:400 12px/1.4 var(--mono);color:var(--dim);max-width:60ch;pointer-events:none;text-shadow:0 1px 2px #000}
+#banner{position:fixed;left:50%;top:22%;transform:translateX(-50%);font:700 28px var(--display);letter-spacing:.2em;text-transform:uppercase;color:var(--hazard);text-shadow:0 2px 12px #000;pointer-events:none;text-align:center;white-space:nowrap}
+#over{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(5,6,8,.72)}
+#over div{background:var(--panel);border:1px solid var(--line);padding:24px 28px;display:flex;flex-direction:column;gap:12px;align-items:flex-start;max-width:min(420px,calc(100% - 32px))}
+#over h2{margin:0;font-size:24px;letter-spacing:.12em;text-transform:uppercase;color:var(--hazard)}
+#over p{margin:0;font:400 13px/1.5 var(--mono);color:var(--dim)}
+@media (max-width:700px){.tool{min-width:0}.tool small{display:none}#tip{display:none}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="top" class="strip">
+  <div class="brand">Pixel Horde</div>
+  <div class="stat"><b id="sScrap">0</b><span>Scrap</span></div>
+  <div class="stat"><b id="sAmmo">0</b><span>Ammo</span></div>
+  <div class="stat"><b id="sHQ">0</b><span>HQ armour</span></div>
+  <div class="stat"><b id="sWave">0</b><span id="sWaveL">Next wave</span></div>
+  <div class="stat"><b id="sUnits">0</b><span>Hostiles</span></div>
+  <div class="stat"><b id="sKills">0</b><span>Kills</span></div>
+  <div class="grow"></div>
+  <div class="stat"><b id="sThreads">-</b><span>Sim threads</span></div>
+  <div class="stat"><b id="sTick">-</b><span>Tick ms</span></div>
+  <div class="stat"><b id="sFps">-</b><span>FPS</span></div>
+  <label class="stat" for="mult"><select id="mult"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="4">4×</option><option value="16">16×</option><option value="64">64×</option></select><span>Horde size</span></label>
+  <button id="stress" type="button">Unleash 1,000,000</button>
+  <button id="pause" type="button">Pause</button>
+</div>
+<div id="bar" class="strip"></div>
+<div id="tip"></div>
+<div id="banner"></div>
+<div id="over" hidden><div><h2>City overrun</h2><p id="overTxt"></p><button id="restart" type="button">Defend again</button></div></div>
+
+<script>
+'use strict';
+// ---------------------------------------------------------------- simulation core
+// Runs inside each Web Worker (one per spare CPU thread). Each worker owns a slice of the horde;
+// only grids cross thread boundaries, never individual units.
+function makeSim(){
+  const INF=4294967295;
+  let W=0,H=0,fac=null,dist=null,sid=null;
+  let cap=0,n=0,X=new Float32Array(0),Y=X,HP=X,F=new Uint8Array(0);
+  let dens,prev,facG,dmg; const touched=[];
+  let s=1;
+  const rnd=()=>{s^=s<<13;s^=s>>>17;s^=s<<5;return (s>>>0)/4294967296;};
+  const DX=[1,-1,0,0,1,1,-1,-1],DY=[0,0,1,-1,1,-1,1,-1];
+  function grow(need){
+    if(need<=cap)return;
+    let c=Math.max(4096,cap*2);while(c<need)c*=2;
+    const nx=new Float32Array(c),ny=new Float32Array(c),nh=new Float32Array(c),nf=new Uint8Array(c);
+    nx.set(X.subarray(0,n));ny.set(Y.subarray(0,n));nh.set(HP.subarray(0,n));nf.set(F.subarray(0,n));
+    X=nx;Y=ny;HP=nh;F=nf;cap=c;
+  }
+  function ok(x,y){if(x<0||y<0||x>=W||y>=H)return false;const c=(y|0)*W+(x|0);return dist[c]!==INF&&sid[c]<0;}
+  function spawn(sx,sy,f,count){
+    grow(n+count);
+    const rad=Math.max(2,Math.sqrt(count)*0.4),hp=fac[f].hp;
+    for(let k=0;k<count;k++){
+      let x=sx,y=sy;
+      for(let t=0;t<4;t++){const a=rnd()*6.2832,r=rnd()*rad,px=sx+Math.cos(a)*r,py=sy+Math.sin(a)*r;if(ok(px,py)){x=px;y=py;break;}}
+      X[n]=x;Y[n]=y;HP[n]=hp*(0.8+0.4*rnd());F[n]=f;n++;
+    }
+  }
+  function step(m){
+    const dt=m.dt,DK=6*m.nw,ev=m.ev;
+    for(let e=0;e<ev.length;e+=4){
+      const ex=ev[e],ey=ev[e+1],r=ev[e+2],d=ev[e+3],r2=r*r+0.5;
+      const x0=Math.max(0,Math.floor(ex-r)),x1=Math.min(W-1,Math.floor(ex+r)),y0=Math.max(0,Math.floor(ey-r)),y1=Math.min(H-1,Math.floor(ey+r));
+      for(let y=y0;y<=y1;y++){const dy=y+0.5-ey;for(let x=x0;x<=x1;x++){const dx=x+0.5-ex;if(dx*dx+dy*dy<=r2){const c=y*W+x;if(dmg[c]===0)touched.push(c);dmg[c]+=d;}}}
+    }
+    for(const p of m.sp)spawn(p[0],p[1],p[2],p[3]);
+    const t=prev;prev=dens;dens=t;dens.fill(0);
+    const sd=new Float32Array(m.ns),kills=[0,0,0];
+    for(let i=0;i<n;i++){
+      let x=X[i],y=Y[i];const cx=x|0,cy=y|0;let c=cy*W+cx;const f=F[i];
+      const dm=dmg[c];
+      if(dm>0){const h=HP[i]-dm;if(h<=0){kills[f]++;n--;X[i]=X[n];Y[i]=Y[n];HP[i]=HP[n];F[i]=F[n];i--;continue;}HP[i]=h;}
+      const fs=fac[f],jit=fs.jit;
+      let best=-1,bv=Infinity;
+      for(let k=0;k<8;k++){
+        const nx=cx+DX[k],ny=cy+DY[k];if(nx<0||ny<0||nx>=W||ny>=H)continue;
+        const nc=ny*W+nx,dv=dist[nc];if(dv===INF)continue;
+        const v=dv+prev[nc]*DK+rnd()*jit;if(v<bv){bv=v;best=k;}
+      }
+      if(best>=0){
+        const nx=cx+DX[best],ny=cy+DY[best],nc=ny*W+nx,st=sid[nc];
+        if(st>=0){sd[st]+=fs.atk*dt;}
+        else{
+          const tx=nx+rnd(),ty=ny+rnd(),dx=tx-x,dy=ty-y,len=Math.sqrt(dx*dx+dy*dy),stp=fs.spd*dt;
+          let px,py;if(len>stp){px=x+dx/len*stp;py=y+dy/len*stp;}else{px=tx;py=ty;}
+          const c2=(py|0)*W+(px|0);
+          if(dist[c2]!==INF&&sid[c2]<0){X[i]=px;Y[i]=py;c=c2;}
+        }
+      }
+      if(dens[c]<65535)dens[c]++;facG[c]=f;
+    }
+    for(let k=0;k<touched.length;k++)dmg[touched[k]]=0;touched.length=0;
+    const cnt=dens.slice(),fg=facG.slice();
+    return {msg:{t:'step',cnt,fac:fg,sd,kills,n},tr:[cnt.buffer,fg.buffer,sd.buffer]};
+  }
+  return function(m){
+    if(m.t==='init'){W=m.W;H=m.H;fac=m.fac;s=(m.seed|0)||1;const N=W*H;dens=new Uint16Array(N);prev=new Uint16Array(N);facG=new Uint8Array(N);dmg=new Float32Array(N);grow(4096);return {msg:{t:'ready'}};}
+    if(m.t==='field'){dist=m.dist;sid=m.sid;return null;}
+    if(m.t==='step')return step(m);
+    return null;
+  };
+}
+
+// ---------------------------------------------------------------- thread pool
+class WorkerSim{
+  constructor(w){this.w=w;this.res=null;w.onmessage=e=>{const r=this.res;this.res=null;if(r)r(e.data);};}
+  send(m){this.w.postMessage(m);}
+  call(m){return new Promise(r=>{this.res=r;this.w.postMessage(m);});}
+}
+class LocalSim{
+  constructor(){this.h=makeSim();}
+  send(m){this.h(m);}
+  call(m){const r=this.h(m);return Promise.resolve(r?r.msg:null);}
+}
+async function makePool(n,init){
+  try{
+    const src=makeSim.toString()+';const h=makeSim();onmessage=e=>{const r=h(e.data);if(r)postMessage(r.msg,r.tr||[]);};';
+    const url=URL.createObjectURL(new Blob([src],{type:'text/javascript'}));
+    const pool=[];for(let i=0;i<n;i++)pool.push(new WorkerSim(new Worker(url)));
+    const timeout=new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),3000));
+    await Promise.race([Promise.all(pool.map((p,i)=>p.call({...init,seed:init.seed+i*7919}))),timeout]);
+    return {pool,threaded:true};
+  }catch(err){
+    const p=new LocalSim();p.call(init);return {pool:[p],threaded:false};
+  }
+}
+
+// ---------------------------------------------------------------- world
+const W=800,H=800,N=W*H,INF=4294967295,CG=8,CW=W/CG,CH=H/CG,DT=0.05;
+const FACTIONS=[
+  {name:'Zombies',spd:11,hp:10,atk:3,jit:8,col:[120,255,80],reward:0.04},
+  {name:'Alien bugs',spd:24,hp:5,atk:2,jit:16,col:[226,96,255],reward:0.03},
+  {name:'Orcs',spd:9,hp:45,atk:12,jit:5,col:[255,112,40],reward:0.2},
+];
+const DEFS={
+  wall:{key:'1',name:'Wall',w:3,h:3,hp:260,cost:3,col:[150,158,174],tip:'Drag along a street to block it. Hordes chew through walls when there is no way around.'},
+  gun:{key:'2',name:'Gun turret',w:5,h:5,hp:220,cost:90,range:46,rate:0.16,dmg:14,rad:1.3,ammo:1,col:[255,211,90],tip:'Fast, 1 ammo per shot. On a rooftop it gets +60% range and the horde cannot reach it.'},
+  cannon:{key:'3',name:'Cannon',w:7,h:7,hp:420,cost:240,range:80,rate:1.4,dmg:70,rad:5,ammo:6,col:[255,150,60],tip:'Slow splash damage, 6 ammo per shell. Best on crowded streets.'},
+  ext:{key:'4',name:'Scrap extractor',w:7,h:7,hp:300,cost:120,col:[70,220,200],tip:'Produces 4 scrap per second.'},
+  plant:{key:'5',name:'Ammo plant',w:7,h:7,hp:300,cost:160,col:[205,150,95],tip:'Turns 3 scrap into 12 ammo every second.'},
+  silo:{key:'6',name:'Missile silo',w:9,h:9,hp:800,cost:1200,col:[236,236,246],tip:'Unlocks the ICBM strike.'},
+  hq:{name:'HQ',w:15,h:15,hp:6000,col:[90,170,255]},
+};
+const ABIL={
+  air:{key:'q',name:'Airstrike',cost:250,ammo:0,cd:18,rad:26,dmg:600,delay:1.2,tip:'Bombs a 26 m circle after a short delay.'},
+  icbm:{key:'e',name:'ICBM',cost:1500,ammo:400,cd:75,rad:120,dmg:1e9,delay:4,req:'silo',tip:'Erases everything in a huge radius after 4 seconds. Needs a missile silo.'},
+};
+
+let rs=20261023;const rng=()=>{rs^=rs<<13;rs^=rs>>>17;rs^=rs<<5;return (rs>>>0)/4294967296;};
+const blocked=new Uint8Array(N);   // 1 = city building (enemies cannot enter, turrets can sit on the roof)
+const base=new Uint32Array(N);
+const rgba=(r,g,b)=>(255<<24)|((b&255)<<16)|((g&255)<<8)|(r&255);
+
+// Procedural stand-in for a real-world city map (street grid, avenues, alleys, parks, a boulevard).
+function genCity(){
+  const road=new Uint8Array(N),park=new Uint8Array(N),lane=new Uint8Array(N);
+  const carve=(x0,y0,w,h,arr=road)=>{for(let y=Math.max(0,y0);y<Math.min(H,y0+h);y++)for(let x=Math.max(0,x0);x<Math.min(W,x0+w);x++)arr[y*W+x]=1;};
+  for(let axis=0;axis<2;axis++){
+    let p=(rng()*20)|0;
+    while(p<W){
+      const wide=rng()<0.22,wd=wide?9+((rng()*4)|0):4+((rng()*3)|0);
+      if(axis===0){carve(p,0,wd,H);if(wide)carve(p+(wd>>1),0,1,H,lane);}else{carve(0,p,W,wd);if(wide)carve(0,p+(wd>>1),W,1,lane);}
+      p+=wd+28+((rng()*42)|0);
+    }
+  }
+  // boulevard
+  for(let t=0;t<W;t++){const x=t,y=(t*0.62+90)|0;carve(x-3,y-3,7,7);}
+  // alleys
+  for(let k=0;k<260;k++){const x=(rng()*W)|0,y=(rng()*H)|0,l=10+((rng()*34)|0);if(rng()<0.5)carve(x,y,l,2);else carve(x,y,2,l);}
+  // parks
+  for(let k=0;k<9;k++){const w=26+((rng()*40)|0),h=22+((rng()*36)|0),x=(rng()*(W-w))|0,y=(rng()*(H-h))|0;carve(x,y,w,h,park);}
+  // central plaza for HQ
+  const cx=W>>1,cy=H>>1;
+  for(let y=cy-36;y<=cy+36;y++)for(let x=cx-36;x<=cx+36;x++){const d=(x-cx)**2+(y-cy)**2;if(d<36*36)road[y*W+x]=1;}
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const i=y*W+x;
+    if(road[i]){base[i]=lane[i]&&((x+y)%6<3)?rgba(44,46,38):rgba(19,21,26);continue;}
+    if(park[i]){const v=(x*7+y*13)%5;base[i]=rgba(18,44+v*2,26);continue;}
+    blocked[i]=1;
+    const bx=(x/13)|0,by=(y/11)|0,hsh=((bx*73856093)^(by*19349663))>>>0,tone=28+(hsh%14);
+    const edge=(x>0&&road[i-1])||(x<W-1&&road[i+1])||(y>0&&road[i-W])||(y<H-1&&road[i+W]);
+    const seam=(x%13===0)||(y%11===0);
+    const v=edge?tone+16:seam?tone-6:tone;
+    base[i]=rgba(v,v+3,v+12);
+  }
+}
+genCity();
+const spawnPts=[];
+for(let x=0;x<W;x+=1){if(!blocked[x])spawnPts.push([x+0.5,0.5]);if(!blocked[(H-1)*W+x])spawnPts.push([x+0.5,H-0.5]);}
+for(let y=0;y<H;y+=1){if(!blocked[y*W])spawnPts.push([0.5,y+0.5]);if(!blocked[y*W+W-1])spawnPts.push([W-0.5,y+0.5]);}
+
+// ---------------------------------------------------------------- game state
+const G={scrap:700,ammo:400,wave:0,waveT:25,kills:0,alive:0,over:false,paused:false,silo:0,mult:1,cds:{air:0,icbm:0}};
+let structs=[],uidSeq=1;const byUid=new Map();
+const occ=new Int32Array(N).fill(-1);
+let sidArr=new Int16Array(N).fill(-1),dist=new Uint32Array(N);
+let fieldDirty=true,paintDirty=true,lastField=0,dragging=false;
+let pool=[],threaded=false;
+const tot=new Uint32Array(N),facTot=new Uint8Array(N),coarse=new Uint32Array(CW*CH);
+let events=[],spawnQ=[],strikes=[],tracers=[],booms=[];
+let simDirty=true,tickMs=0,banner={txt:'',t:0};
+
+function canPlace(type,x,y){
+  const d=DEFS[type];
+  if(x<0||y<0||x+d.w>W||y+d.h>H)return false;
+  let roof=0;
+  for(let yy=y;yy<y+d.h;yy++)for(let xx=x;xx<x+d.w;xx++){const i=yy*W+xx;if(occ[i]>=0)return false;roof+=blocked[i];}
+  if(type==='wall'&&roof)return false;
+  return true;
+}
+function isRoof(d,x,y){for(let yy=y;yy<y+d.h;yy++)for(let xx=x;xx<x+d.w;xx++)if(!blocked[yy*W+xx])return false;return true;}
+function addStruct(type,x,y){
+  const d=DEFS[type];
+  const s={uid:uidSeq++,type,x,y,w:d.w,h:d.h,hp:d.hp,max:d.hp,cd:0,roof:isRoof(d,x,y),dead:false,id:-1};
+  structs.push(s);byUid.set(s.uid,s);
+  for(let yy=y;yy<y+d.h;yy++)for(let xx=x;xx<x+d.w;xx++)occ[yy*W+xx]=s.uid;
+  if(type==='silo')G.silo++;
+  fieldDirty=true;paintDirty=true;return s;
+}
+function killStruct(s){
+  if(s.dead)return;s.dead=true;byUid.delete(s.uid);
+  for(let yy=s.y;yy<s.y+s.h;yy++)for(let xx=s.x;xx<s.x+s.w;xx++)if(occ[yy*W+xx]===s.uid)occ[yy*W+xx]=-1;
+  if(s.type==='silo')G.silo--;
+  if(s.type==='hq')gameOver();
+  fieldDirty=true;paintDirty=true;
+}
+const hq=addStruct('hq',(W>>1)-7,(H>>1)-7);
+
+// Flow field: Dial's algorithm (bucketed Dijkstra) from the HQ. Player structures are passable at a high cost,
+// so the horde routes around walls and only chews through them when it has to.
+function rebuildField(){
+  structs=structs.filter(s=>!s.dead);
+  sidArr=new Int16Array(N).fill(-1);
+  structs.forEach((s,i)=>{s.id=i;for(let yy=s.y;yy<s.y+s.h;yy++)for(let xx=s.x;xx<s.x+s.w;xx++)sidArr[yy*W+xx]=i;});
+  const d=new Uint32Array(N).fill(INF),B=1024,buckets=Array.from({length:B},()=>[]);
+  let pending=0;
+  for(let yy=hq.y;yy<hq.y+hq.h;yy++)for(let xx=hq.x;xx<hq.x+hq.w;xx++){const c=yy*W+xx;d[c]=0;buckets[0].push(c);pending++;}
+  const DX=[1,-1,0,0,1,1,-1,-1],DY=[0,0,1,-1,1,-1,1,-1],CS=[10,10,10,10,14,14,14,14];
+  for(let cur=0;pending>0;cur++){
+    const b=buckets[cur%B];
+    while(b.length){
+      const c=b.pop();pending--;if(d[c]!==cur)continue;
+      const cx=c%W,cy=(c/W)|0;
+      for(let k=0;k<8;k++){
+        const nx=cx+DX[k],ny=cy+DY[k];if(nx<0||ny<0||nx>=W||ny>=H)continue;
+        const nc=ny*W+nx;if(blocked[nc])continue;
+        const nd=cur+CS[k]+(sidArr[nc]>=0?400:0);
+        if(nd<d[nc]){d[nc]=nd;buckets[nd%B].push(nc);pending++;}
+      }
+    }
+  }
+  dist=d;
+  for(const p of pool)p.send({t:'field',dist,sid:sidArr});
+  fieldDirty=false;lastField=performance.now();
+}
+
+// ---------------------------------------------------------------- waves
+function queueWave(){
+  G.wave++;
+  const size=Math.round(1200*Math.pow(1.45,G.wave-1)*G.mult);
+  const fs=G.wave<=3?[G.wave-1]:[(rng()*3)|0,(rng()*3)|0];
+  const pts=2+Math.min(4,G.wave>>1);
+  for(let k=0;k<pts;k++){
+    const p=spawnPts[(rng()*spawnPts.length)|0],f=fs[k%fs.length],cnt=Math.round(size/pts);
+    spawnQ.push({x:p[0],y:p[1],f,left:cnt,rate:cnt/12});
+  }
+  const names=[...new Set(fs)].map(f=>FACTIONS[f].name).join(' + ');
+  showBanner(`Wave ${G.wave}: ${size.toLocaleString()} ${names}`);
+}
+function stress(){
+  const total=1000000,pts=8;
+  for(let k=0;k<pts;k++){const p=spawnPts[(rng()*spawnPts.length)|0];spawnQ.push({x:p[0],y:p[1],f:k%3,left:total/pts,rate:total/pts/6});}
+  showBanner('1,000,000 hostiles inbound');
+}
+function showBanner(t){banner={txt:t,t:4};}
+
+// ---------------------------------------------------------------- tick
+async function tick(){
+  if(G.paused||G.over){setTimeout(tick,100);return;}
+  const t0=performance.now();
+  if(fieldDirty&&(!dragging||t0-lastField>300))rebuildField();
+  // spawns, split evenly across threads
+  const sp=pool.map(()=>[]);
+  for(const q of spawnQ){
+    const k=Math.min(q.left,Math.ceil(q.rate*DT));q.left-=k;
+    const per=Math.floor(k/pool.length);let rem=k-per*pool.length;
+    pool.forEach((p,i)=>{const c=per+(rem-->0?1:0);if(c>0)sp[i].push([q.x,q.y,q.f,c]);});
+  }
+  spawnQ=spawnQ.filter(q=>q.left>0);
+  const ev=new Float32Array(events);events=[];
+  const ns=structs.length;
+  const res=await Promise.all(pool.map((p,i)=>p.call({t:'step',dt:DT,nw:pool.length,ev,sp:sp[i],ns})));
+  // merge density grids
+  tot.fill(0);let alive=0;
+  for(const r of res){
+    alive+=r.n;const a=r.cnt,fa=r.fac;
+    for(let i=0;i<N;i++){const v=a[i];if(v){tot[i]+=v;facTot[i]=fa[i];}}
+    for(let f=0;f<3;f++){G.kills+=r.kills[f];G.scrap+=r.kills[f]*FACTIONS[f].reward;}
+    const sd=r.sd;for(let i=0;i<sd.length;i++){if(sd[i]>0){const s=structs[i];if(s&&!s.dead){s.hp-=sd[i];if(s.hp<=0)killStruct(s);}}}
+  }
+  G.alive=alive;
+  coarse.fill(0);
+  for(let y=0;y<H;y++){const row=(y>>3)*CW,o=y*W;for(let x=0;x<W;x++){const v=tot[o+x];if(v)coarse[row+(x>>3)]+=v;}}
+  simDirty=true;
+  economy();turrets();abilities();
+  if(G.wave===0||spawnQ.length===0){G.waveT-=DT;if(G.waveT<=0){queueWave();G.waveT=35;}}
+  tickMs=tickMs*0.9+(performance.now()-t0)*0.1;
+  setTimeout(tick,Math.max(0,DT*1000-(performance.now()-t0)));
+}
+function economy(){
+  for(const s of structs){
+    if(s.dead)continue;
+    if(s.type==='ext')G.scrap+=4*DT;
+    else if(s.type==='plant'&&G.scrap>=3*DT){G.scrap-=3*DT;G.ammo+=12*DT;}
+  }
+}
+function findTarget(cx,cy,r){
+  const gx0=Math.max(0,Math.floor((cx-r)/CG)),gx1=Math.min(CW-1,Math.floor((cx+r)/CG)),gy0=Math.max(0,Math.floor((cy-r)/CG)),gy1=Math.min(CH-1,Math.floor((cy+r)/CG));
+  let best=-1,bd=r*r;
+  for(let gy=gy0;gy<=gy1;gy++)for(let gx=gx0;gx<=gx1;gx++){
+    if(!coarse[gy*CW+gx])continue;const px=gx*CG+4-cx,py=gy*CG+4-cy,d=px*px+py*py;if(d<bd){bd=d;best=gy*CW+gx;}
+  }
+  if(best<0)return null;
+  const bx=(best%CW)*CG,by=((best/CW)|0)*CG;let mx=-1,mv=0;
+  for(let y=by;y<by+CG;y++)for(let x=bx;x<bx+CG;x++){const v=tot[y*W+x];if(v>mv){mv=v;mx=y*W+x;}}
+  return mx<0?null:[mx%W+0.5,((mx/W)|0)+0.5];
+}
+function turrets(){
+  for(const s of structs){
+    if(s.dead||(s.type!=='gun'&&s.type!=='cannon'))continue;
+    const d=DEFS[s.type];s.cd-=DT;if(s.cd>0||G.ammo<d.ammo)continue;
+    const cx=s.x+s.w/2,cy=s.y+s.h/2,range=d.range*(s.roof?1.6:1),t=findTarget(cx,cy,range);
+    if(!t)continue;
+    events.push(t[0],t[1],d.rad,d.dmg);G.ammo-=d.ammo;s.cd=d.rate;
+    tracers.push({x1:cx,y1:cy,x2:t[0],y2:t[1],t:0.09,big:s.type==='cannon'});
+    if(s.type==='cannon')booms.push({x:t[0],y:t[1],r:d.rad,t:0.25,life:0.25});
+  }
+}
+function abilities(){
+  for(const k in G.cds)G.cds[k]=Math.max(0,G.cds[k]-DT);
+  for(const st of strikes){st.t-=DT;if(st.t<=0){events.push(st.x,st.y,st.a.rad,st.a.dmg);booms.push({x:st.x,y:st.y,r:st.a.rad,t:st.a===ABIL.icbm?1.6:0.6,life:st.a===ABIL.icbm?1.6:0.6});}}
+  strikes=strikes.filter(s=>s.t>0);
+}
+function gameOver(){
+  G.over=true;
+  document.getElementById('overTxt').textContent=`The HQ fell during wave ${G.wave} after ${Math.floor(G.kills).toLocaleString()} kills.`;
+  document.getElementById('over').hidden=false;
+}
+
+// ---------------------------------------------------------------- rendering
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const off=document.createElement('canvas');off.width=W;off.height=H;const octx=off.getContext('2d');
+const img=octx.createImageData(W,H),buf=new Uint32Array(img.data.buffer);
+const bg=new Uint32Array(N);
+const pal=new Uint32Array(3*16);
+FACTIONS.forEach((f,i)=>{for(let c=0;c<16;c++){const k=c===0?0:Math.min(1,0.42+c*0.075);const w=Math.max(0,(c-8)*0.04);pal[i*16+c]=rgba(f.col[0]*k+255*w,f.col[1]*k+255*w,f.col[2]*k+255*w);}});
+let cam={x:0,y:0,z:1},dpr=1;
+function resize(){dpr=window.devicePixelRatio||1;cv.width=innerWidth*dpr;cv.height=innerHeight*dpr;}
+function fit(){const z=Math.min(innerWidth/W,(innerHeight-130)/H);cam.z=z;cam.x=(innerWidth-W*z)/2;cam.y=60+((innerHeight-130)-H*z)/2;}
+addEventListener('resize',resize);resize();fit();
+function paintStructs(){
+  bg.set(base);
+  for(const s of structs){
+    if(s.dead)continue;const c=DEFS[s.type].col;
+    const edge=rgba(c[0],c[1],c[2]),fill=rgba(c[0]*0.45,c[1]*0.45,c[2]*0.45);
+    for(let yy=s.y;yy<s.y+s.h;yy++)for(let xx=s.x;xx<s.x+s.w;xx++){
+      const border=s.type==='wall'||xx===s.x||yy===s.y||xx===s.x+s.w-1||yy===s.y+s.h-1;
+      bg[yy*W+xx]=border?edge:fill;
+    }
+    if(s.type!=='wall'){const m=(s.y+(s.h>>1))*W+s.x+(s.w>>1);bg[m]=edge;}
+  }
+  paintDirty=false;simDirty=true;
+}
+let fps=60,lastFrame=performance.now(),mouse={x:0,y:0,wx:0,wy:0,in:false};
+function frame(now){
+  const fdt=Math.min(0.1,(now-lastFrame)/1000);lastFrame=now;fps=fps*0.95+(1/Math.max(fdt,1e-3))*0.05;
+  if(paintDirty)paintStructs();
+  if(simDirty){
+    buf.set(bg);
+    for(let i=0;i<N;i++){const v=tot[i];if(v)buf[i]=pal[facTot[i]*16+(v>15?15:v)];}
+    octx.putImageData(img,0,0);simDirty=false;
+  }
+  ctx.setTransform(1,0,0,1,0,0);ctx.fillStyle='#050608';ctx.fillRect(0,0,cv.width,cv.height);
+  ctx.imageSmoothingEnabled=false;
+  ctx.setTransform(cam.z*dpr,0,0,cam.z*dpr,cam.x*dpr,cam.y*dpr);
+  ctx.drawImage(off,0,0);
+  const px=1/cam.z;
+  // tracers
+  for(const t of tracers){ctx.strokeStyle=t.big?'rgba(255,170,80,.9)':'rgba(255,230,140,.75)';ctx.lineWidth=(t.big?2:1)*px;ctx.beginPath();ctx.moveTo(t.x1,t.y1);ctx.lineTo(t.x2,t.y2);ctx.stroke();t.t-=fdt;}
+  tracers=tracers.filter(t=>t.t>0);
+  for(const b of booms){const k=1-b.t/b.life;ctx.fillStyle=`rgba(255,${180-120*k|0},60,${0.55*(1-k)})`;ctx.beginPath();ctx.arc(b.x,b.y,b.r*(0.5+0.5*k),0,6.2832);ctx.fill();b.t-=fdt;}
+  booms=booms.filter(b=>b.t>0);
+  for(const s of strikes){ctx.strokeStyle='rgba(255,90,60,.9)';ctx.lineWidth=1.5*px;ctx.setLineDash([4*px,3*px]);ctx.beginPath();ctx.arc(s.x,s.y,s.a.rad,0,6.2832);ctx.stroke();ctx.setLineDash([]);}
+  // health bars
+  for(const s of structs){if(s.dead||s.type==='wall'||s.hp>=s.max)continue;const w=s.w+4;ctx.fillStyle='#000';ctx.fillRect(s.x-2,s.y-4,w,2);ctx.fillStyle=s.hp/s.max>0.4?'#5fe08a':'#ff5a3c';ctx.fillRect(s.x-2,s.y-4,w*s.hp/s.max,2);}
+  // ghost
+  if(mouse.in&&tool){
+    if(DEFS[tool]){
+      const d=DEFS[tool],gx=snap(mouse.wx,d),gy=snap(mouse.wy,d,true),okp=canPlace(tool,gx,gy)&&G.scrap>=d.cost;
+      ctx.fillStyle=okp?'rgba(95,224,138,.35)':'rgba(255,90,60,.4)';ctx.fillRect(gx,gy,d.w,d.h);
+      if(d.range){const roof=isRoofSafe(d,gx,gy);ctx.strokeStyle=roof?'rgba(255,211,90,.8)':'rgba(255,255,255,.35)';ctx.lineWidth=px;ctx.beginPath();ctx.arc(gx+d.w/2,gy+d.h/2,d.range*(roof?1.6:1),0,6.2832);ctx.stroke();}
+    }else if(ABIL[tool]){ctx.strokeStyle='rgba(255,90,60,.7)';ctx.lineWidth=px;ctx.beginPath();ctx.arc(mouse.wx,mouse.wy,ABIL[tool].rad,0,6.2832);ctx.stroke();}
+  }
+  if(banner.t>0){banner.t-=fdt;bannerEl.textContent=banner.txt;bannerEl.style.opacity=Math.min(1,banner.t);}else bannerEl.textContent='';
+  requestAnimationFrame(frame);
+}
+const bannerEl=document.getElementById('banner');
+function isRoofSafe(d,x,y){if(x<0||y<0||x+d.w>W||y+d.h>H)return false;return isRoof(d,x,y);}
+function snap(v,d,isY){const g=d.w===3?3:1;return Math.floor((v-(g===3?0:d.w/2))/g)*g;}
+
+// ---------------------------------------------------------------- input
+let tool=null,pan=null;
+const keys={};
+function toWorld(sx,sy){return [(sx-cam.x)/cam.z,(sy-cam.y)/cam.z];}
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+cv.addEventListener('pointermove',e=>{
+  mouse.x=e.clientX;mouse.y=e.clientY;mouse.in=true;[mouse.wx,mouse.wy]=toWorld(e.clientX,e.clientY);
+  if(pan){cam.x=pan.cx+(e.clientX-pan.x);cam.y=pan.cy+(e.clientY-pan.y);}
+  else if(dragging&&tool==='wall')placeAt();
+});
+cv.addEventListener('pointerleave',()=>{mouse.in=false;});
+cv.addEventListener('pointerdown',e=>{
+  cv.setPointerCapture(e.pointerId);
+  [mouse.wx,mouse.wy]=toWorld(e.clientX,e.clientY);
+  if(e.button!==0||!tool){pan={x:e.clientX,y:e.clientY,cx:cam.x,cy:cam.y};return;}
+  if(tool==='wall'){dragging=true;placeAt();}
+  else if(DEFS[tool])placeAt();
+  else if(tool==='sell'){const u=occ[(mouse.wy|0)*W+(mouse.wx|0)],s=byUid.get(u);if(s&&s.type!=='hq'){G.scrap+=DEFS[s.type].cost*0.5;killStruct(s);}}
+  else if(ABIL[tool])useAbility(tool,mouse.wx,mouse.wy);
+});
+addEventListener('pointerup',()=>{pan=null;dragging=false;});
+cv.addEventListener('wheel',e=>{
+  e.preventDefault();const f=Math.exp(-e.deltaY*0.0015),[wx,wy]=toWorld(e.clientX,e.clientY);
+  cam.z=Math.min(24,Math.max(0.3,cam.z*f));cam.x=e.clientX-wx*cam.z;cam.y=e.clientY-wy*cam.z;
+},{passive:false});
+function placeAt(){
+  const d=DEFS[tool],gx=snap(mouse.wx,d),gy=snap(mouse.wy,d,true);
+  if(G.scrap<d.cost||!canPlace(tool,gx,gy))return;
+  G.scrap-=d.cost;addStruct(tool,gx,gy);
+}
+function useAbility(k,x,y){
+  const a=ABIL[k];
+  if(a.req&&!G[a.req])return;
+  if(G.cds[k]>0||G.scrap<a.cost||G.ammo<a.ammo)return;
+  G.scrap-=a.cost;G.ammo-=a.ammo;G.cds[k]=a.cd;strikes.push({x,y,a,t:a.delay});
+  if(k==='icbm')showBanner('ICBM launched');
+}
+addEventListener('keydown',e=>{
+  if(e.target.tagName==='SELECT')return;
+  const k=e.key.toLowerCase();keys[k]=true;
+  if(k==='escape')setTool(null);
+  else if(k===' '){e.preventDefault();togglePause();}
+  else if(k==='x')setTool('sell');
+  else{for(const t in DEFS)if(DEFS[t].key===k)setTool(t);for(const t in ABIL)if(ABIL[t].key===k)setTool(t);}
+});
+addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false;});
+setInterval(()=>{const s=8;if(keys.w||keys.arrowup)cam.y+=s;if(keys.s||keys.arrowdown)cam.y-=s;if(keys.a||keys.arrowleft)cam.x+=s;if(keys.d||keys.arrowright)cam.x-=s;},16);
+
+// ---------------------------------------------------------------- HUD
+const bar=document.getElementById('bar'),tipEl=document.getElementById('tip'),btns={};
+function mkBtn(id,label,key,sub){const b=document.createElement('button');b.type='button';b.className='tool';b.id='t_'+id;b.innerHTML=`<span>${label}</span><kbd>${key.toUpperCase()}</kbd><small>${sub}</small>`;b.onclick=()=>setTool(tool===id?null:id);bar.appendChild(b);btns[id]=b;}
+for(const t in DEFS)if(DEFS[t].key)mkBtn(t,DEFS[t].name,DEFS[t].key,DEFS[t].cost+' scrap');
+bar.appendChild(Object.assign(document.createElement('div'),{className:'sep'}));
+for(const t in ABIL)mkBtn(t,ABIL[t].name,ABIL[t].key,ABIL[t].cost+' scrap'+(ABIL[t].ammo?' · '+ABIL[t].ammo+' ammo':''));
+bar.appendChild(Object.assign(document.createElement('div'),{className:'sep'}));
+mkBtn('sell','Sell','x','50% refund');
+const BASE_TIP='Right-drag or WASD to pan, scroll to zoom. Pick a building below, then click the map. Esc cancels.';
+function setTool(t){tool=t;for(const k in btns)btns[k].classList.toggle('on',k===t);const d=DEFS[t]||ABIL[t];tipEl.textContent=d?d.tip:t==='sell'?'Click a structure to remove it.':BASE_TIP;}
+setTool(null);
+function togglePause(){G.paused=!G.paused;document.getElementById('pause').textContent=G.paused?'Resume':'Pause';}
+document.getElementById('pause').onclick=togglePause;
+document.getElementById('stress').onclick=stress;
+document.getElementById('restart').onclick=()=>location.reload();
+document.getElementById('mult').onchange=e=>{G.mult=+e.target.value;e.target.blur();};
+const $=id=>document.getElementById(id);
+const fmt=v=>v>=1e6?(v/1e6).toFixed(2)+'M':v>=1e4?(v/1e3).toFixed(1)+'k':Math.floor(v).toLocaleString();
+setInterval(()=>{
+  $('sScrap').textContent=fmt(G.scrap);$('sAmmo').textContent=fmt(G.ammo);
+  $('sHQ').textContent=Math.max(0,Math.ceil(hq.hp/hq.max*100))+'%';
+  $('sWave').textContent=G.wave+' · '+Math.ceil(G.waveT)+'s';
+  $('sUnits').textContent=fmt(G.alive);$('sKills').textContent=fmt(G.kills);
+  $('sThreads').textContent=threaded?pool.length:'1 (no workers)';$('sTick').textContent=tickMs.toFixed(1);$('sFps').textContent=Math.round(fps);
+  for(const t in DEFS)if(btns[t])btns[t].classList.toggle('no',G.scrap<DEFS[t].cost);
+  for(const t in ABIL){const a=ABIL[t],b=btns[t],cd=G.cds[t];b.classList.toggle('no',cd>0||G.scrap<a.cost||G.ammo<a.ammo||(a.req&&!G[a.req]));b.querySelector('small').textContent=a.req&&!G[a.req]?'Build a silo':cd>0?`Ready in ${Math.ceil(cd)}s`:a.cost+' scrap'+(a.ammo?' · '+a.ammo+' ammo':'');}
+},200);
+
+// ---------------------------------------------------------------- boot
+(async()=>{
+  const threads=Math.max(1,Math.min(16,(navigator.hardwareConcurrency||4)-1));
+  const r=await makePool(threads,{t:'init',W,H,fac:FACTIONS.map(f=>({spd:f.spd,hp:f.hp,atk:f.atk,jit:f.jit})),seed:12345});
+  pool=r.pool;threaded=r.threaded;
+  // starter defences so the first wave has something to hit
+  addStruct('ext',(W>>1)-22,(H>>1)-4);addStruct('plant',(W>>1)+16,(H>>1)-4);
+  addStruct('gun',(W>>1)-3,(H>>1)-16);addStruct('gun',(W>>1)-3,(H>>1)+12);
+  rebuildField();
+  requestAnimationFrame(frame);
+  tick();
+})();
+// ---------------------------------------------------------------- auto-update
+// When run through Play.bat, the local launcher pulls new commits from GitHub and serves the commit id at /__version.
+// The page checks it and reloads into the new build (straight away before the first wave, otherwise on your click).
+(()=>{
+  if(!location.protocol.startsWith('http'))return;
+  let cur=null;
+  const el=document.createElement('button');el.type='button';el.id='update';el.hidden=true;
+  el.style.cssText='position:fixed;right:max(16px,env(safe-area-inset-right,0px));top:72px;border-color:var(--ok);color:var(--ok)';
+  el.textContent='Update downloaded: reload';el.onclick=()=>location.reload();document.body.appendChild(el);
+  async function check(){
+    try{
+      const r=await fetch('/__version?'+Date.now(),{cache:'no-store'});if(!r.ok)return;
+      const v=(await r.text()).trim();if(!v)return;
+      if(cur===null)cur=v;else if(v!==cur){if(G.wave===0||G.over)location.reload();else el.hidden=false;}
+    }catch(e){}
+  }
+  check();setInterval(check,20000);
+})();
+window.__G=G;
+</script>
+</body>
+</html>
