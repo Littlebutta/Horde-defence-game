@@ -40,6 +40,8 @@ pub enum Cmd {
     Order(u32, Vec2),
     Ability(A, Vec2, Vec2),
     Research(R),
+    /// test horde of this many hostiles
+    Stress(u32),
 }
 
 const ALL_S: [S; 10] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq];
@@ -102,6 +104,10 @@ impl Wr {
                 self.u32(6);
                 self.u32(RESEARCH.iter().position(|x| *x == r).unwrap() as u32);
             }
+            Cmd::Stress(n) => {
+                self.u32(7);
+                self.u32(n);
+            }
         }
     }
 }
@@ -127,6 +133,7 @@ impl Rd<'_> {
             4 => Cmd::Order(self.u32()?, self.v2()?),
             5 => Cmd::Ability(self.a()?, self.v2()?, self.v2()?),
             6 => Cmd::Research(*RESEARCH.get(self.u32()? as usize)?),
+            7 => Cmd::Stress(self.u32()?.min(10_000_000)),
             _ => return None,
         })
     }
@@ -190,6 +197,10 @@ pub fn apply(g: &mut Game, c: Cmd) -> Option<&'static str> {
         Cmd::Ability(a, f, t) => (!g.use_ability(a, f, t)).then_some(BAD_TARGET),
         Cmd::Research(r) => {
             g.start_research(r);
+            None
+        }
+        Cmd::Stress(n) => {
+            g.stress_n(n as f32);
             None
         }
     }

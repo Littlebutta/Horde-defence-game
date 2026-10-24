@@ -111,6 +111,8 @@ struct Orbit {
     yaw: f32,
     pitch: f32,
 }
+/// Hostiles the "Spawn 1M" stress-test button (and F9) drops in.
+const STRESS_N: u32 = 1_000_000;
 const FOVY: f32 = 0.8;
 const TOP_PITCH: f32 = 1.5;
 const MIN_PITCH: f32 = 0.3;
@@ -1792,6 +1794,14 @@ impl App {
             self.leave_game();
             return;
         }
+        // stress test: drops a million more hostiles each press (F9 does the same)
+        let sr = Rect::new(sw - 530.0, 6.0, 84.0, 28.0);
+        if !g.over && self.button(sr, "Spawn 1M", true, false) {
+            self.act(g, Cmd::Stress(STRESS_N));
+        }
+        if self.hot(sr) {
+            self.tip = Some("Testing: one million more hostiles pour in from eight spots on the map (F9).".into());
+        }
         text(
             &self.fonts.mono,
             &format!("{:.0} fps · sim {:.1} ms", get_fps(), g.sim_ms),
@@ -2213,8 +2223,8 @@ impl App {
             self.selected = None;
             self.press = None;
         }
-        if is_key_pressed(KeyCode::F9) && self.sess.is_none() && self.placing.is_none() {
-            g.stress();
+        if is_key_pressed(KeyCode::F9) && self.placing.is_none() {
+            self.act(g, Cmd::Stress(STRESS_N));
         }
         // camera: WASD pans along the view, Z/C turn, PageUp/PageDown tilt
         let pan = 500.0 / self.cam.scale() * dt;

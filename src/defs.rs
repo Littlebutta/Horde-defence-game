@@ -102,7 +102,7 @@ pub fn def(s: S) -> &'static Def {
         top: rgb(198, 154, 116),
         side: rgb(134, 96, 63),
         zone: true,
-        tip: "Turns 3 scrap into 12 ammo every second. Base zone only.",
+        tip: "Turns 3 scrap into 6 ammo every second. Base zone only.",
         ..BASE
     };
     static SILO: Def = Def {
@@ -260,7 +260,7 @@ pub fn rdef(r: R) -> &'static RDef {
     static CARPET: RDef = RDef { name: "Carpet bombing", tip: "Airstrikes drop 12 bombs; drag on the map to aim the bomb run", cost: 900.0, civs: 200 };
     static NUKE: RDef = RDef { name: "Nuclear warhead", tip: "Bigger ICBM blast that leaves radiation you can't build or send troops into for 90 s", cost: 2500.0, civs: 450 };
     static ARMOUR: RDef = RDef { name: "Reinforced armour", tip: "Walls and turrets get 75% more health", cost: 700.0, civs: 150 };
-    static PRESSES: RDef = RDef { name: "Shell presses", tip: "Ammo plants make 20 ammo a second instead of 12 from the same scrap", cost: 800.0, civs: 180 };
+    static PRESSES: RDef = RDef { name: "Shell presses", tip: "Ammo plants make 10 ammo a second instead of 6 from the same scrap", cost: 800.0, civs: 180 };
     static BARRELS: RDef = RDef { name: "Long barrels", tip: "Turrets reach 25% further", cost: 1000.0, civs: 220 };
     match r {
         R::Rescue => &RESCUE,
@@ -292,7 +292,7 @@ pub struct Faction {
 }
 pub const FACTIONS: [Faction; 3] = [
     Faction { name: "Zombies", stats: FactionStats { mode: Behaviour::Zombie, spd: 9.0, hp: 12.0, atk: 4.0, jit: 8.0 }, sight: 600, col: [92, 220, 110], deep: [20, 120, 40], reward: 0.04, blurb: "Small outbreaks that spread by eating civilians. Attack anything in sight, then rush your HQ." },
-    Faction { name: "Alien bugs", stats: FactionStats { mode: Behaviour::Alien, spd: 20.0, hp: 6.0, atk: 3.0, jit: 14.0 }, sight: 700, col: [222, 120, 255], deep: [120, 30, 170], reward: 0.03, blurb: "Small drops all over the city. Straight for the HQ, killing anyone in the way." },
+    Faction { name: "Alien bugs", stats: FactionStats { mode: Behaviour::Alien, spd: 24.0, hp: 6.0, atk: 3.0, jit: 14.0 }, sight: 700, col: [222, 120, 255], deep: [120, 30, 170], reward: 0.03, blurb: "Small drops all over the city. Straight for the HQ, killing anyone in the way." },
     Faction { name: "Orcs", stats: FactionStats { mode: Behaviour::Orc, spd: 8.0, hp: 50.0, atk: 14.0, jit: 5.0 }, sight: 900, col: [255, 140, 50], deep: [170, 50, 0], reward: 0.2, blurb: "A few portals pour out huge waves that destroy everything they see." },
 ];
 
