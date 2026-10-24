@@ -28,6 +28,12 @@ pub struct Structure {
     pub pending: bool,
     pub last_fire: f32,
     pub aim: f32,
+    /// artillery: where it's firing; railgun: the spot it's charging at
+    pub target: Option<Vec2>,
+    /// railgun: seconds of charge left (0 = not charging)
+    pub charge: f32,
+    /// last time this structure raised a sound cue
+    pub snd: f32,
 }
 impl Structure {
     pub fn center(&self) -> Vec2 {
@@ -88,6 +94,8 @@ pub struct Squad {
     pub gjob: u64,
     pub gt: f32,
     pub found: u32,
+    /// the rescue station that sent it (-1: the Rescue squad ability)
+    pub from: i32,
 }
 
 pub const C_ROAM: u8 = 0;
@@ -156,6 +164,9 @@ pub enum Strike {
     },
 }
 pub struct Gunship {
+    /// heli pad that owns it (None: the Gunship ability, which flies from the HQ)
+    pub pad: Option<usize>,
+    pub home: Vec2,
     pub center: Vec2,
     pub p: Vec2,
     pub t: f32,
@@ -169,6 +180,13 @@ pub enum HeliKind {
 }
 pub struct Heli {
     pub kind: HeliKind,
+    pub from: Vec2,
+    pub to: Vec2,
+    pub t: f32,
+    pub dur: f32,
+}
+/// An artillery shell in the air.
+pub struct Shell {
     pub from: Vec2,
     pub to: Vec2,
     pub t: f32,
@@ -284,6 +302,9 @@ pub struct Game {
     pub civs: Vec<Civ>,
     pub strikes: Vec<Strike>,
     pub gunships: Vec<Gunship>,
+    pub shells: Vec<Shell>,
+    /// coarse cells inside a helium tower's field (the horde moves slowly there)
+    pub slow: Vec<u8>,
     pub helis: Vec<Heli>,
     pub tracers: Vec<Tracer>,
     pub booms: Vec<Boom>,
@@ -385,6 +406,8 @@ impl Game {
             civs: Vec::new(),
             strikes: Vec::new(),
             gunships: Vec::new(),
+            shells: Vec::new(),
+            slow: vec![0; CW * CH],
             helis: Vec::new(),
             tracers: Vec::new(),
             booms: Vec::new(),
@@ -810,6 +833,9 @@ impl Game {
             pending: false,
             last_fire: -100.0,
             aim: -1.2,
+            target: None,
+            charge: 0.0,
+            snd: -100.0,
         };
         if roof < 0 {
             for yy in y..y + d.h {
@@ -876,7 +902,7 @@ impl Game {
     pub fn place_roof(&mut self, t: S, b: usize, p: Vec2) -> bool {
         let d = def(t);
         let cost = self.cost_at(t, p);
-        if !d.turret || self.scrap < cost || !self.can_place_roof(b, p) {
+        if !d.turret || d.ground || self.scrap < cost || !self.can_place_roof(b, p) {
             return false;
         }
         self.scrap -= cost;
@@ -887,6 +913,17 @@ impl Game {
             b as i32,
         );
         true
+    }
+    /// The structure (not the HQ or a wall) under a point.
+    pub fn struct_at(&self, p: Vec2) -> Option<usize> {
+        self.structs.iter().enumerate().rev().find(|(_, s)| {
+            !s.dead
+                && !matches!(s.t, S::Hq | S::Wall)
+                && p.x >= s.x as f32
+                && p.y >= s.y as f32
+                && p.x < (s.x + s.w) as f32
+                && p.y < (s.y + s.h) as f32
+        }).map(|(i, _)| i)
     }
     /// Sells the structure under a point for half its base price.
     pub fn sell_at(&mut self, p: Vec2) -> bool {
@@ -1081,7 +1118,7 @@ impl Game {
         }
         None
     }
-    fn queue(&mut self, at: (f32, f32), count: f32, secs: f32) {
+    pub fn queue(&mut self, at: (f32, f32), count: f32, secs: f32) {
         self.queue_ex(at, count, secs, 0, 0.0);
     }
     fn queue_ex(&mut self, at: (f32, f32), count: f32, secs: f32, fl: u8, aux: f32) {
@@ -1264,6 +1301,12 @@ impl Game {
         for b in &self.world.buildings {
             mix(b.hp.to_bits());
         }
+        for sh in &self.shells {
+            mix(sh.to.x.to_bits() ^ sh.to.y.to_bits().rotate_left(16));
+        }
+        for g in &self.gunships {
+            mix(g.p.x.to_bits() ^ g.p.y.to_bits().rotate_left(16));
+        }
         mix(self.scrap.to_bits());
         mix(self.ammo.to_bits());
         mix(self.score.to_bits());
@@ -1354,6 +1397,7 @@ impl Game {
             low: &self.low,
             lock: &self.lock,
             rev: &revs,
+            slow: &self.slow,
         });
         drop(revs);
         lap(&mut self.prof[2]);
@@ -1389,6 +1433,7 @@ impl Game {
         self.economy();
         lap(&mut self.prof[7]);
         self.turrets();
+        self.towers();
         lap(&mut self.prof[8]);
         self.abilities();
         lap(&mut self.prof[9]);
@@ -1691,7 +1736,7 @@ impl Game {
         for i in 0..self.structs.len() {
             let (t, center, roof) = {
                 let s = &self.structs[i];
-                if s.dead || s.pending || !def(s.t).turret {
+                if s.dead || s.pending || !matches!(s.t, S::Gun | S::Cannon) {
                     continue;
                 }
                 (s.t, s.center(), s.roof)
@@ -1729,6 +1774,296 @@ impl Game {
                 }
             }
         }
+    }
+
+    // ----------------------------------------------------------------------------- special towers
+
+    /// The densest patch of the horde within `r` of `c` (coarse cell centre) and how many are there.
+    pub fn find_cluster(&self, c: Vec2, r: f32) -> Option<(Vec2, u32)> {
+        let gx0 = ((c.x - r) / CG as f32).floor().max(0.0) as usize;
+        let gx1 = (((c.x + r) / CG as f32).floor().max(0.0) as usize).min(CW - 1);
+        let gy0 = ((c.y - r) / CG as f32).floor().max(0.0) as usize;
+        let gy1 = (((c.y + r) / CG as f32).floor().max(0.0) as usize).min(CH - 1);
+        let mut best = None;
+        let mut bn = 0;
+        for gy in gy0..=gy1 {
+            for gx in gx0..=gx1 {
+                let n = self.swarm.coarse_at(gy * CW + gx);
+                if n <= bn {
+                    continue;
+                }
+                let p = vec2((gx * CG) as f32 + 4.0, (gy * CG) as f32 + 4.0);
+                if p.distance(c) <= r {
+                    bn = n;
+                    best = Some(p);
+                }
+            }
+        }
+        best.map(|p| (p, bn))
+    }
+
+    /// Points an artillery piece at a spot, or sends a heli pad's gunship there.
+    pub fn aim(&mut self, i: usize, p: Vec2) -> bool {
+        if i >= self.structs.len() || self.structs[i].dead || self.structs[i].pending {
+            return false;
+        }
+        let p = p.clamp(vec2(1.0, 1.0), vec2(W as f32 - 2.0, H as f32 - 2.0));
+        match self.structs[i].t {
+            S::Artillery => {
+                self.structs[i].target = Some(p);
+                true
+            }
+            S::Helipad => {
+                if let Some(g) = self.gunships.iter_mut().find(|g| g.pad == Some(i) && g.phase < 2) {
+                    g.center = p;
+                    g.phase = 0;
+                    return true;
+                }
+                if self.gunships.iter().any(|g| g.pad == Some(i)) || self.structs[i].cd > 0.0 {
+                    self.show("The gunship is rearming", 2.0);
+                    return true;
+                }
+                let home = self.structs[i].center();
+                self.gunships.push(Gunship {
+                    pad: Some(i),
+                    home,
+                    center: p,
+                    p: home,
+                    t: HELIPAD_FLIGHT,
+                    ang: 0.0,
+                    cd: 0.0,
+                    phase: 0,
+                });
+                true
+            }
+            _ => false,
+        }
+    }
+    pub fn cease(&mut self, i: usize) {
+        if let Some(s) = self.structs.get_mut(i) {
+            if s.t == S::Artillery {
+                s.target = None;
+            }
+        }
+    }
+    /// The gunship a heli pad has out, if any.
+    pub fn pad_gunship(&self, i: usize) -> Option<&Gunship> {
+        self.gunships.iter().find(|g| g.pad == Some(i))
+    }
+
+    /// Flame bunkers, railguns, helium towers, artillery, heli pads and rescue stations.
+    fn towers(&mut self) {
+        self.slow.iter_mut().for_each(|v| *v = 0);
+        for i in 0..self.structs.len() {
+            let (t, c, roof) = {
+                let s = &self.structs[i];
+                if s.dead || s.pending {
+                    continue;
+                }
+                (s.t, s.center(), s.roof)
+            };
+            let d = def(t);
+            match t {
+                S::Flame => {
+                    self.structs[i].cd = (self.structs[i].cd - DT).max(0.0);
+                    if self.structs[i].cd > 0.0 || self.ammo < d.ammo {
+                        continue;
+                    }
+                    let range = self.turret_range(t, false);
+                    let Some(tg) = self.find_target(c, range) else { continue };
+                    let dir = (tg - c).normalize_or_zero();
+                    let src = self.rev_src(RevKey::Struct(i));
+                    // a cone of fire: puffs widen with distance
+                    for k in 1..=4 {
+                        let f = k as f32 / 4.0;
+                        let p = c + dir * (3.0 + (range - 3.0) * f);
+                        let r = d.rad * (0.6 + f * 0.9);
+                        self.swarm.add_damage(p.x, p.y, r, d.dmg, src);
+                        self.damage_hives(p, r, 1.5);
+                        self.booms.push(Boom { p, r, t: 0.3, life: 0.3, kind: 3 });
+                    }
+                    self.ammo -= d.ammo;
+                    let s = &mut self.structs[i];
+                    s.cd = d.rate;
+                    s.last_fire = self.time;
+                    s.aim = libm::atan2f(dir.y, dir.x);
+                    if self.time - s.snd >= 0.5 {
+                        s.snd = self.time;
+                        self.sfx.push((Sfx::Flame, c));
+                    }
+                }
+                S::Rail => {
+                    let range = self.turret_range(t, roof >= 0);
+                    if self.structs[i].charge > 0.0 {
+                        self.structs[i].charge -= DT;
+                        if self.structs[i].charge > 0.0 {
+                            continue;
+                        }
+                        self.structs[i].charge = 0.0;
+                        let Some(tg) = self.structs[i].target.take() else { continue };
+                        let dir = (tg - c).normalize_or_zero();
+                        let end = c + dir * range;
+                        // too far and too fast for zombies to tell where it came from: no revenge
+                        let src = 0;
+                        let steps = (range / 1.2) as usize;
+                        for k in 3..=steps {
+                            let p = c + dir * (k as f32 * 1.2);
+                            if p.x < 1.0 || p.y < 1.0 || p.x >= W as f32 - 1.0 || p.y >= H as f32 - 1.0 {
+                                break;
+                            }
+                            self.swarm.add_damage(p.x, p.y, d.rad, d.dmg, src);
+                        }
+                        for k in 1..=8 {
+                            self.damage_hives(c + dir * range * k as f32 / 8.0, d.rad, 40.0);
+                        }
+                        let base = if roof >= 0 { self.world.buildings[roof as usize].h } else { 0.0 };
+                        self.tracers.push(Tracer { a: c, az: base + d.ht + 1.5, b: end, t: 0.4, kind: 6 });
+                        self.booms.push(Boom { p: c + dir * 4.0, r: 3.0, t: 0.25, life: 0.25, kind: 4 });
+                        self.structs[i].last_fire = self.time;
+                        self.sfx.push((Sfx::Railgun, c));
+                        continue;
+                    }
+                    self.structs[i].cd = (self.structs[i].cd - DT).max(0.0);
+                    if self.structs[i].cd > 0.0 || self.ammo < d.ammo {
+                        continue;
+                    }
+                    // wait for a group worth the slug
+                    if let Some((tg, n)) = self.find_cluster(c, range) {
+                        if n >= 4 {
+                            self.ammo -= d.ammo;
+                            let s = &mut self.structs[i];
+                            s.target = Some(tg);
+                            s.charge = RAIL_CHARGE;
+                            s.cd = d.rate;
+                            s.aim = libm::atan2f(tg.y - c.y, tg.x - c.x);
+                        }
+                    }
+                }
+                S::Helium => {
+                    let r = self.turret_range(t, roof >= 0);
+                    let rr = r / CG as f32;
+                    let (cx, cy) = (c.x / CG as f32, c.y / CG as f32);
+                    let (x0, x1) = ((cx - rr).floor().max(0.0) as usize, ((cx + rr).ceil() as usize).min(CW - 1));
+                    let (y0, y1) = ((cy - rr).floor().max(0.0) as usize, ((cy + rr).ceil() as usize).min(CH - 1));
+                    for gy in y0..=y1 {
+                        for gx in x0..=x1 {
+                            if vec2(gx as f32 + 0.5 - cx, gy as f32 + 0.5 - cy).length() <= rr {
+                                self.slow[gy * CW + gx] = 1;
+                            }
+                        }
+                    }
+                }
+                S::Artillery => {
+                    self.structs[i].cd = (self.structs[i].cd - DT).max(0.0);
+                    let Some(to) = self.structs[i].target else { continue };
+                    if self.structs[i].cd > 0.0 || self.ammo < d.ammo {
+                        continue;
+                    }
+                    let dist = to.distance(c);
+                    let spread = 3.0 + dist * 0.012;
+                    let a = self.rng.f() * std::f32::consts::TAU;
+                    let r = self.rng.f().sqrt() * spread;
+                    let hit = (to + vec2(libm::cosf(a), libm::sinf(a)) * r)
+                        .clamp(vec2(1.0, 1.0), vec2(W as f32 - 2.0, H as f32 - 2.0));
+                    self.shells.push(Shell { from: c, to: hit, t: 0.0, dur: 1.5 + dist / 260.0 });
+                    self.ammo -= d.ammo;
+                    let s = &mut self.structs[i];
+                    s.cd = d.rate;
+                    s.last_fire = self.time;
+                    s.aim = libm::atan2f(to.y - c.y, to.x - c.x);
+                    self.booms.push(Boom { p: c + vec2(libm::cosf(s.aim), libm::sinf(s.aim)) * 6.0, r: 3.0, t: 0.3, life: 0.3, kind: 0 });
+                    self.sfx.push((Sfx::ArtilleryShot, c));
+                }
+                S::Helipad => {
+                    if self.pad_gunship(i).is_none() {
+                        self.structs[i].cd = (self.structs[i].cd - DT).max(0.0);
+                    }
+                }
+                S::Rescue => {
+                    self.structs[i].cd = (self.structs[i].cd - DT).max(0.0);
+                    if self.structs[i].cd > 0.0 {
+                        continue;
+                    }
+                    if self.squads.iter().any(|q| !q.done && q.from == i as i32) {
+                        self.structs[i].cd = 2.0;
+                        continue;
+                    }
+                    self.structs[i].cd = match self.rescue_spot(c) {
+                        Some(at) => {
+                            let s = &self.structs[i];
+                            let base = vec2(c.x, (s.y + s.h + 1) as f32);
+                            let n = if self.research.rescue { 12 } else { 8 };
+                            if self.send_squad_from(base, at, n, i as i32) {
+                                RESCUE_EVERY
+                            } else {
+                                5.0
+                            }
+                        }
+                        None => 5.0,
+                    };
+                }
+                _ => {}
+            }
+        }
+        // shells in the air
+        let mut landed = Vec::new();
+        for sh in &mut self.shells {
+            sh.t += DT;
+            if sh.t >= sh.dur {
+                landed.push(sh.to);
+            }
+        }
+        self.shells.retain(|s| s.t < s.dur);
+        let d = def(S::Artillery);
+        for p in landed {
+            self.blast(p, d.rad, d.dmg, d.bdmg, 0, 60.0);
+            self.booms.push(Boom { p, r: d.rad, t: 0.7, life: 0.7, kind: 0 });
+            self.sfx.push((Sfx::ArtilleryHit, p));
+        }
+    }
+
+    /// Where a rescue station should send its next team: the biggest group of wandering civilians
+    /// in reach that the horde isn't standing on and no other team is already heading for.
+    fn rescue_spot(&self, from: Vec2) -> Option<Vec2> {
+        const B: usize = 32;
+        let bw = W / B;
+        let mut n = vec![0u32; bw * (H / B)];
+        let mut sum = vec![Vec2::ZERO; bw * (H / B)];
+        for cv in &self.civs {
+            if cv.st != C_ROAM || cv.p.distance(from) > RESCUE_REACH {
+                continue;
+            }
+            let k = (cv.p.y as usize / B) * bw + cv.p.x as usize / B;
+            n[k] += 1;
+            sum[k] += cv.p;
+        }
+        let mut best = None;
+        let mut bn = 2;
+        for k in 0..n.len() {
+            if n[k] <= bn {
+                continue;
+            }
+            let at = sum[k] / n[k] as f32;
+            if self.world.irradiated_at(at)
+                || self.hive_blocks(at)
+                || self.squads.iter().any(|q| !q.done && q.target.distance(at) < 50.0)
+            {
+                continue;
+            }
+            let (gx, gy) = ((k % bw) * (B / CG), (k / bw) * (B / CG));
+            let mut danger = 0;
+            for y in gy.saturating_sub(1)..(gy + B / CG + 1).min(CH) {
+                for x in gx.saturating_sub(1)..(gx + B / CG + 1).min(CW) {
+                    danger += self.swarm.coarse_at(y * CW + x);
+                }
+            }
+            if danger > 3 {
+                continue;
+            }
+            bn = n[k];
+            best = Some(at);
+        }
+        best
     }
 
     // ----------------------------------------------------------------------------- abilities
@@ -1859,6 +2194,8 @@ impl Game {
             }
             A::Gunship => {
                 self.gunships.push(Gunship {
+                    pad: None,
+                    home: self.world.hq,
                     center: to,
                     p: self.world.hq,
                     t: 20.0,
@@ -2017,13 +2354,18 @@ impl Game {
                     }
                 }
                 _ => {
-                    let d = self.world.hq - g.p;
+                    let d = g.home - g.p;
                     if d.length() < 3.0 {
                         g.phase = 3;
                     } else {
                         g.p += d.normalize() * (70.0 * DT).min(d.length());
                     }
                 }
+            }
+        }
+        for g in &ships {
+            if let (3, Some(p)) = (g.phase, g.pad) {
+                self.structs[p].cd = HELIPAD_COOLDOWN;
             }
         }
         ships.retain(|g| g.phase < 3);
@@ -2477,12 +2819,16 @@ impl Game {
     }
 
     pub fn send_squad(&mut self, at: Vec2) -> bool {
-        let Some(tc) = self.nearest_walkable(at, 20) else {
-            return false;
-        };
         let n = if self.research.rescue { 18 } else { 10 };
         let hq = &self.structs[self.hq_idx];
         let base = vec2(hq.center().x, (hq.y + hq.h + 2) as f32);
+        self.send_squad_from(base, at, n, -1)
+    }
+    /// Sends `n` rescue troops from `base` (the HQ or a rescue station) to civilians near `at`.
+    fn send_squad_from(&mut self, base: Vec2, at: Vec2, n: usize, from: i32) -> bool {
+        let Some(tc) = self.nearest_walkable(at, 20) else {
+            return false;
+        };
         let mut m = Vec::new();
         for _ in 0..n {
             m.push(Member {
@@ -2508,6 +2854,7 @@ impl Game {
             gjob: 0,
             gt: 0.0,
             found: 0,
+            from,
         });
         true
     }
@@ -2665,6 +3012,10 @@ impl Game {
                         q.state = QState::Return;
                         q.gather = None;
                         let f = q.found;
+                        // rescue stations work quietly
+                        if q.from >= 0 {
+                            continue;
+                        }
                         self.banner = (
                             if f > 0 {
                                 format!(
@@ -3009,6 +3360,25 @@ mod tests {
             }
             assert_eq!(a.checksum(), b.checksum(), "faction {}", fac);
             assert!(a.hostiles() > 0);
+        }
+    }
+    /// The special towers stay in lockstep too, whatever the thread count.
+    #[test]
+    fn towers_deterministic() {
+        for fac in 0..3 {
+            let mk = || Game::new(crate::citygen::generate(11), fac, 1.0, 7);
+            let run = || {
+                let mut g = mk();
+                crate::selftest::towers(&mut g);
+                for _ in 0..200 {
+                    g.tick();
+                }
+                (g.checksum(), g.kills)
+            };
+            let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(run);
+            let many = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(run);
+            assert_eq!(one, many, "faction {}", fac);
+            assert!(one.1 > 0);
         }
     }
 }

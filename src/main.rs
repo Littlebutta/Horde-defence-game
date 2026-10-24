@@ -135,6 +135,9 @@ async fn run(steam: Option<net::Steam>) {
                 if std::env::var("PH_GALLERY").is_ok() {
                     selftest::gallery(g);
                 }
+                if std::env::var("PH_TOWERS").is_ok() {
+                    selftest::towers(g);
+                }
                 let mut hq = g.world.hq;
                 // PH_HIVE=1: look at the first alien hive instead
                 if let (true, Some(h)) = (std::env::var("PH_HIVE").is_ok(), g.hives.iter().find(|h| !h.dead)) {

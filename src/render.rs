@@ -1144,6 +1144,8 @@ pub struct ViewInfo {
     pub radius: f32,
     pub scale: f32,
     pub selected: Option<usize>,
+    /// a selected structure (artillery or heli pad being aimed)
+    pub sel_struct: Option<usize>,
     pub time: f32,
     /// the camera's ground position (painter mode draws far to near from it)
     pub eye: Vec2,
@@ -1269,6 +1271,13 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
         match b.kind {
             1 => mb.disc(b.p, b.r * (0.3 + 0.7 * f), Color::new(1.0, 0.95, 0.85, 0.45 * (1.0 - f))),
             2 => ring(&mut mb, b.p, b.r * (0.5 + f), 0.8, Color::new(0.8, 0.45, 1.0, 1.0 - f)),
+            3 => {
+                // flame: hot core in a wider orange lick
+                mb.disc(b.p, b.r * (0.8 + 0.5 * f), Color::new(1.0, 0.38, 0.05, 0.7 * (1.0 - f * f)));
+                mb.disc(b.p, b.r * (0.5 + 0.3 * f), Color::new(1.0, 0.72, 0.2, 0.85 * (1.0 - f)));
+                mb.disc(b.p, b.r * 0.25, Color::new(1.0, 0.95, 0.7, 0.9 * (1.0 - f)));
+            }
+            4 => ring(&mut mb, b.p, b.r * (0.4 + f * 1.4), 0.6, Color::new(0.75, 0.95, 1.0, 1.0 - f)),
             _ => mb.disc(b.p, b.r * (0.6 + 0.6 * f), Color::new(1.0, 0.65, 0.25, 0.6 * (1.0 - f))),
         }
     }
@@ -1295,6 +1304,64 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
         if s.phase == 1 {
             ring(&mut mb, s.center, 25.0, 0.4, rgba(150, 240, 255, 0.35));
         }
+        if s.pad.is_some() && s.phase < 2 {
+            ring(&mut mb, s.center, 3.0, 0.5, rgba(255, 212, 59, 0.8));
+        }
+    }
+    // railgun slugs: a bright streak that fades
+    for tr in &g.tracers {
+        if tr.kind == 6 {
+            let f = (tr.t / 0.4).clamp(0.0, 1.0);
+            mb.line(&[tr.a, tr.b], 3.5 * f, Color::new(0.55, 0.85, 1.0, 0.35 * f));
+            mb.line(&[tr.a, tr.b], 1.0 * f, Color::new(0.9, 0.98, 1.0, 0.9 * f));
+        }
+    }
+    for (i, s) in g.structs.iter().enumerate() {
+        if s.dead || s.pending {
+            continue;
+        }
+        let c = s.center();
+        match s.t {
+            S::Helium if inview(c, 60.0) => {
+                let r = g.turret_range(S::Helium, s.roof >= 0);
+                mb.disc(c, r, rgba(165, 216, 255, 0.10 + 0.03 * (t * 1.3).sin()));
+                ring(&mut mb, c, r, 0.5, rgba(200, 235, 255, 0.55));
+                for k in 0..10 {
+                    let a = k as f32 * 0.628 + t * 0.25;
+                    let q = c + vec2(a.cos(), a.sin()) * r * (0.35 + 0.5 * ((k * 7 % 10) as f32 / 10.0));
+                    let n = 0.9;
+                    mb.line(&[q - vec2(n, 0.0), q + vec2(n, 0.0)], 0.25, rgba(230, 245, 255, 0.5));
+                    mb.line(&[q - vec2(0.0, n), q + vec2(0.0, n)], 0.25, rgba(230, 245, 255, 0.5));
+                }
+            }
+            S::Rail if s.charge > 0.0 => {
+                if let Some(tg) = s.target {
+                    let f = 1.0 - s.charge / RAIL_CHARGE;
+                    let dir = (tg - c).normalize_or_zero();
+                    let end = c + dir * g.turret_range(S::Rail, s.roof >= 0);
+                    mb.dashed(&[c, end], 0.3 + 0.5 * f, 3.0, 2.0, Color::new(0.6, 0.9, 1.0, 0.25 + 0.5 * f));
+                }
+            }
+            S::Artillery => {
+                if let Some(tg) = s.target {
+                    let sel = v.sel_struct == Some(i);
+                    let col = if sel { rgba(255, 90, 70, 0.9) } else { rgba(255, 90, 70, 0.45) };
+                    let r = def(S::Artillery).rad + 3.0 + tg.distance(c) * 0.012;
+                    ring(&mut mb, tg, r, 0.6, col);
+                    mb.line(&[tg - vec2(r * 0.5, 0.0), tg + vec2(r * 0.5, 0.0)], 0.4, col);
+                    mb.line(&[tg - vec2(0.0, r * 0.5), tg + vec2(0.0, r * 0.5)], 0.4, col);
+                    if sel {
+                        mb.dashed(&[c, tg], 0.5, 5.0, 4.0, rgba(255, 90, 70, 0.4));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // shell shadows
+    for sh in &g.shells {
+        let (p, _) = arc(sh.from, sh.to, sh.t / sh.dur);
+        mb.disc(p, 0.9, Color::new(0.0, 0.0, 0.0, 0.25));
     }
     mb
 }
@@ -1325,6 +1392,9 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels, painter: bool
             // flown in by helicopter: a translucent ghost until it lands
             mb.prism(&rect_pts(x, y, w, h), base, base + 0.3, alpha(d.top, 0.3), alpha(d.top, 0.3));
             continue;
+        }
+        if v.sel_struct == Some(i) {
+            art::ring_flat(&mut mb, c, w.max(h) / 2.0 + 1.5, 0.5, base + 0.05, rgb(255, 212, 59));
         }
         let top = art::structure(&mut mb, g, i, s, base, t, labels);
         if s.hp < s.max * 0.99 && s.t != S::Wall {
@@ -1440,11 +1510,17 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
             1 => rgb(255, 170, 80),
             2 => rgb(150, 240, 255),
             4 => rgb(200, 220, 255),
+            6 => rgb(230, 248, 255),
             _ => rgb(220, 235, 255),
         };
         draw_line_3d(p3(tr.a, tr.az), p3(tr.b, 0.3), c);
     }
     for b in &g.booms {
+        if b.kind == 3 {
+            // flame: a licking ball of fire above the ground puff
+            let f = 1.0 - b.t / b.life;
+            draw_sphere(p3(b.p, 0.8 + f * 1.5), b.r * (0.35 + 0.25 * f), None, Color::new(1.0, 0.55 + 0.3 * (1.0 - f), 0.15, 0.55 * (1.0 - f)));
+        }
         if b.kind == 1 {
             let f = 1.0 - b.t / b.life;
             draw_sphere(p3(b.p, 0.0), b.r * (0.2 + 0.5 * f), None, Color::new(1.0, 0.7, 0.3, 0.35 * (1.0 - f)));
@@ -1476,6 +1552,22 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
     for s in &g.strikes {
         if let Strike::Air { from, dir, pos, .. } = s {
             draw_bomber(*from + *dir * *pos, dir.to_angle(), mk);
+        }
+    }
+    // artillery shells on their lob
+    for sh in &g.shells {
+        let f = sh.t / sh.dur;
+        let (p, hgt) = arc(sh.from, sh.to, f);
+        let hgt = hgt * 0.5;
+        at_height(hgt, || {
+            draw_circle(p.x, p.y, 0.9 * mk, rgb(255, 200, 120));
+            draw_circle(p.x, p.y, 0.55 * mk, rgb(60, 50, 40));
+        });
+    }
+    // gunships parked on their heli pads
+    for (i, s) in g.structs.iter().enumerate() {
+        if s.t == S::Helipad && !s.dead && !s.pending && g.pad_gunship(i).is_none() {
+            draw_heli(s.center(), def(S::Helipad).ht + 1.0, -std::f32::consts::FRAC_PI_2, if s.cd > 0.0 { 0.0 } else { t }, true, false, mk.min(1.4));
         }
     }
     for h in &g.helis {

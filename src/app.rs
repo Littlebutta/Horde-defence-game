@@ -73,6 +73,10 @@ pub struct App {
     press: Option<(Vec2, Vec2)>, // (screen, world) where the left button went down
     panning: bool,
     selected: Option<usize>,
+    /// a selected artillery piece or heli pad (right-click aims it)
+    sel_struct: Option<usize>,
+    /// height of the build bar, so panels above it can sit clear
+    bar_h: f32,
     acc: f32,
     paused: bool,
     updater: Updater,
@@ -221,6 +225,8 @@ impl App {
             press: None,
             panning: false,
             selected: None,
+            sel_struct: None,
+            bar_h: 70.0,
             acc: 0.0,
             paused: false,
             updater: Updater::start(),
@@ -1291,6 +1297,7 @@ impl App {
         self.game = Some(g);
         self.tool = Tool::None;
         self.selected = None;
+        self.sel_struct = None;
         self.paused = false;
         self.acc = 0.0;
         self.screen = Screen::Play;
@@ -1582,6 +1589,11 @@ impl App {
                 self.selected = None;
             }
         }
+        if let Some(s) = self.sel_struct {
+            if s >= g.structs.len() || g.structs[s].dead {
+                self.sel_struct = None;
+            }
+        }
 
         // camera
         let (sw, sh) = (screen_width(), screen_height());
@@ -1615,6 +1627,7 @@ impl App {
                 radius,
                 scale: self.cam.scale(),
                 selected: self.selected,
+                sel_struct: self.sel_struct,
                 time: self.clock,
                 eye: cam.position.truncate(),
             },
@@ -1735,7 +1748,7 @@ impl App {
             Tool::Build(t) => {
                 let d = def(t);
                 // rooftop spot for turrets
-                if d.turret && self.press.is_none() {
+                if d.turret && !d.ground && self.press.is_none() {
                     if let Some((b, p)) = g.roof_at(mw) {
                         let q = p;
                         let can = g.can_place_roof(b, p);
@@ -1797,12 +1810,17 @@ impl App {
                     }
                     ghost(*x as f32, *y as f32, d.w as f32, d.h as f32, 0.0, can);
                 }
-                if d.turret && spots.len() == 1 {
+                if spots.len() == 1 {
                     let c = vec2(
                         spots[0].0 as f32 + d.w as f32 / 2.0,
                         spots[0].1 as f32 + d.h as f32 / 2.0,
                     );
-                    draw_circle_lines(c.x, c.y, g.turret_range(t, false), 0.4, rgba(255, 212, 59, 0.6));
+                    if d.turret && d.range > 0.0 {
+                        draw_circle_lines(c.x, c.y, g.turret_range(t, false), 0.4, rgba(255, 212, 59, 0.6));
+                    }
+                    if t == S::Rescue {
+                        draw_circle_lines(c.x, c.y, RESCUE_REACH, 0.8, rgba(64, 192, 87, 0.7));
+                    }
                 }
                 let afford = g.scrap >= total;
                 let mut s = if n_ok == 0 {
@@ -1879,7 +1897,22 @@ impl App {
                 };
                 Some((hint.to_string(), WHITE))
             }
-            Tool::None => None,
+            Tool::None => {
+                let i = self.sel_struct?;
+                let s = &g.structs[i];
+                match s.t {
+                    S::Artillery => {
+                        let r = def(S::Artillery).rad + 3.0 + mw.distance(s.center()) * 0.012;
+                        draw_circle_lines(mw.x, mw.y, r, 0.6, rgba(255, 90, 70, 0.9));
+                        Some(("Right-click to shell this spot".into(), WHITE))
+                    }
+                    S::Helipad => {
+                        draw_circle_lines(mw.x, mw.y, 25.0 + 34.0, 0.6, rgba(255, 212, 59, 0.8));
+                        Some(("Right-click to send the gunship here".into(), WHITE))
+                    }
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -1996,12 +2029,16 @@ impl App {
             .chain([Tool::Unit(U::Rifle), Tool::Unit(U::Tank)])
             .collect();
         let bw = 92.0;
-        let total = items.len() as f32 * (bw + 6.0) + 6.0;
+        let rows = if items.len() as f32 * (bw + 6.0) + 6.0 > sw - 8.0 { 2 } else { 1 };
+        let per = items.len().div_ceil(rows);
+        let total = per as f32 * (bw + 6.0) + 6.0;
         let x0 = ((sw - total) / 2.0).max(4.0);
-        let y0 = sh - 70.0;
-        self.panel(Rect::new(x0, y0, total, 70.0));
+        self.bar_h = 6.0 + rows as f32 * 64.0;
+        let y0 = sh - self.bar_h;
+        self.panel(Rect::new(x0, y0, total, self.bar_h));
         for (i, it) in items.iter().enumerate() {
-            let r = Rect::new(x0 + 6.0 + i as f32 * (bw + 6.0), y0 + 6.0, bw, 58.0);
+            let (col_i, row_i) = (i % per, i / per);
+            let r = Rect::new(x0 + 6.0 + col_i as f32 * (bw + 6.0), y0 + 6.0 + row_i as f32 * 64.0, bw, 58.0);
             let (key, name, cost, col, tip, ok) = match it {
                 Tool::Build(s) => {
                     let d = def(*s);
@@ -2049,6 +2086,9 @@ impl App {
                 Tool::Build(S::Silo) => "Missile silo",
                 Tool::Build(S::Pad) => "Extraction",
                 Tool::Build(S::Lab) => "Research",
+                Tool::Build(S::Rescue) => "Rescue stn",
+                Tool::Build(S::Flame) => "Flame",
+                Tool::Build(S::Helium) => "Helium",
                 Tool::Unit(U::Rifle) => "Rifles",
                 _ => name,
             };
@@ -2203,12 +2243,42 @@ impl App {
             );
             let r = Rect::new(
                 10.0,
-                sh - 110.0,
+                sh - self.bar_h - 40.0,
                 text_w(&self.fonts.mono, &s, 13.0) + 24.0,
                 30.0,
             );
             self.panel(r);
             text(&self.fonts.mono, &s, r.x + 12.0, r.y + 20.0, 13.0, p.text);
+        }
+
+        if let Some(si) = self.sel_struct {
+            let st = &g.structs[si];
+            let (line, cease) = match st.t {
+                S::Artillery => (
+                    if st.target.is_some() {
+                        format!("Artillery · firing · {:.0} ammo a shell · right-click to retarget", def(S::Artillery).ammo)
+                    } else {
+                        "Artillery · right-click anywhere on the map to open fire".to_string()
+                    },
+                    st.target.is_some(),
+                ),
+                _ => (
+                    match g.pad_gunship(si) {
+                        Some(gs) if gs.phase < 2 => format!("Heli pad · gunship out, {:.0} s left · right-click to move it", gs.t.max(0.0)),
+                        Some(_) => "Heli pad · gunship returning".to_string(),
+                        None if st.cd > 0.0 => format!("Heli pad · rearming {:.0} s", st.cd),
+                        None => "Heli pad · gunship ready · right-click to send it".to_string(),
+                    },
+                    false,
+                ),
+            };
+            let tw = text_w(&self.fonts.mono, &line, 13.0) + 24.0;
+            let r = Rect::new(10.0, sh - self.bar_h - 40.0, tw + if cease { 110.0 } else { 0.0 }, 30.0);
+            self.panel(r);
+            text(&self.fonts.mono, &line, r.x + 12.0, r.y + 20.0, 13.0, p.text);
+            if cease && self.button(Rect::new(r.x + tw, r.y + 3.0, 100.0, 24.0), "Cease fire", true, false) {
+                self.act(g, Cmd::Cease(si as u32));
+            }
         }
 
         // banners
@@ -2398,6 +2468,7 @@ impl App {
         if is_key_pressed(KeyCode::Escape) {
             self.tool = Tool::None;
             self.selected = None;
+            self.sel_struct = None;
             self.press = None;
         }
         if is_key_pressed(KeyCode::F9) && self.sess.is_none() && self.placing.is_none() {
@@ -2460,6 +2531,8 @@ impl App {
             if self.tool != Tool::None {
                 self.tool = Tool::None;
                 self.press = None;
+            } else if let Some(si) = self.sel_struct {
+                self.act(g, Cmd::Aim(si as u32, mw));
             } else if let Some(gi) = self.selected {
                 self.act(g, Cmd::Order(gi as u32, mw));
             }
@@ -2498,10 +2571,16 @@ impl App {
             match self.tool {
                 Tool::None => {
                     self.selected = g.group_at(mw);
+                    self.sel_struct = None;
+                    if self.selected.is_none() {
+                        self.sel_struct = g
+                            .struct_at(mw)
+                            .filter(|i| matches!(g.structs[*i].t, S::Artillery | S::Helipad));
+                    }
                 }
                 Tool::Build(t) => {
                     let d = def(t);
-                    if d.turret && w0.distance(mw) < 2.0 {
+                    if d.turret && !d.ground && w0.distance(mw) < 2.0 {
                         if let Some((b, p)) = g.roof_at(mw) {
                             self.act(g, Cmd::Roof { t, b: b as u32, p });
                             return;
