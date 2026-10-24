@@ -1394,12 +1394,28 @@ impl App {
         self.msg = (String::new(), 0.0);
     }
 
+    /// Where the local player's own HQ is (in co-op each player has one).
+    fn my_hq(&self, g: &Game) -> Vec2 {
+        let me = self.sess.as_ref().map(|s| s.me).unwrap_or(0);
+        match g.hqs.get(me).map(|&i| &g.structs[i]) {
+            Some(s) if !s.dead => s.center(),
+            _ => g.world.hq,
+        }
+    }
+
     fn make_game(&self, d: Desc, seed: u64) -> Game {
         let camp = if self.in_camp { self.camp.as_ref() } else { None };
         let mut g = match camp {
             Some(c) => Game::new(d, c.fac, DIFFS[c.diff].1 * c.horde_mult(), seed),
             None => Game::new(d, self.fac, DIFFS[self.diff].1, seed),
         };
+        // co-op: an HQ for every player
+        let players = match &self.sess {
+            Some(s) if s.in_game || !s.is_host() => s.game_players,
+            Some(s) => s.players.len(),
+            None => 1,
+        };
+        g.add_player_hqs(players);
         if let Some(c) = camp {
             c.apply(&mut g);
         }
@@ -1408,7 +1424,7 @@ impl App {
 
     fn show(&mut self, g: Game, recentre: bool) {
         if recentre {
-            self.cam = Orbit { t: g.world.hq, dist: 0.0, yaw: 0.0, pitch: 0.95 };
+            self.cam = Orbit { t: self.my_hq(&g), dist: 0.0, yaw: 0.0, pitch: 0.95 };
             self.cam.set_scale((screen_height() / 260.0).max(1.5));
         }
         let aa = self.aa;
@@ -1762,6 +1778,17 @@ impl App {
             &mut labels,
         );
         let mw = self.pick(&g, self.px_mouse());
+        // whose HQ is whose
+        if let Some(s) = &self.sess {
+            if g.hqs.len() > 1 {
+                for (k, &i) in g.hqs.iter().enumerate() {
+                    let st = &g.structs[i];
+                    let name = s.players.get(k).map(|p| p.name.as_str()).unwrap_or("Player");
+                    let label = if st.dead { format!("{}'s HQ (fallen)", name) } else { format!("{}'s HQ", name) };
+                    labels.items.push((render::p3(st.center(), 16.0), label, PLAYER_COLS[k % 4], 14.0));
+                }
+            }
+        }
         // the other co-op players' cursors
         if let (Some(s), None) = (self.sess.as_mut(), &self.placing) {
             s.cursor(mw, dt);
@@ -2550,7 +2577,7 @@ impl App {
                     'k' => self.dark = !self.dark,
                     'm' => self.set_music(if self.music_vol > 0 { 0 } else { self.music_prev }),
                     'p' | ' ' => self.toggle_pause(),
-                    'h' => self.cam.t = g.world.hq,
+                    'h' => self.cam.t = self.my_hq(g),
                     'f' => {
                         self.cam.t = vec2(W as f32, H as f32) / 2.0;
                         self.cam.set_scale((screen_height() / H as f32).min(screen_width() / W as f32));
@@ -2859,7 +2886,7 @@ impl App {
         // a catching-up guest runs several ticks a frame, so log the first frame past each 100
         if exec / 100 > self.test_log / 100 {
             self.test_log = exec;
-            eprintln!("{} tick {} checksum {:016x} structs {} hostiles {}{}", if host { "host" } else { "guest" }, exec, g.checksum(), g.structs.iter().filter(|s| !s.dead).count(), g.hostiles(), if s.desync { " DESYNC" } else { "" });
+            eprintln!("{} tick {} checksum {:016x} structs {} hqs {} hostiles {}{}", if host { "host" } else { "guest" }, exec, g.checksum(), g.structs.iter().filter(|s| !s.dead).count(), g.hqs.len(), g.hostiles(), if s.desync { " DESYNC" } else { "" });
         }
         exec >= until
     }

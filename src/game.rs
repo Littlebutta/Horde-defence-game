@@ -314,6 +314,8 @@ pub struct Game {
     pub structs: Vec<Structure>,
     pub occ: Vec<i32>,
     pub hq_idx: usize,
+    /// co-op: each player's HQ, host first (one entry when playing alone)
+    pub hqs: Vec<usize>,
     pub base_zone: Vec<u8>,
     pub groups: Vec<Group>,
     pub squads: Vec<Squad>,
@@ -426,6 +428,7 @@ impl Game {
             structs: Vec::new(),
             occ: vec![-1; N],
             hq_idx: 0,
+            hqs: Vec::new(),
             base_zone,
             groups: Vec::new(),
             squads: Vec::new(),
@@ -486,6 +489,7 @@ impl Game {
         };
         let hq = g.world.hq;
         g.hq_idx = g.add_struct(S::Hq, hq.x as i32 - 7, hq.y as i32 - 7, -1);
+        g.hqs = vec![g.hq_idx];
         // starter base
         let (x0, y0) = (hq.x as i32, hq.y as i32);
         for (t, x, y) in [
@@ -529,15 +533,94 @@ impl Game {
 
     // ----------------------------------------------------------------------------- grids
 
+    /// The horde heads for every HQ still standing.
     fn hq_src(&self) -> Vec<u32> {
-        let s = &self.structs[self.hq_idx];
         let mut v = Vec::new();
-        for y in s.y..s.y + s.h {
-            for x in s.x..s.x + s.w {
-                v.push((y as usize * W + x as usize) as u32);
+        for &i in &self.hqs {
+            let s = &self.structs[i];
+            if s.dead && self.hqs.len() > 1 {
+                continue;
+            }
+            for y in s.y..s.y + s.h {
+                for x in s.x..s.x + s.w {
+                    v.push((y as usize * W + x as usize) as u32);
+                }
             }
         }
         v
+    }
+
+    /// The standing HQ nearest to `p` (the main one when they have all fallen).
+    pub fn hq_near(&self, p: Vec2) -> Vec2 {
+        self.hqs
+            .iter()
+            .map(|&i| &self.structs[i])
+            .filter(|s| !s.dead)
+            .map(|s| s.center())
+            .min_by(|a, b| a.distance_squared(p).total_cmp(&b.distance_squared(p)))
+            .unwrap_or(self.world.hq)
+    }
+
+    /// Co-op: an HQ (with a small starter base and its own base zone) for each player after the
+    /// host, spread out around the main one. Both sides call this right after `new`, so it must
+    /// stay deterministic.
+    pub fn add_player_hqs(&mut self, players: usize) {
+        let main = self.world.hq;
+        for k in 1..players.min(4) {
+            let ang = -std::f32::consts::FRAC_PI_2 + k as f32 * std::f32::consts::TAU / players.min(4) as f32;
+            let Some(c) = self.hq_spot(main, ang) else { continue };
+            let z = &mut self.base_zone;
+            fill_disc(c, OUTPOST_R, |q| z[q] = 1);
+            self.world.add_outpost(c);
+            let (x0, y0) = (c.x as i32, c.y as i32);
+            let i = self.add_struct(S::Hq, x0 - 7, y0 - 7, -1);
+            self.hqs.push(i);
+            for (t, x, y) in [(S::Extractor, x0 - 26, y0 - 3), (S::Gun, x0 - 2, y0 - 18), (S::Gun, x0 - 2, y0 + 13)] {
+                if self.can_place(t, x, y) {
+                    self.add_struct(t, x, y, -1);
+                }
+            }
+        }
+        if self.hqs.len() > 1 {
+            self.zone_dirty = true;
+            let obj = Arc::new(self.build_obj());
+            let src = self.hq_src();
+            let d = crate::fields::dial(&obj, &src, crate::fields::Mode::Hq, INF - 1);
+            self.obj = obj;
+            self.hq_dist = Arc::new(d);
+            self.obj_dirty = false;
+        }
+    }
+
+    /// A free 14x14 patch of dry ground about 160 cells from `main` in direction `ang`.
+    fn hq_spot(&self, main: Vec2, ang: f32) -> Option<Vec2> {
+        let free = |x: i32, y: i32| {
+            if x < 40 || y < 40 || x > W as i32 - 40 || y > H as i32 - 40 {
+                return false;
+            }
+            for yy in y - 9..y + 9 {
+                for xx in x - 9..x + 9 {
+                    let i = yy as usize * W + xx as usize;
+                    if self.occ[i] >= 0 || self.world.bid[i] >= 0 || self.world.terrain[i] == T_WATER {
+                        return false;
+                    }
+                }
+            }
+            true
+        };
+        for ring in 0..12 {
+            let dist = 160.0 + ring as f32 * 12.0 * if ring % 2 == 0 { 1.0 } else { -1.0 } * 0.5;
+            for step in 0..24 {
+                let da = (step as f32 * 0.5).ceil() * 0.07 * if step % 2 == 0 { 1.0 } else { -1.0 };
+                let a = ang + da;
+                let c = main + vec2(libm::cosf(a), libm::sinf(a)) * dist;
+                let (x, y) = (c.x as i32, c.y as i32);
+                if free(x, y) {
+                    return Some(vec2(x as f32, y as f32));
+                }
+            }
+        }
+        None
     }
 
     pub fn build_obj(&self) -> Vec<i32> {
@@ -791,7 +874,7 @@ impl Game {
         let d = def(t);
         let mut c = d.cost;
         if d.turret && !self.world.in_zone(at) {
-            let dist = at.distance(self.world.hq);
+            let dist = at.distance(self.hq_near(at));
             c *= 1.0 + (dist - 100.0).max(0.0) / 350.0;
         }
         c.round()
@@ -893,10 +976,11 @@ impl Game {
         let c = s.center();
         if d.turret && !self.world.in_zone(c) {
             s.pending = true;
-            let dist = c.distance(self.world.hq);
+            let from = self.hq_near(c);
+            let dist = c.distance(from);
             self.helis.push(Heli {
                 kind: HeliKind::Deliver(idx),
-                from: self.world.hq,
+                from,
                 to: c,
                 t: 0.0,
                 dur: 1.5 + dist / 45.0,
@@ -1062,7 +1146,18 @@ impl Game {
             self.pad_dirty = true;
         }
         if t == S::Hq {
-            self.over = true;
+            // co-op: the game goes on while any HQ stands
+            let left: Vec<usize> = self.hqs.iter().copied().filter(|&h| !self.structs[h].dead).collect();
+            if left.is_empty() {
+                self.over = true;
+            } else {
+                self.show("An HQ has fallen. Hold out at the others.", 6.0);
+                if i == self.hq_idx {
+                    self.hq_idx = left[0];
+                    self.world.hq = self.structs[left[0]].center();
+                }
+                self.obj_dirty = true;
+            }
         }
     }
 
@@ -2460,11 +2555,12 @@ impl Game {
                 });
             }
             A::Gunship => {
+                let home = self.hq_near(to);
                 self.gunships.push(Gunship {
                     pad: None,
-                    home: self.world.hq,
+                    home,
                     center: to,
-                    p: self.world.hq,
+                    p: home,
                     t: 20.0,
                     ang: 0.0,
                     cd: 0.0,
@@ -3149,7 +3245,8 @@ impl Game {
 
     pub fn send_squad(&mut self, at: Vec2) -> bool {
         let n = if self.research.rescue { 18 } else { 10 };
-        let hq = &self.structs[self.hq_idx];
+        let near = self.hq_near(at);
+        let hq = self.hqs.iter().map(|&i| &self.structs[i]).find(|s| !s.dead && s.center() == near).unwrap_or(&self.structs[self.hq_idx]);
         let base = vec2(hq.center().x, (hq.y + hq.h + 2) as f32);
         self.send_squad_from(base, at, n, -1)
     }

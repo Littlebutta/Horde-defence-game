@@ -352,6 +352,8 @@ pub struct Session {
     pub exec: u64,
     /// the host's picks in the lobby (on the host: what was last sent)
     pub lobby: Lobby,
+    /// players in the game being played (each has an HQ)
+    pub game_players: usize,
     frames: BTreeMap<u64, Vec<(u8, Cmd)>>,
     pending: Vec<(u8, Cmd)>,
     hashes: BTreeMap<u64, u64>,
@@ -397,6 +399,7 @@ impl Session {
             desync: false,
             exec: 0,
             lobby: Lobby::default(),
+            game_players: 1,
             frames: BTreeMap::new(),
             pending: Vec::new(),
             hashes: BTreeMap::new(),
@@ -603,7 +606,8 @@ impl Session {
                 self.notes.push(Note::Closed(s));
             }
             M_START => {
-                let (Some(fac), Some(diff), Some(seed), Some(camp), Some(len)) = (r.u32(), r.u32(), r.u64(), r.str(), r.u32()) else { return };
+                let (Some(fac), Some(diff), Some(seed), Some(camp), Some(np), Some(len)) = (r.u32(), r.u32(), r.u64(), r.str(), r.u32(), r.u32()) else { return };
+                self.game_players = np.clamp(1, 4) as usize;
                 let camp = (!camp.is_empty()).then_some(camp);
                 self.incoming = Some(Incoming { fac: fac as usize, diff: diff as usize, seed, camp, len: len as usize, buf: Vec::with_capacity(len as usize) });
                 self.frames.clear();
@@ -670,6 +674,8 @@ impl Session {
         w.u32(diff as u32);
         w.u64(seed);
         w.str(camp.unwrap_or(""));
+        self.game_players = self.players.len().clamp(1, 4);
+        w.u32(self.game_players as u32);
         w.u32(packed.len() as u32);
         self.to_clients(&w.0);
         for c in packed.chunks(CHUNK) {
