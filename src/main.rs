@@ -139,6 +139,30 @@ async fn run(steam: Option<net::Steam>) {
                     selftest::towers(g);
                 }
                 let mut hq = g.world.hq;
+                // PH_LOOK=air|gunship|heli|icbm: look at the first one in flight instead
+                match std::env::var("PH_LOOK").as_deref() {
+                    Ok("air") => {
+                        if let Some(game::Strike::Air { from, dir, pos, .. }) = g.strikes.iter().find(|s| matches!(s, game::Strike::Air { .. })) {
+                            hq = *from + *dir * *pos;
+                        }
+                    }
+                    Ok("icbm") => {
+                        if let Some(game::Strike::Icbm { from, to, t, dur, .. }) = g.strikes.iter().find(|s| matches!(s, game::Strike::Icbm { .. })) {
+                            hq = from.lerp(*to, t / dur);
+                        }
+                    }
+                    Ok("gunship") => {
+                        if let Some(s) = g.gunships.first() {
+                            hq = s.p;
+                        }
+                    }
+                    Ok("heli") => {
+                        if let Some(h) = g.helis.first() {
+                            hq = h.from.lerp(h.to, (h.t / h.dur).clamp(0.0, 1.0));
+                        }
+                    }
+                    _ => {}
+                }
                 // PH_HIVE=1: look at the first alien hive instead
                 if let (true, Some(h)) = (std::env::var("PH_HIVE").is_ok(), g.hives.iter().find(|h| !h.dead)) {
                     hq = h.p;
