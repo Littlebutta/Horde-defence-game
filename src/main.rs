@@ -46,6 +46,12 @@ fn window_conf() -> Conf {
             4
         },
         window_resizable: true,
+        // the four armies' units (tools/make_icon.py); the exe's own icon comes from build.rs
+        icon: Some(macroquad::miniquad::conf::Icon {
+            small: *include_bytes!("../assets/icon16.rgba"),
+            medium: *include_bytes!("../assets/icon32.rgba"),
+            big: *include_bytes!("../assets/icon64.rgba"),
+        }),
         fullscreen: std::env::var("PH_SHOT").is_err() && storage::load_settings().fullscreen,
         ..Default::default()
     }

@@ -19,6 +19,9 @@ miniz_oxide = "0.8"
 rodio = { version = "0.20", default-features = false, features = ["symphonia-mp3", "wav"] }
 steamworks = { version = "0.13", optional = true }
 
+[build-dependencies]
+winresource = "0.1"
+
 [features]
 default = ["steam"]
 steam = ["dep:steamworks"]

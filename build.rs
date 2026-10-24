@@ -6,4 +6,11 @@ fn main() {
         println!("cargo:rustc-link-arg-bins=/DELAYLOAD:steam_api64.dll");
         println!("cargo:rustc-link-arg-bins=delayimp.lib");
     }
+    // Explorer / taskbar icon for PixelHorde.exe
+    println!("cargo:rerun-if-changed=assets/icon.ico");
+    if target.contains("windows") {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("assets/icon.ico");
+        res.compile().expect("embedding the exe icon");
+    }
 }
