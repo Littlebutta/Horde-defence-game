@@ -1718,6 +1718,7 @@ impl Game {
                     kind: if t == S::Cannon { 1 } else { 0 },
                 });
                 if t == S::Cannon {
+                    self.sfx.push((Sfx::Cannon, center));
                     self.booms.push(Boom {
                         p: tg,
                         r: d.rad,
@@ -1923,6 +1924,7 @@ impl Game {
                     if !b.2 && *pos >= b.1 {
                         b.2 = true;
                         blasts.push((b.0, 12.0, 600.0, 300.0, 0, 450.0));
+                        self.sfx.push((Sfx::Bomb, b.0));
                     }
                 }
                 *pos < *len
@@ -1934,6 +1936,7 @@ impl Game {
                 if *t >= *dur {
                     let r = if *nuke { 190.0 } else { 120.0 };
                     blasts.push((*to, r, 1e9, 1e6, 1, 1e9));
+                    self.sfx.push((Sfx::Nuke, *to));
                     if *nuke {
                         irradiate.push((*to, r));
                     }
@@ -2879,6 +2882,7 @@ impl Game {
                     kind: if kind == U::Tank { 4 } else { 3 },
                 });
                 if kind == U::Tank {
+                    self.sfx.push((Sfx::Cannon, a));
                     self.booms.push(Boom {
                         p: t,
                         r: d.rad,
