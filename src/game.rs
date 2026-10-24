@@ -3796,6 +3796,23 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Anything built inside the base zone costs its base price, however far from the HQ.
+    #[test]
+    fn zone_has_no_distance_cost() {
+        let g = Game::new(crate::citygen::generate(11), 0, 1.0, 3);
+        let mut n = 0;
+        for c in (0..W * H).step_by(97) {
+            let p = vec2((c % W) as f32 + 0.5, (c / W) as f32 + 0.5);
+            if !g.world.in_zone(p) {
+                continue;
+            }
+            n += 1;
+            for t in BUILD_ORDER {
+                assert_eq!(g.cost_at(t, p), def(t).cost.round(), "{:?} at {:?}", t, p);
+            }
+        }
+        assert!(n > 100);
+    }
     /// Two games from the same map, seed and commands must stay identical tick for tick.
     #[test]
     fn deterministic() {
