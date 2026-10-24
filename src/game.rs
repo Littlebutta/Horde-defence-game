@@ -189,6 +189,17 @@ pub struct Boom {
     pub life: f32,
     pub kind: u8,
 }
+/// Sound cues the sim raises for the app to play (not part of the checksum or net state).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Sfx {
+    Cannon,
+    Flame,
+    Railgun,
+    ArtilleryShot,
+    ArtilleryHit,
+    Bomb,
+    Nuke,
+}
 pub struct Portal {
     pub p: Vec2,
     pub t: f32,
@@ -276,6 +287,8 @@ pub struct Game {
     pub helis: Vec<Heli>,
     pub tracers: Vec<Tracer>,
     pub booms: Vec<Boom>,
+    /// sound cues since the app last drained them
+    pub sfx: Vec<(Sfx, Vec2)>,
     pub portals: Vec<Portal>,
     spawnq: Vec<SpawnQ>,
     conv: Vec<Vec2>,
@@ -375,6 +388,7 @@ impl Game {
             helis: Vec::new(),
             tracers: Vec::new(),
             booms: Vec::new(),
+            sfx: Vec::new(),
             portals: Vec::new(),
             spawnq: Vec::new(),
             conv: Vec::new(),
@@ -1396,6 +1410,10 @@ impl Game {
             b.t -= DT;
         }
         self.booms.retain(|b| b.t > 0.0);
+        // nobody draining (headless runs): keep only the latest cues
+        if self.sfx.len() > 256 {
+            self.sfx.drain(..self.sfx.len() - 64);
+        }
         self.banner.1 -= DT;
         lap(&mut self.prof[11]);
         self.time += DT;
