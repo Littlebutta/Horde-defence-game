@@ -1294,7 +1294,7 @@ impl App {
             draw_rectangle(x0, cy, bw, 8.0, rgba(255, 255, 255, 0.08));
             draw_rectangle(x0, cy, bw * s.threat().max(0.03), 8.0, mix(rgb(255, 196, 64), rgb(255, 64, 48), s.threat()));
             cy += 26.0;
-            text(&self.fonts.mono, &format!("Horde ×{:.2} of {}", c.horde_mult(), DIFFS[c.diff].0), x0, cy, 12.5, p.text);
+            text(&self.fonts.mono, &format!("Horde ×{:.2} of {} · grows with each city held", c.horde_mult(), DIFFS[c.diff].0), x0, cy, 12.5, p.text);
             cy += 18.0;
             text(&self.fonts.mono, &format!("Hold out {} for the evac", mmss(c.hold_secs())), x0, cy, 12.5, p.text);
             cy += 18.0;

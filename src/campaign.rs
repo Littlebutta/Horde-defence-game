@@ -377,11 +377,18 @@ impl Campaign {
     pub fn alive(&self, i: usize) -> f32 {
         self.info(i).pop * self.cities[i].share()
     }
-    /// How much bigger the horde is in city `i` than on the chosen difficulty: from ×0.8 for a
-    /// quiet city to ×3.2 for one about to fall, and 6% more for every city fought before.
+    /// How much bigger the horde is in city `i` than on the chosen difficulty. Two things count: how
+    /// close the city is to falling (×0.7 for a quiet one to ×2.3 for one about to go) and how far
+    /// the campaign has come. The first city is fought at a little over half strength and every
+    /// city held makes the ones after it 14% harder; lost cities don't.
     pub fn horde_mult_at(&self, i: usize) -> f32 {
         let t = self.cities[i].threat();
-        (0.8 + 2.4 * t.powf(1.2)) * 1.06f32.powi(self.fought as i32)
+        (0.7 + 1.6 * t.powf(1.2)) * self.progress()
+    }
+    /// The campaign's part of the horde's size: ×0.55 at the start, ×1 after four or five cities
+    /// held, ×2 after ten.
+    pub fn progress(&self) -> f32 {
+        0.55 * 1.14f32.powi(self.held() as i32)
     }
     pub fn horde_mult(&self) -> f32 {
         self.horde_mult_at(self.current)
