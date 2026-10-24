@@ -1114,7 +1114,7 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
     let t = v.time;
     // civilians
     for c in &g.civs {
-        if (c.st >= C_DEAD && c.st != C_TO_PAD && c.st != C_AT_PAD) || !inview(c.p, 2.0) {
+        if (c.st >= C_DEAD && c.st != C_TO_PAD && c.st != C_AT_PAD && c.st != C_TO_IDLE) || !inview(c.p, 2.0) {
             continue;
         }
         let r = match c.st {
@@ -1249,7 +1249,7 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
     for tr in &g.tracers {
         if tr.kind == 6 {
             let f = (tr.t / 0.4).clamp(0.0, 1.0);
-            mb.line(&[tr.a, tr.b], 3.5 * f, Color::new(0.55, 0.85, 1.0, 0.35 * f));
+            mb.line(&[tr.a, tr.b], 5.5 * f, Color::new(0.55, 0.85, 1.0, 0.35 * f));
             mb.line(&[tr.a, tr.b], 1.0 * f, Color::new(0.9, 0.98, 1.0, 0.9 * f));
         }
     }
@@ -1294,6 +1294,17 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
             }
             _ => {}
         }
+    }
+    // burning napalm: dark scorch under a flickering orange pool
+    for (k, n) in g.napalm.iter().enumerate() {
+        if !inview(n.p, 6.0) {
+            continue;
+        }
+        let f = (n.t / NAPALM_LIFE).clamp(0.0, 1.0);
+        let fl = 0.75 + 0.25 * (t * 17.0 + k as f32 * 1.7).sin();
+        mb.disc(n.p, n.r * 1.05, Color::new(0.12, 0.06, 0.02, 0.35 * f));
+        mb.disc(n.p, n.r * (0.75 + 0.15 * fl), Color::new(1.0, 0.36, 0.05, 0.55 * f * fl));
+        mb.disc(n.p, n.r * 0.4 * fl, Color::new(1.0, 0.8, 0.3, 0.6 * f));
     }
     // shell shadows
     for sh in &g.shells {

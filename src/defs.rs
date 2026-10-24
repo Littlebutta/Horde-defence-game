@@ -28,8 +28,10 @@ pub enum S {
     Artillery,
     Helipad,
     Rescue,
+    ScrapDepot,
+    AmmoDepot,
 }
-pub const BUILD_ORDER: [S; 15] = [
+pub const BUILD_ORDER: [S; 17] = [
     S::Wall,
     S::Gun,
     S::Cannon,
@@ -39,6 +41,8 @@ pub const BUILD_ORDER: [S; 15] = [
     S::Artillery,
     S::Extractor,
     S::Plant,
+    S::ScrapDepot,
+    S::AmmoDepot,
     S::Silo,
     S::Pad,
     S::Rescue,
@@ -52,6 +56,15 @@ pub const HELIPAD_COOLDOWN: f32 = 35.0;
 /// How often a rescue station sends out a squad, and how far it looks for civilians.
 pub const RESCUE_EVERY: f32 = 25.0;
 pub const RESCUE_REACH: f32 = 380.0;
+/// Storage without depots, and what each depot adds.
+pub const SCRAP_CAP: f32 = 2500.0;
+pub const AMMO_CAP: f32 = 1500.0;
+pub const DEPOT_SCRAP: f32 = 2500.0;
+pub const DEPOT_AMMO: f32 = 2000.0;
+/// How long a flame bunker sprays, how long its napalm burns and how hard.
+pub const FLAME_SPRAY: f32 = 1.0;
+pub const NAPALM_LIFE: f32 = 1.6;
+pub const NAPALM_DPS: f32 = 14.0;
 /// Seconds a railgun charges before it fires.
 pub const RAIL_CHARGE: f32 = 1.2;
 
@@ -183,13 +196,17 @@ pub fn def(s: S) -> &'static Def {
         side: rgb(24, 100, 171),
         ..BASE
     };
-    static FLAME: Def = Def { key: 'b', name: "Flame bunker", w: 6, h: 6, hp: 1600.0, cost: 280.0, ht: 2.4, top: rgb(240, 101, 46), side: rgb(150, 52, 20), range: 20.0, rate: 0.15, dmg: 5.0, rad: 2.6, ammo: 0.4, bdmg: 0.0, turret: true, ground: true, tip: "Very tough, short range. Hoses fire down the street, burning everything in a wide cone. 0.4 ammo per burst. Ground only.", ..BASE };
-    static RAIL: Def = Def { key: 'n', name: "Railgun", w: 7, h: 7, hp: 520.0, cost: 750.0, ht: 4.0, top: rgb(116, 192, 252), side: rgb(35, 90, 150), range: 120.0, rate: 3.5, dmg: 400.0, rad: 1.6, ammo: 30.0, turret: true, tip: "Finds the thickest part of the horde, charges for a moment, then a slug destroys everything in a straight line to the end of its range. 30 ammo a shot. Rooftops give +60% range.", ..BASE };
+    static FLAME: Def = Def { key: 'b', name: "Flame bunker", w: 6, h: 6, hp: 1600.0, cost: 280.0, ht: 2.4, top: rgb(240, 101, 46), side: rgb(150, 52, 20), range: 20.0, rate: 1.8, dmg: 3.0, rad: 2.6, ammo: 5.0, bdmg: 0.0, turret: true, ground: true, tip: "Very tough, short range, burns right up to its walls. Sprays fire for a second, leaving burning napalm, then pauses; it won't hit a spot again until the napalm there is out. 5 ammo a spray. Ground only.", ..BASE };
+    static RAIL: Def = Def { key: 'n', name: "Railgun", w: 7, h: 7, hp: 520.0, cost: 750.0, ht: 4.0, top: rgb(116, 192, 252), side: rgb(35, 90, 150), range: 120.0, rate: 3.5, dmg: 400.0, rad: 2.4, ammo: 30.0, turret: true, tip: "Picks the line through the most of the horde, leading their movement, charges for a moment, then a slug destroys everything in a wide straight line to the end of its range. 30 ammo a shot. Rooftops give +60% range.", ..BASE };
     static HELIUM: Def = Def { key: 'i', name: "Helium tower", w: 6, h: 6, hp: 450.0, cost: 380.0, ht: 4.5, top: rgb(165, 216, 255), side: rgb(70, 130, 190), range: 30.0, turret: true, tip: "Sprays liquid helium around it: everything in the field moves at 40% speed. Needs no ammo. Rooftops give +60% range.", ..BASE };
     static ARTY: Def = Def { key: 'y', name: "Artillery", w: 9, h: 9, hp: 1000.0, cost: 1800.0, ht: 3.0, top: rgb(134, 142, 150), side: rgb(73, 80, 87), range: 0.0, rate: 4.0, dmg: 140.0, rad: 10.0, ammo: 45.0, bdmg: 25.0, turret: true, ground: true, tip: "Lobs heavy shells anywhere on the map. Click it, then right-click a target; it keeps firing there until you pick another spot or cease fire. 45 ammo a shell.", ..BASE };
     static HELIPAD: Def = Def { key: 'u', name: "Heli pad", w: 11, h: 11, hp: 800.0, cost: 1500.0, ht: 0.6, top: rgb(73, 80, 87), side: rgb(40, 44, 50), zone: true, tip: "Keeps a gunship of its own. Click the pad, then right-click anywhere: the gunship flies there for free and fires for 20 s (right-click again to move it), then returns to rearm for 35 s. Base zone only.", ..BASE };
     static RESCUE: Def = Def { key: 'j', name: "Rescue station", w: 9, h: 9, hp: 600.0, cost: 500.0, ht: 3.2, top: rgb(105, 219, 124), side: rgb(43, 138, 62), zone: true, tip: "Every 25 s sends a rescue team to the biggest group of civilians it can reach safely and walks them back to the base. Base zone only.", ..BASE };
+    static SDEPOT: Def = Def { key: '0', name: "Scrap depot", w: 7, h: 7, hp: 500.0, cost: 250.0, ht: 2.6, top: rgb(56, 217, 169), side: rgb(18, 134, 106), zone: true, tip: "Stores 2500 more scrap (you start with room for 2500). Base zone only.", ..BASE };
+    static ADEPOT: Def = Def { key: 'v', name: "Ammo depot", w: 7, h: 7, hp: 500.0, cost: 250.0, ht: 2.6, top: rgb(198, 154, 116), side: rgb(134, 96, 63), zone: true, tip: "Stores 2000 more ammo (you start with room for 1500). Base zone only.", ..BASE };
     match s {
+        S::ScrapDepot => &SDEPOT,
+        S::AmmoDepot => &ADEPOT,
         S::Flame => &FLAME,
         S::Rail => &RAIL,
         S::Helium => &HELIUM,

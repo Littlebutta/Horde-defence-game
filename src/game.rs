@@ -105,6 +105,8 @@ pub const C_DEAD: u8 = 9;
 pub const C_TO_PAD: u8 = 11;
 pub const C_AT_PAD: u8 = 12;
 pub const C_GONE: u8 = 13;
+/// waiting civilians walking over to a pad that is free to fly them out sooner
+pub const C_TO_IDLE: u8 = 14;
 
 pub struct Civ {
     pub p: Vec2,
@@ -185,6 +187,12 @@ pub struct Heli {
     pub t: f32,
     pub dur: f32,
 }
+/// A pool of burning napalm left by a flame bunker.
+pub struct Napalm {
+    pub p: Vec2,
+    pub r: f32,
+    pub t: f32,
+}
 /// An artillery shell in the air.
 pub struct Shell {
     pub from: Vec2,
@@ -217,6 +225,8 @@ pub enum Sfx {
     ArtilleryHit,
     Bomb,
     Nuke,
+    /// a flame bunker stopped spraying (ends its Flame sound)
+    FlameStop,
 }
 pub struct Portal {
     pub p: Vec2,
@@ -311,6 +321,10 @@ pub struct Game {
     pub strikes: Vec<Strike>,
     pub gunships: Vec<Gunship>,
     pub shells: Vec<Shell>,
+    pub napalm: Vec<Napalm>,
+    /// storage limits, from the depots (recomputed every tick)
+    pub scrap_cap: f32,
+    pub ammo_cap: f32,
     /// coarse cells inside a helium tower's field (the horde moves slowly there)
     pub slow: Vec<u8>,
     pub helis: Vec<Heli>,
@@ -419,6 +433,9 @@ impl Game {
             strikes: Vec::new(),
             gunships: Vec::new(),
             shells: Vec::new(),
+            napalm: Vec::new(),
+            scrap_cap: SCRAP_CAP,
+            ammo_cap: AMMO_CAP,
             slow: vec![0; CW * CH],
             helis: Vec::new(),
             tracers: Vec::new(),
@@ -817,10 +834,20 @@ impl Game {
     pub fn roof_slots(&self, b: usize) -> usize {
         ((self.world.buildings[b].cells / 70) as usize).clamp(1, 6)
     }
-    pub fn can_place_roof(&self, b: usize, p: Vec2) -> bool {
+    pub fn can_place_roof(&self, t: S, b: usize, p: Vec2) -> bool {
         let bb = &self.world.buildings[b];
         if !bb.alive || self.world.irradiated_at(p) || self.hive_blocks(p) {
             return false;
+        }
+        // the whole base has to stand on this roof
+        let d = def(t);
+        let (x0, y0) = ((p.x - d.w as f32 / 2.0) as i32, (p.y - d.h as f32 / 2.0) as i32);
+        for y in y0..y0 + d.h {
+            for x in x0..x0 + d.w {
+                if x < 0 || y < 0 || x >= W as i32 || y >= H as i32 || self.world.bid[y as usize * W + x as usize] != b as i32 {
+                    return false;
+                }
+            }
         }
         let mut n = 0;
         for s in &self.structs {
@@ -965,7 +992,7 @@ impl Game {
     pub fn place_roof(&mut self, t: S, b: usize, p: Vec2) -> bool {
         let d = def(t);
         let cost = self.cost_at(t, p);
-        if !d.turret || d.ground || self.scrap < cost || !self.can_place_roof(b, p) || !self.build_ok(t) {
+        if !d.turret || d.ground || self.scrap < cost || !self.can_place_roof(t, b, p) || !self.build_ok(t) {
             return false;
         }
         self.scrap -= cost;
@@ -999,7 +1026,8 @@ impl Game {
             q.x >= s.x as f32 && q.y >= s.y as f32 && q.x < (s.x + s.w) as f32 && q.y < (s.y + s.h) as f32
         });
         let Some((i, s)) = hit else { return false };
-        self.scrap += def(s.t).cost * 0.5;
+        let refund = def(s.t).cost * 0.5;
+        self.gain_scrap(refund);
         self.kill_struct(i);
         true
     }
@@ -1368,6 +1396,9 @@ impl Game {
         for b in &self.world.buildings {
             mix(b.hp.to_bits());
         }
+        for n in &self.napalm {
+            mix(n.p.x.to_bits() ^ n.p.y.to_bits().rotate_left(16) ^ n.t.to_bits());
+        }
         for sh in &self.shells {
             mix(sh.to.x.to_bits() ^ sh.to.y.to_bits().rotate_left(16));
         }
@@ -1472,7 +1503,7 @@ impl Game {
         lap(&mut self.prof[3]);
         self.kills += killed as u64;
         self.score += killed as f32;
-        self.scrap += killed as f32 * self.faction().reward;
+        self.gain_scrap(killed as f32 * self.faction().reward);
         for i in 0..self.sd.len() {
             let v = self.sd[i].load(Relaxed);
             if v > 0 && !self.structs[i].dead {
@@ -1543,6 +1574,19 @@ impl Game {
         self.sim_ms = self.sim_ms * 0.9 + t0.elapsed().as_secs_f32() * 1000.0 * 0.1;
     }
 
+    /// Income that stops at the storage limit (anything already above it, like a campaign
+    /// carry-over, is kept).
+    pub fn gain_scrap(&mut self, x: f32) {
+        if self.scrap < self.scrap_cap {
+            self.scrap = (self.scrap + x).min(self.scrap_cap);
+        }
+    }
+    pub fn gain_ammo(&mut self, x: f32) {
+        if self.ammo < self.ammo_cap {
+            self.ammo = (self.ammo + x).min(self.ammo_cap);
+        }
+    }
+
     fn economy(&mut self) {
         // a crowded base slows everything down
         self.income_mult = if self.waiting > 40 {
@@ -1551,18 +1595,22 @@ impl Game {
             1.0
         };
         let im = self.income_mult;
+        let depots = |t: S| self.structs.iter().filter(|s| !s.dead && !s.pending && s.t == t).count() as f32;
+        self.scrap_cap = SCRAP_CAP + depots(S::ScrapDepot) * DEPOT_SCRAP;
+        self.ammo_cap = AMMO_CAP + depots(S::AmmoDepot) * DEPOT_AMMO;
         for i in 0..self.structs.len() {
             let s = &self.structs[i];
             if s.dead || s.pending {
                 continue;
             }
             match s.t {
-                S::Extractor => self.scrap += 2.5 * DT * im,
+                S::Extractor => self.gain_scrap(2.5 * DT * im),
                 S::Plant => {
-                    if self.scrap >= 3.0 * DT {
+                    // a full ammo store idles the plants instead of burning scrap
+                    if self.scrap >= 3.0 * DT && self.ammo < self.ammo_cap {
                         self.scrap -= 3.0 * DT;
                         let rate = if self.research.presses { 10.0 } else { 6.0 };
-                        self.ammo += rate * DT * im;
+                        self.gain_ammo(rate * DT * im);
                     }
                 }
                 _ => {}
@@ -1800,6 +1848,8 @@ impl Game {
 
 
     fn turrets(&mut self) {
+        // cells gun turrets are already shooting at this tick, so two never waste shots on one target
+        let mut claimed: Vec<usize> = Vec::new();
         for i in 0..self.structs.len() {
             let (t, center, roof) = {
                 let s = &self.structs[i];
@@ -1814,7 +1864,16 @@ impl Game {
                 continue;
             }
             let range = self.turret_range(t, roof >= 0);
-            if let Some(tg) = self.find_target(center, range) {
+            let tg = if t == S::Gun {
+                let cell = self.target_cell(center, range, &claimed, |_| false);
+                if let Some(k) = cell {
+                    claimed.push(k);
+                }
+                cell.map(Self::cell_pos)
+            } else {
+                self.find_target(center, range)
+            };
+            if let Some(tg) = tg {
                 let src = self.rev_src(RevKey::Struct(i));
                 self.blast(tg, d.rad * self.rad_mult(t), d.dmg * self.dmg_mult(t), d.bdmg, src, 0.0);
                 self.ammo -= d.ammo;
@@ -1867,6 +1926,119 @@ impl Game {
             }
         }
         best.map(|p| (p, bn))
+    }
+
+    /// Coarse cells with hostiles within `r` of `c`, nearest first.
+    fn coarse_near(&self, c: Vec2, r: f32) -> Vec<(f32, usize)> {
+        let gx0 = ((c.x - r) / CG as f32).floor().max(0.0) as usize;
+        let gx1 = (((c.x + r) / CG as f32).floor().max(0.0) as usize).min(CW - 1);
+        let gy0 = ((c.y - r) / CG as f32).floor().max(0.0) as usize;
+        let gy1 = (((c.y + r) / CG as f32).floor().max(0.0) as usize).min(CH - 1);
+        let mut out = Vec::new();
+        for gy in gy0..=gy1 {
+            for gx in gx0..=gx1 {
+                if self.swarm.coarse_at(gy * CW + gx) == 0 {
+                    continue;
+                }
+                let d = vec2((gx * CG) as f32 + 4.0, (gy * CG) as f32 + 4.0).distance(c);
+                if d <= r + 4.0 {
+                    out.push((d, gy * CW + gx));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        out
+    }
+
+    /// The nearest occupied cell within `r`, skipping cells next to ones in `claimed` (so gun
+    /// turrets spread their fire) and ones `skip` rules out.
+    fn target_cell(&self, c: Vec2, r: f32, claimed: &[usize], skip: impl Fn(Vec2) -> bool) -> Option<usize> {
+        for (_, gi) in self.coarse_near(c, r) {
+            let (bx, by) = ((gi % CW) * CG, (gi / CW) * CG);
+            let (mut best, mut bv) = (usize::MAX, 0);
+            for y in by..by + CG {
+                for x in bx..bx + CG {
+                    let v = self.swarm.at(y * W + x);
+                    if v <= bv {
+                        continue;
+                    }
+                    let p = vec2(x as f32 + 0.5, y as f32 + 0.5);
+                    if p.distance(c) > r || skip(p) {
+                        continue;
+                    }
+                    if claimed.iter().any(|&k| ((k % W) as i32 - x as i32).abs() <= 1 && ((k / W) as i32 - y as i32).abs() <= 1) {
+                        continue;
+                    }
+                    bv = v;
+                    best = y * W + x;
+                }
+            }
+            if best != usize::MAX {
+                return Some(best);
+            }
+        }
+        None
+    }
+
+    /// Where a flame bunker sprays next: the nearest hostiles not already standing in napalm.
+    fn flame_target(&self, c: Vec2, r: f32) -> Option<Vec2> {
+        let burning = |p: Vec2| self.napalm.iter().any(|n| n.p.distance(p) < n.r + 1.5);
+        self.target_cell(c, r, &[], burning).map(Self::cell_pos)
+    }
+
+    /// The railgun's aim: of the directions through the biggest groups in range, the one whose
+    /// whole beam crosses the most hostiles once they have moved on for the length of the charge.
+    fn rail_target(&self, c: Vec2, range: f32) -> Option<Vec2> {
+        let st = self.faction().stats;
+        let hq = self.world.hq;
+        // most hordes walk for the HQ; lead them by how far they get while the slug charges
+        let lead = st.spd * RAIL_CHARGE * 0.8;
+        let ahead = |p: Vec2| p + (hq - p).normalize_or_zero() * lead.min(p.distance(hq));
+        let mut cand: Vec<(u32, usize)> = self
+            .coarse_near(c, range)
+            .into_iter()
+            .map(|(_, gi)| (self.swarm.coarse_at(gi), gi))
+            .filter(|(n, _)| *n >= 2)
+            .collect();
+        cand.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        cand.truncate(40);
+        let rad = def(S::Rail).rad * self.rad_mult(S::Rail);
+        let mut best = None;
+        let mut bs = 5;
+        let mut seen: Vec<usize> = Vec::new();
+        for (_, gi) in cand {
+            let now = vec2(((gi % CW) * CG) as f32 + 4.0, ((gi / CW) * CG) as f32 + 4.0);
+            let aim = ahead(now);
+            let dir = (aim - c).normalize_or_zero();
+            if dir == Vec2::ZERO {
+                continue;
+            }
+            let side = vec2(-dir.y, dir.x) * (rad + 1.0);
+            seen.clear();
+            let mut score = 0;
+            let mut k = 4.0;
+            while k <= range {
+                let p = c + dir * k;
+                for q in [p, p + side, p - side] {
+                    // who will be here when the slug flies: those a charge's walk behind it
+                    let from = q - (hq - q).normalize_or_zero() * lead.min(q.distance(hq));
+                    if from.x < 0.0 || from.y < 0.0 || from.x >= W as f32 || from.y >= H as f32 {
+                        continue;
+                    }
+                    let g = (from.y as usize / CG) * CW + from.x as usize / CG;
+                    if !seen.contains(&g) {
+                        seen.push(g);
+                        score += self.swarm.coarse_at(g);
+                    }
+                }
+                k += 3.0;
+            }
+            if score > bs {
+                bs = score;
+                best = Some(aim);
+            }
+        }
+        best
     }
 
     /// Points an artillery piece at a spot, or sends a heli pad's gunship there.
@@ -1932,33 +2104,52 @@ impl Game {
             let d = def(t);
             match t {
                 S::Flame => {
+                    let range = self.turret_range(t, false);
+                    if self.structs[i].charge > 0.0 {
+                        // spraying: a cone of fire from the walls out to the target, leaving napalm
+                        self.structs[i].charge -= DT;
+                        let Some(tg) = self.structs[i].target else { continue };
+                        let dir = (tg - c).normalize_or_zero();
+                        let reach = (tg.distance(c) + 3.0).clamp(4.0, range);
+                        let start = 1.5;
+                        let src = self.rev_src(RevKey::Struct(i));
+                        let lay = (self.ticks + i as u64) % 5 == 0;
+                        for k in 0..5 {
+                            let f = k as f32 / 4.0;
+                            let p = c + dir * (start + (reach - start) * f);
+                            let r = d.rad * (0.55 + f * 0.75);
+                            self.swarm.add_damage(p.x, p.y, r, d.dmg * self.dmg_mult(t), src);
+                            self.damage_hives(p, r, 1.0);
+                            if (self.ticks + k) % 2 == 0 {
+                                self.booms.push(Boom { p, r, t: 0.3, life: 0.3, kind: 3 });
+                            }
+                            if lay && k > 0 {
+                                self.napalm.push(Napalm { p, r: r * 0.8, t: NAPALM_LIFE });
+                            }
+                        }
+                        let cd = self.reload(t);
+                        let s = &mut self.structs[i];
+                        s.last_fire = self.time;
+                        if s.charge <= 0.0 {
+                            s.charge = 0.0;
+                            s.target = None;
+                            s.cd = cd;
+                            self.sfx.push((Sfx::FlameStop, c));
+                        }
+                        continue;
+                    }
                     self.structs[i].cd = (self.structs[i].cd - DT).max(0.0);
                     if self.structs[i].cd > 0.0 || self.ammo < d.ammo {
                         continue;
                     }
-                    let range = self.turret_range(t, false);
-                    let Some(tg) = self.find_target(c, range) else { continue };
-                    let dir = (tg - c).normalize_or_zero();
-                    let src = self.rev_src(RevKey::Struct(i));
-                    // a cone of fire: puffs widen with distance
-                    for k in 1..=4 {
-                        let f = k as f32 / 4.0;
-                        let p = c + dir * (3.0 + (range - 3.0) * f);
-                        let r = d.rad * (0.6 + f * 0.9);
-                        self.swarm.add_damage(p.x, p.y, r, d.dmg * self.dmg_mult(t), src);
-                        self.damage_hives(p, r, 1.5);
-                        self.booms.push(Boom { p, r, t: 0.3, life: 0.3, kind: 3 });
-                    }
+                    let Some(tg) = self.flame_target(c, range) else { continue };
                     self.ammo -= d.ammo;
-                    let cd = self.reload(t);
                     let s = &mut self.structs[i];
-                    s.cd = cd;
-                    s.last_fire = self.time;
-                    s.aim = libm::atan2f(dir.y, dir.x);
-                    if self.time - s.snd >= 0.5 {
-                        s.snd = self.time;
-                        self.sfx.push((Sfx::Flame, c));
-                    }
+                    s.charge = FLAME_SPRAY;
+                    s.target = Some(tg);
+                    s.aim = libm::atan2f(tg.y - c.y, tg.x - c.x);
+                    s.snd = self.time;
+                    self.sfx.push((Sfx::Flame, c));
                 }
                 S::Rail => {
                     let range = self.turret_range(t, roof >= 0);
@@ -1995,17 +2186,15 @@ impl Game {
                     if self.structs[i].cd > 0.0 || self.ammo < d.ammo {
                         continue;
                     }
-                    // wait for a group worth the slug
-                    if let Some((tg, n)) = self.find_cluster(c, range) {
-                        if n >= 4 {
-                            self.ammo -= d.ammo;
-                            let cd = self.reload(t);
-                            let s = &mut self.structs[i];
-                            s.target = Some(tg);
-                            s.charge = RAIL_CHARGE;
-                            s.cd = cd;
-                            s.aim = libm::atan2f(tg.y - c.y, tg.x - c.x);
-                        }
+                    // wait for a line worth the slug
+                    if let Some(tg) = self.rail_target(c, range) {
+                        self.ammo -= d.ammo;
+                        let cd = self.reload(t);
+                        let s = &mut self.structs[i];
+                        s.target = Some(tg);
+                        s.charge = RAIL_CHARGE;
+                        s.cd = cd;
+                        s.aim = libm::atan2f(tg.y - c.y, tg.x - c.x);
                     }
                 }
                 S::Helium => {
@@ -2075,6 +2264,13 @@ impl Game {
                 _ => {}
             }
         }
+        // burning napalm
+        let burn = NAPALM_DPS * DT * self.dmg_mult(S::Flame);
+        for n in &mut self.napalm {
+            n.t -= DT;
+            self.swarm.add_damage(n.p.x, n.p.y, n.r, burn, 0);
+        }
+        self.napalm.retain(|n| n.t > 0.0);
         // shells in the air
         let mut landed = Vec::new();
         for sh in &mut self.shells {
@@ -2488,8 +2684,8 @@ impl Game {
             }
             self.extracted += n;
             self.score += 100.0 * n as f32;
-            self.scrap += 20.0 * n as f32;
-            self.ammo += 10.0 * n as f32;
+            self.gain_scrap(20.0 * n as f32);
+            self.gain_ammo(10.0 * n as f32);
             let ex = if c.x < W as f32 / 2.0 {
                 -30.0
             } else {
@@ -2654,6 +2850,49 @@ impl Game {
         }
     }
 
+    /// Civilians queuing at a pad that is waiting out its turnaround walk over to an idle pad
+    /// with nobody waiting.
+    fn rebalance_pads(&mut self) {
+        let pads: Vec<usize> = (0..self.structs.len())
+            .filter(|&k| {
+                let s = &self.structs[k];
+                !s.dead && !s.pending && s.t == S::Pad
+            })
+            .collect();
+        if pads.len() < 2 {
+            return;
+        }
+        let mut n: Vec<u32> = pads
+            .iter()
+            .map(|&k| self.civs.iter().filter(|c| (c.st == C_AT_PAD || c.st == C_TO_IDLE) && c.pad == k).count() as u32)
+            .collect();
+        for a in 0..pads.len() {
+            if self.structs[pads[a]].cd > 0.0 || n[a] > 0 {
+                continue;
+            }
+            // the busy pad with the longest queue
+            let Some(b) = (0..pads.len())
+                .filter(|&b| self.structs[pads[b]].cd > 0.0 && n[b] > 0)
+                .max_by(|&x, &y| n[x].cmp(&n[y]).then(y.cmp(&x)))
+            else {
+                break;
+            };
+            let mut moved = 0;
+            for cv in self.civs.iter_mut() {
+                if moved >= PAD_SEATS {
+                    break;
+                }
+                if cv.st == C_AT_PAD && cv.pad == pads[b] {
+                    cv.st = C_TO_IDLE;
+                    cv.pad = pads[a];
+                    moved += 1;
+                }
+            }
+            n[b] -= moved;
+            n[a] += moved;
+        }
+    }
+
     fn civilians(&mut self) {
         let obj = self.obj.clone();
         let hqd = self.hq_dist.clone();
@@ -2661,9 +2900,29 @@ impl Game {
         let portf = self.portal_field.clone();
         let mut waiting = 0;
         let mut dragged: Vec<Vec2> = Vec::new();
+        if self.ticks % 20 == 0 {
+            self.rebalance_pads();
+        }
         for i in 0..self.civs.len() {
             let st = self.civs[i].st;
-            if st >= C_DEAD && st != C_TO_PAD && st != C_AT_PAD {
+            if st >= C_DEAD && st != C_TO_PAD && st != C_AT_PAD && st != C_TO_IDLE {
+                continue;
+            }
+            if st == C_TO_IDLE {
+                waiting += 1;
+                let pi = self.civs[i].pad;
+                match self.structs.get(pi) {
+                    Some(s) if !s.dead => {
+                        let to = s.center();
+                        let mut pp = self.civs[i].p;
+                        Self::step_toward(&obj, &mut pp, to, 9.0);
+                        self.civs[i].p = pp;
+                        if pp.distance(to) < 6.5 {
+                            self.civs[i].st = C_AT_PAD;
+                        }
+                    }
+                    _ => self.civs[i].st = C_TO_PAD,
+                }
                 continue;
             }
             let p = self.civs[i].p;
@@ -2899,10 +3158,20 @@ impl Game {
         let Some(tc) = self.nearest_walkable(at, 20) else {
             return false;
         };
+        // troops step out onto open ground, never inside a wall or another building
+        let Some(bc) = self.nearest_walkable(base, 16) else {
+            return false;
+        };
+        let base = Self::cell_pos(bc);
         let mut m = Vec::new();
         for _ in 0..n {
+            let mut p = base + vec2((self.rng.f() - 0.5) * 6.0, (self.rng.f() - 0.5) * 3.0);
+            let pc = (p.y.clamp(0.0, H as f32 - 1.0) as usize) * W + p.x.clamp(0.0, W as f32 - 1.0) as usize;
+            if self.obj[pc] != FREE {
+                p = base;
+            }
             m.push(Member {
-                p: base + vec2((self.rng.f() - 0.5) * 10.0, self.rng.f() * 3.0),
+                p,
                 hp: 1.0,
                 cd: self.rng.f() * 0.3,
                 alive: true,
@@ -3041,6 +3310,19 @@ impl Game {
                 continue;
             }
             self.squads[si].found += claimed;
+            // a team that can't get anywhere gives up rather than standing there forever
+            if matches!(self.squads[si].state, QState::Wait | QState::Out | QState::Return) {
+                let q = &mut self.squads[si];
+                q.t += DT;
+                if q.t > 150.0 {
+                    if q.state == QState::Return {
+                        q.done = true;
+                        continue;
+                    }
+                    q.state = QState::Return;
+                    q.t = 0.0;
+                }
+            }
             match self.squads[si].state {
                 QState::Out if near => {
                     self.squads[si].state = QState::Gather;
@@ -3080,6 +3362,7 @@ impl Game {
                     let q = &mut self.squads[si];
                     if all_full || q.t <= 0.0 {
                         q.state = QState::Return;
+                        q.t = 0.0;
                         q.gather = None;
                         let f = q.found;
                         // rescue stations work quietly
@@ -3396,7 +3679,7 @@ impl Game {
         }
         for (s, p) in msgs {
             self.score += 2000.0;
-            self.scrap += 300.0;
+            self.gain_scrap(300.0);
             self.booms.push(Boom {
                 p,
                 r: 30.0,

@@ -671,6 +671,8 @@ impl App {
                 Sfx::ArtilleryHit => (music::Snd::ArtilleryHit, 0.8, jitter),
                 Sfx::Bomb => (music::Snd::ArtilleryHit, 0.9, 0.85 * jitter),
                 Sfx::Nuke => (music::Snd::ArtilleryHit, 1.0, 0.5),
+                // the end of a flame spray: nothing to play (ending the Flame sound is up to playback)
+                Sfx::FlameStop => continue,
             };
             // a nuke is heard anywhere on the map
             let gain = if s == Sfx::Nuke { gain * near.max(0.7) } else { gain * near * zoom };
@@ -1915,7 +1917,7 @@ impl App {
                 if d.turret && !d.ground && self.press.is_none() {
                     if let Some((b, p)) = g.roof_at(mw) {
                         let q = p;
-                        let can = g.can_place_roof(b, p);
+                        let can = g.can_place_roof(t, b, p);
                         let cost = g.cost_at(t, p);
                         let afford = g.scrap >= cost;
                         ghost(q.x - d.w as f32 / 2.0, q.y - d.h as f32 / 2.0, d.w as f32, d.h as f32, g.world.buildings[b].h, can && afford);
@@ -2127,8 +2129,8 @@ impl App {
         // stats, most important first; what doesn't fit is left out
         let evac = g.goal > 0.0;
         let mut stats: Vec<(&str, String, Color, Option<&str>)> = vec![
-            ("SCRAP", format!("{:.0}", g.scrap), p.accent, None),
-            ("AMMO", format!("{:.0}", g.ammo), if g.ammo < 20.0 { p.bad } else { p.text }, None),
+            ("SCRAP", format!("{:.0}/{:.0}", g.scrap, g.scrap_cap), if g.scrap >= g.scrap_cap { p.warn } else { p.accent }, Some("Scrap stored / storage. Build scrap depots for more room.")),
+            ("AMMO", format!("{:.0}/{:.0}", g.ammo, g.ammo_cap), if g.ammo < 20.0 { p.bad } else if g.ammo >= g.ammo_cap { p.warn } else { p.text }, Some("Ammo stored / storage. Build ammo depots for more room.")),
             ("HOSTILES", fmt_n(g.hostiles()), p.text, None),
             ("CIVILIANS", fmt_n(g.alive_civs()), p.text, None),
         ];
@@ -2223,6 +2225,8 @@ impl App {
                 Tool::Build(S::Pad) => "Evac point",
                 Tool::Build(S::Lab) => "Research",
                 Tool::Build(S::Rescue) => "Rescue stn",
+                Tool::Build(S::ScrapDepot) => "Scrapyard",
+                Tool::Build(S::AmmoDepot) => "Ammo dump",
                 Tool::Build(S::Flame) => "Flame",
                 Tool::Build(S::Helium) => "Helium",
                 Tool::Unit(U::Rifle) => "Rifles",

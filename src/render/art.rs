@@ -229,6 +229,8 @@ pub fn structure(mb: &mut MB, g: &Game, i: usize, s: &Structure, base: f32, t: f
             labels.items.push((p3(c, top + 3.0), "HQ".into(), WHITE, 14.0));
             top
         }
+        S::ScrapDepot => scrap_depot(mb, d, c, w, h, base, t),
+        S::AmmoDepot => ammo_depot(mb, d, c, w, h, base, t),
         S::Flame => flame(mb, d, c, w, h, base, s.aim, g.time - s.last_fire < 0.25, t),
         S::Rail => {
             let charge = if s.charge > 0.0 { 1.0 - s.charge / RAIL_CHARGE } else { 0.0 };
@@ -258,6 +260,65 @@ pub fn structure(mb: &mut MB, g: &Game, i: usize, s: &Structure, base: f32, t: f
             top
         }
     }
+}
+
+/// A fenced scrap yard: heaps of salvage behind low concrete walls and a loading crane.
+fn scrap_depot(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, t: f32) -> f32 {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    plinth(mb, c, hw, hh, base);
+    let z0 = base + 0.5;
+    mb.poly_at(&chamfer(c, hw - 0.5, hh - 0.5, 0.8, 0.0), z0 + 0.02, mix(d.side, CONCRETE_DARK, 0.65));
+    // walls on three sides, open toward +y
+    for (x0, y0, x1, y1) in [(-hw + 0.4, -hh + 0.4, hw - 0.4, -hh + 0.8), (-hw + 0.4, -hh + 0.4, -hw + 0.8, hh - 0.4), (hw - 0.8, -hh + 0.4, hw - 0.4, hh - 0.4)] {
+        block(mb, &rect(c, x0, y0, x1, y1, 0.0), z0, z0 + 1.1, CONCRETE, CONCRETE_DARK);
+        band(mb, &rect(c, x0, y0, x1, y1, 0.0), z0 + 0.75, z0 + 0.95, d.top);
+    }
+    // salvage heaps: rusty cones with a few girders sticking out
+    let rust = rgb(146, 104, 72);
+    for (k, (x, y, r, ht)) in [(-1.2f32, -1.0f32, 1.5f32, 1.6f32), (1.3, -0.8, 1.2, 1.2), (0.0, 1.0, 1.1, 1.0)].iter().enumerate() {
+        let p = c + vec2(*x, *y);
+        let lo = ngon(p, *r, 9, k as f32);
+        let hi = ngon(p + vec2(0.1, -0.1), r * 0.25, 9, k as f32);
+        loft(mb, &lo, &hi, z0, z0 + ht, Some(mix(rust, WHITE, 0.1)), mix(rust, d.side, 0.3));
+        strut(mb, p, z0 + ht * 0.4, p + rot(vec2(0.9, 0.0), k as f32 * 2.1), z0 + ht + 0.4, 0.07, STEEL);
+    }
+    // crane
+    let m = c + vec2(hw - 1.4, hh - 1.4);
+    strut(mb, m, z0, m, z0 + 3.4, 0.14, rgb(250, 204, 40));
+    let arm = rot(vec2(-3.2, 0.0), 0.6 + (t * 0.3).sin() * 0.5);
+    beam(mb, m, m + arm, 0.12, z0 + 3.3, rgb(250, 204, 40));
+    strut(mb, m + arm, z0 + 1.6, m + arm, z0 + 3.3, 0.03, STEEL_DARK);
+    block(mb, &rect(m + arm, -0.35, -0.35, 0.35, 0.35, 0.0), z0 + 1.3, z0 + 1.6, STEEL, STEEL_DARK);
+    z0 + 3.4
+}
+
+/// An earth-covered ammunition bunker with blast doors, a hazard band and stacked crates.
+fn ammo_depot(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, t: f32) -> f32 {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    plinth(mb, c, hw, hh, base);
+    let z0 = base + 0.5;
+    let lo = chamfer(c + vec2(0.0, -0.6), hw - 0.4, hh - 1.2, 1.2, 0.0);
+    let hi = chamfer(c + vec2(0.0, -0.6), hw - 1.6, hh - 2.2, 0.8, 0.0);
+    let top = base + d.ht;
+    let earth = rgb(112, 128, 84);
+    loft(mb, &lo, &hi, z0, top, Some(mix(earth, WHITE, 0.08)), mix(earth, BLACK, 0.15));
+    // concrete front with blast doors
+    let front = rect(c, -hw + 1.2, hh - 2.0, hw - 1.2, hh - 1.6, 0.0);
+    block(mb, &front, z0, top - 0.3, CONCRETE, CONCRETE_DARK);
+    band(mb, &front, top - 0.9, top - 0.6, d.top);
+    for k in [-1.0f32, 1.0] {
+        block(mb, &rect(c + vec2(k * 0.85, hh - 1.6), -0.75, 0.0, 0.75, 0.1, 0.0), z0, z0 + 1.4, STEEL, STEEL_DARK);
+    }
+    vent(mb, c + vec2(0.0, -0.8), top, 0.45, 0.0);
+    // crates on the apron
+    for (k, x) in [-hw + 1.0, -hw + 1.8, hw - 1.4].iter().enumerate() {
+        let p = c + vec2(*x, hh - 0.9);
+        let z = z0 + if k == 1 { 0.0 } else { 0.0 };
+        block(mb, &rect(p, -0.35, -0.3, 0.35, 0.3, 0.1 * k as f32), z, z + 0.55, rgb(120, 130, 80), rgb(84, 92, 56));
+    }
+    let blink = (t * 1.1).fract() < 0.3;
+    lamp(mb, c + vec2(hw - 1.4, hh - 1.8), top - 0.3, 0.16, if blink { rgb(255, 170, 50) } else { rgb(110, 70, 20) });
+    top
 }
 
 /// A squat armoured bunker with sloped walls, fuel tanks at the back and a flame nozzle that

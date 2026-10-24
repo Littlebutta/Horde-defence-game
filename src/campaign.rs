@@ -352,12 +352,15 @@ impl Campaign {
     /// What the tech tree lets a city's game build, recruit and use.
     pub fn allowed(&self) -> Allowed {
         let mut a = Allowed { builds: START_BUILDS.to_vec(), units: vec![U::Rifle], abilities: Vec::new() };
+        // storage is never locked away: scrap depots from the start, ammo depots with the plant
+        a.builds.push(S::ScrapDepot);
         for t in &self.tech {
             match *t {
                 Tech::Build(s) => {
                     a.builds.push(s);
                     if shoots(s) && !a.builds.contains(&S::Plant) {
                         a.builds.push(S::Plant);
+                        a.builds.push(S::AmmoDepot);
                     }
                     if s == S::Silo {
                         a.abilities.push(A::Icbm);

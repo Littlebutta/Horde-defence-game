@@ -51,7 +51,7 @@ pub enum Cmd {
     Cease(u32),
 }
 
-const ALL_S: [S; 16] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue];
+const ALL_S: [S; 18] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue, S::ScrapDepot, S::AmmoDepot];
 const ALL_U: [U; 2] = [U::Rifle, U::Tank];
 
 fn s_id(t: S) -> u32 {

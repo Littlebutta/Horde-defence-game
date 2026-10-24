@@ -130,6 +130,8 @@ pub fn gallery(g: &mut Game) {
     put(g, S::Artillery, 1, 30);
     put(g, S::Helipad, 13, 30);
     put(g, S::Rescue, 28, 30);
+    put(g, S::ScrapDepot, -30, 44);
+    put(g, S::AmmoDepot, -20, 44);
     for _ in 0..40 {
         g.tick();
     }
@@ -171,14 +173,18 @@ pub fn towers(g: &mut Game) {
     for (dx, dy) in [(0.0, -110.0), (-60.0, -100.0), (60.0, -100.0)] {
         g.queue((h.x + dx, h.y + dy), horde, 4.0);
     }
+    if let (Some(f), true) = (flame, horde > 0.0) {
+        let p = g.structs[f].center() + vec2(0.0, -16.0);
+        g.queue((p.x, p.y), 200.0, 1.0);
+    }
     let n: u32 = std::env::var("PH_TOWER_TICKS").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
     for t in 0..n {
         g.tick();
         if t % 100 == 99 {
             let slowed = g.slow.iter().filter(|v| **v != 0).count();
-            let fires = g.booms.iter().filter(|b| b.kind == 3).count();
+            let fires = g.napalm.len();
             eprintln!(
-                "t {:.0}s: kills {} ammo used {:.0} shells {} slow cells {} fire puffs {} rail charge {:?} gunships {} station squads {} sfx {}",
+                "t {:.0}s: kills {} ammo used {:.0} shells {} slow cells {} napalm {} rail charge {:?} gunships {} station squads {} sfx {}",
                 g.time,
                 g.kills - kills0,
                 ammo0 - g.ammo,
