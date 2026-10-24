@@ -305,7 +305,7 @@ impl Pack {
 /// city failed.
 pub fn fetch_all(out: &Path) -> bool {
     let _ = std::fs::create_dir_all(out);
-    let only: Option<String> = std::env::var("PH_FETCH_ONLY").ok();
+    let only: Option<String> = std::env::var("PH_FETCH_ONLY").ok().filter(|s| !s.trim().is_empty());
     let mut ok = true;
     for c in CITIES.iter() {
         if only.as_ref().is_some_and(|o| !o.split(',').any(|x| x.trim().eq_ignore_ascii_case(c.name))) {
