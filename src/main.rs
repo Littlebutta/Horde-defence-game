@@ -115,10 +115,15 @@ async fn run(steam: Option<net::Steam>) {
                         for _ in 0..n {
                             g.tick();
                         }
+                        let t1 = std::time::Instant::now();
+                        for _ in 0..100 {
+                            g.tick();
+                        }
                         eprintln!(
-                            "stress: {} hostiles, sim {:.1} ms/tick",
+                            "stress: {} hostiles, {:.1} ms/tick over the last 100 ticks, checksum {:016x}",
                             g.hostiles(),
-                            g.sim_ms
+                            t1.elapsed().as_secs_f32() * 10.0,
+                            g.checksum()
                         );
                     }
                 }

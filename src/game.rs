@@ -1082,12 +1082,14 @@ impl Game {
         }
     }
     pub fn stress(&mut self) {
+        // PH_STRESS_N sets the size of the test horde (default one million)
+        let n: f32 = std::env::var("PH_STRESS_N").ok().and_then(|s| s.parse().ok()).unwrap_or(1e6);
         for _ in 0..8 {
             if let Some(p) = self.random_cell(1500) {
-                self.queue(p, 125_000.0, 6.0);
+                self.queue(p, n / 8.0, 6.0);
             }
         }
-        self.show("1,000,000 hostiles inbound", 4.0);
+        self.show(format!("{} hostiles inbound", n as u64), 4.0);
     }
 
     fn director(&mut self) {
@@ -1229,8 +1231,8 @@ impl Game {
             h ^= v as u64;
             h = h.wrapping_mul(0x0100_0000_01b3);
         };
-        mix(self.swarm.u.len() as u32);
-        for u in &self.swarm.u {
+        mix(self.swarm.len() as u32);
+        for u in self.swarm.units() {
             mix(u.x.to_bits() ^ u.y.to_bits().rotate_left(16));
             mix(u.hp.to_bits());
         }

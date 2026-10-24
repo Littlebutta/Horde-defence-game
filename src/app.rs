@@ -1235,12 +1235,15 @@ impl App {
         } else if !self.paused && !g.over {
             self.acc += dt;
             let mut n = 0;
-            while self.acc >= DT && n < 3 {
+            // a huge horde can make one tick take most of a frame: then run one tick per frame and
+            // let the game slow down a little, instead of catching up and freezing the screen
+            let most = if g.sim_ms > 20.0 { 1 } else { 3 };
+            while self.acc >= DT && n < most {
                 g.tick();
                 self.acc -= DT;
                 n += 1;
             }
-            if n == 3 {
+            if n == most {
                 self.acc = 0.0;
             }
             if n > 0 {
