@@ -165,6 +165,9 @@ pub struct FieldWorker {
     pub busy: usize,
     /// the current simulation tick, set by the game
     pub now: u64,
+    /// alone (no lockstep to keep), a late result is picked up a tick later instead of the
+    /// simulation waiting for it
+    pub relaxed: bool,
     due: VecDeque<u64>,
 }
 
@@ -202,20 +205,20 @@ impl FieldWorker {
                 }
             }
         });
-        FieldWorker { tx, rx, busy: 0, now: 0, due: VecDeque::new() }
+        FieldWorker { tx, rx, busy: 0, now: 0, relaxed: false, due: VecDeque::new() }
     }
     pub fn submit(&mut self, j: Job) {
         self.busy += 1;
         self.due.push_back(self.now + LAG);
         let _ = self.tx.send(j);
     }
-    /// The next result whose tick has come, waiting for the worker if needed.
+    /// The next result whose tick has come, waiting for the worker if needed (unless `relaxed`).
     pub fn poll(&mut self) -> Option<Done> {
         if *self.due.front()? > self.now {
             return None;
         }
+        let d = if self.relaxed { self.rx.try_recv().ok()? } else { self.rx.recv().ok()? };
         self.due.pop_front();
-        let d = self.rx.recv().ok()?;
         self.busy -= 1;
         Some(d)
     }

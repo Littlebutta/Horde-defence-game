@@ -131,11 +131,25 @@ async fn run(steam: Option<net::Steam>) {
                             g.tick();
                         }
                         eprintln!(
-                            "stress: {} hostiles, {:.1} ms/tick over the last 100 ticks, checksum {:016x}",
+                            "stress: {} hostiles in {} clumps and units, {:.1} ms/tick over the last 100 ticks, checksum {:016x}",
                             g.hostiles(),
+                            g.swarm.entities(),
                             t1.elapsed().as_secs_f32() * 10.0,
                             g.checksum()
                         );
+                        if std::env::var("PH_HIST").is_ok() {
+                            let mut h = [0usize; 12];
+                            let mut cells = 0;
+                            for c in 0..world::N {
+                                let d = g.swarm.at(c) as usize;
+                                if d > 0 {
+                                    cells += 1;
+                                    let b = (usize::BITS - d.leading_zeros()) as usize;
+                                    h[b.min(11)] += d;
+                                }
+                            }
+                            eprintln!("occupied cells {cells}; units by cell density (1,2-3,4-7,8-15,...): {:?}", &h[1..]);
+                        }
                     }
                 }
                 if std::env::var("PH_SCRIPT").is_ok() {

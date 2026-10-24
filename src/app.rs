@@ -136,6 +136,11 @@ pub struct App {
     status: String,
     loader: Option<osm::Loader>,
     game: Option<Game>,
+    /// runs single-player ticks while the last frame is shown
+    ticker: Ticker,
+    /// ticks due to run once this frame is drawn, and ticks run since the horde was last redrawn
+    due: u32,
+    fresh_ticks: u32,
     scene: Option<Scene>,
     cam: Orbit,
     tool: Tool,
@@ -221,8 +226,51 @@ struct Orbit {
     yaw: f32,
     pitch: f32,
 }
-/// Hostiles the "Spawn 1M" stress-test button (and F9) drops in.
-const STRESS_N: u32 = 1_000_000;
+/// Runs single-player simulation ticks on their own thread, between one frame being drawn and the
+/// next starting, so a tick overlaps with the GPU drawing the frame and waiting for the screen
+/// instead of landing on top of every third frame (which showed as a hitch). The frame takes the
+/// game back first thing, waiting if the ticks are not done yet.
+struct Ticker {
+    tx: std::sync::mpsc::Sender<(Box<Game>, u32)>,
+    rx: std::sync::mpsc::Receiver<(Box<Game>, u32)>,
+    busy: bool,
+}
+
+impl Ticker {
+    fn new() -> Self {
+        let (tx, jobs) = std::sync::mpsc::channel::<(Box<Game>, u32)>();
+        let (done, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("ticker".into())
+            .spawn(move || {
+                while let Ok((mut g, n)) = jobs.recv() {
+                    for _ in 0..n {
+                        g.tick();
+                    }
+                    if done.send((g, n)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("ticker thread");
+        Ticker { tx, rx, busy: false }
+    }
+    fn start(&mut self, g: Game, n: u32) {
+        self.busy = true;
+        self.tx.send((Box::new(g), n)).expect("ticker thread");
+    }
+    fn join(&mut self) -> Option<(Game, u32)> {
+        if !self.busy {
+            return None;
+        }
+        self.busy = false;
+        let (g, n) = self.rx.recv().expect("ticker thread");
+        Some((*g, n))
+    }
+}
+
+/// Hostiles the "Spawn 5M" stress-test button (and F9) drops in.
+const STRESS_N: u32 = 5_000_000;
 const FOVY: f32 = 0.8;
 const TOP_PITCH: f32 = 1.5;
 const MIN_PITCH: f32 = 0.3;
@@ -300,6 +348,9 @@ impl App {
             status: String::new(),
             loader: None,
             game: None,
+            ticker: Ticker::new(),
+            due: 0,
+            fresh_ticks: 0,
             scene: None,
             cam: Orbit { t: vec2(W as f32 / 2.0, H as f32 / 2.0), dist: 400.0, yaw: 0.0, pitch: 0.95 },
             tool: Tool::None,
@@ -355,6 +406,7 @@ impl App {
     }
 
     pub fn frame(&mut self) {
+        self.join_ticks();
         let dt = get_frame_time().min(0.1);
         self.clock += dt;
         self.ui_rects.clear();
@@ -1511,7 +1563,15 @@ impl App {
         }
     }
     pub fn game_mut(&mut self) -> Option<&mut Game> {
+        self.join_ticks();
         self.game.as_mut()
+    }
+    /// Takes the game back from the ticker thread once the ticks it was given have run.
+    fn join_ticks(&mut self) {
+        if let Some((g, n)) = self.ticker.join() {
+            self.game = Some(g);
+            self.fresh_ticks += n;
+        }
     }
     pub fn set_view(&mut self, at: Vec2, scale: f32) {
         self.cam.t = at;
@@ -1603,7 +1663,10 @@ impl App {
         let players = match &self.sess {
             Some(s) if s.in_game || !s.is_host() => s.game_players,
             Some(s) => s.players.len(),
-            None => 1,
+            None => {
+                g.relax_fields();
+                1
+            }
         };
         g.add_player_hqs(players);
         if let Some(c) = camp {
@@ -1893,27 +1956,33 @@ impl App {
             if n > 0 {
                 sc.update_units(&g);
             }
-        } else if !self.paused && !g.over {
-            self.acc += dt;
-            let mut n = 0;
-            // a huge horde can make one tick take most of a frame: then run one tick per frame and
-            // let the game slow down a little, instead of catching up and freezing the screen
-            let most = if g.sim_ms > 20.0 { 1 } else { 3 };
-            while self.acc >= DT && n < most {
-                g.tick();
-                self.acc -= DT;
-                n += 1;
-            }
-            if n == most {
-                self.acc = 0.0;
-            }
-            if n > 0 {
+        } else {
+            // alone, the ticks that came due last frame ran on the ticker thread while that frame
+            // was shown (see `Ticker`); the ones due now run once this frame is drawn
+            if std::mem::take(&mut self.fresh_ticks) > 0 {
                 sc.update_units(&g);
+            }
+            if !self.paused && !g.over {
+                self.acc += dt;
+                // a huge horde can make one tick take most of a frame: then run one tick per frame
+                // and let the game slow down a little, instead of catching up and freezing the screen
+                let most = if g.sim_ms > 20.0 { 1 } else { 3 };
+                while self.acc >= DT && self.due < most {
+                    self.acc -= DT;
+                    self.due += 1;
+                }
+                if self.due == most {
+                    self.acc = 0.0;
+                }
             }
         }
         if !sc.units_fresh {
             sc.update_units(&g);
         }
+        // the horde glides from the last tick's picture to this one's until the next tick
+        // (ticks about to run show next frame: until then the newest picture stands)
+        let still = self.placing.is_some() || g.over || self.due > 0 || self.sess.as_ref().map_or(self.paused, |s| s.paused);
+        sc.fade = if still { 1.0 } else { (self.acc / DT).clamp(0.0, 1.0) };
         sc.maintain(&mut g, th, dt);
         if let Some(s) = self.selected {
             if s >= g.groups.len() || g.groups[s].dead {
@@ -2033,8 +2102,15 @@ impl App {
         ui::end();
         self.input(&mut g, &mut sc, mw, dt);
         if self.screen == Screen::Play {
-            self.game = Some(g);
+            let due = std::mem::take(&mut self.due);
+            if due > 0 && self.placing.is_none() && self.sess.is_none() {
+                self.ticker.start(g, due);
+            } else {
+                self.game = Some(g);
+            }
             self.scene = Some(sc);
+        } else {
+            self.due = 0;
         }
         if self.placing.is_some() {
             if let Some(p) = self.place_at.take() {
@@ -2354,12 +2430,12 @@ impl App {
         let mut row = top.pad(16.0, 0.0);
         let bs = row.cut_right(5.0 * 90.0 + 4.0 * 6.0, 16.0);
         let b = Rect::new(bs.x, top.y + 10.0, bs.w, 32.0).cols(5, 6.0);
-        // stress test: drops a million more hostiles each press (F9 does the same)
-        if !g.over && self.button(b[0], "Spawn 1M", true, false) {
+        // stress test: drops five million more hostiles each press (F9 does the same)
+        if !g.over && self.button(b[0], "Spawn 5M", true, false) {
             self.act(g, Cmd::Stress(STRESS_N));
         }
         if self.hot(b[0]) {
-            self.tip = Some("Testing: one million more hostiles pour in from eight spots on the map [F9]".into());
+            self.tip = Some("Testing: five million more hostiles pour in from eight spots on the map [F9]".into());
         }
         if self.button(b[1], "Settings", true, false) {
             self.open_settings();
@@ -3155,6 +3231,7 @@ impl App {
             (30, false, Cmd::Deploy(U::Rifle, hq + vec2(0.0, -40.0))),
             (40, true, Cmd::Ability(A::Rescue, hq + vec2(120.0, 60.0), hq + vec2(120.0, 60.0))),
             (60, false, Cmd::Build { t: S::Gun, a: hq + vec2(-24.0, 0.0), b: hq + vec2(-24.0, 0.0) }),
+            (70, true, Cmd::Stress(300_000)),
         ];
         let step = self.test_step as usize;
         if let Some((at, by_host, c)) = plan.get(step) {

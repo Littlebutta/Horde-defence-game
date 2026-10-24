@@ -756,6 +756,13 @@ impl Game {
         o
     }
 
+    /// Single player: field results that come late are used a tick later instead of stalling the game.
+    pub fn relax_fields(&mut self) {
+        for fw in [&mut self.fw_hq, &mut self.fw_aux, &mut self.fw_hunt] {
+            fw.relaxed = true;
+        }
+    }
+
     fn pump_fields(&mut self) {
         self.ticks += 1;
         for fw in [&mut self.fw_hq, &mut self.fw_aux, &mut self.fw_hunt] {
@@ -1495,7 +1502,7 @@ impl Game {
         let n: f32 = std::env::var("PH_STRESS_N").ok().and_then(|s| s.parse().ok()).unwrap_or(1e6);
         self.stress_n(n);
     }
-    /// Test horde of `n` hostiles from eight random spots (the in-game "Spawn 1M" button).
+    /// Test horde of `n` hostiles from eight random spots (the in-game "Spawn 5M" button).
     pub fn stress_n(&mut self, n: f32) {
         for k in 0..8 {
             if let Some(p) = self.random_cell(1500) {
@@ -1660,7 +1667,7 @@ impl Game {
         mix(self.swarm.len() as u32);
         for u in self.swarm.units() {
             mix(u.x.to_bits() ^ u.y.to_bits().rotate_left(16));
-            mix(u.hp.to_bits());
+            mix(u.hp.to_bits() ^ u.n as u32);
         }
         for c in &self.civs {
             mix(c.p.x.to_bits() ^ c.p.y.to_bits().rotate_left(16) ^ c.st as u32);
@@ -1697,6 +1704,7 @@ impl Game {
             return;
         }
         let t0 = std::time::Instant::now();
+        let prof0 = self.prof;
         let mut last = t0;
         let mut lap = |slot: &mut f64| {
             let now = std::time::Instant::now();
@@ -1854,8 +1862,14 @@ impl Game {
             self.over = true;
         }
         self.prof_n += 1;
+        let names = ["fields", "spawn", "swarm", "revs", "damage", "civs", "squads", "groups", "econ", "turrets", "abil", "misc"];
+        // PH_PROF also reports every tick that took far longer than usual (a hitch), and why
+        let took = t0.elapsed().as_secs_f32() * 1000.0;
+        if self.prof_n > 20 && took > self.sim_ms * 2.0 + 2.0 && std::env::var("PH_PROF").is_ok() {
+            let line: Vec<String> = names.iter().zip(self.prof.iter().zip(prof0.iter())).filter(|(_, (a, b))| *a - *b > 0.5).map(|(n, (a, b))| format!("{} {:.1}", n, a - b)).collect();
+            eprintln!("hitch at tick {}: {:.1} ms (usual {:.1}): {}", self.ticks, took, self.sim_ms, line.join(" | "));
+        }
         if self.prof_n % 200 == 0 && std::env::var("PH_PROF").is_ok() {
-            let names = ["fields", "spawn", "swarm", "revs", "damage", "civs", "squads", "groups", "econ", "turrets", "abil", "misc"];
             let line: Vec<String> = names.iter().zip(self.prof.iter()).map(|(n, v)| format!("{} {:.2}", n, v / 200.0)).collect();
             eprintln!("ms/tick: {}", line.join(" | "));
             self.prof = [0.0; 12];

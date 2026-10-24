@@ -11,7 +11,7 @@
 
 use crate::defs::*;
 use crate::game::*;
-use crate::swarm::{TINT_ARMY_SHIFT, TINT_DOWN, TINT_FLY, TINT_MIXED_RAGE, TINT_RAGE};
+use crate::swarm::{self, TINT_ARMY_SHIFT, TINT_DOWN, TINT_FLY, TINT_MIXED_RAGE, TINT_RAGE};
 use crate::world::*;
 use macroquad::miniquad::{BlendFactor, BlendState, BlendValue, Comparison, Equation, PipelineParams};
 use macroquad::models::{Mesh, Vertex};
@@ -76,6 +76,34 @@ varying lowp vec2 uv;
 uniform sampler2D Texture;
 void main() {
     gl_FragColor = color * texture2D(Texture, uv);
+}"#;
+
+/// The horde: blends the previous tick's picture (`Prev`) into this tick's (`Texture`) by `Fade`,
+/// so units glide from cell to cell between the 20 Hz ticks instead of jumping. Colours are mixed
+/// premultiplied, since an empty texel's colour is left over from whatever stood there before.
+const VS_HORDE: &str = r#"#version 100
+attribute vec3 position;
+attribute vec2 texcoord;
+attribute vec4 color0;
+varying mediump vec2 uv;
+uniform mat4 Model;
+uniform mat4 Projection;
+void main() {
+    gl_Position = Projection * Model * vec4(position, 1);
+    uv = texcoord;
+}"#;
+const FS_HORDE: &str = r#"#version 100
+precision mediump float;
+varying mediump vec2 uv;
+uniform sampler2D Texture;
+uniform sampler2D Prev;
+uniform float Fade;
+void main() {
+    vec4 a = texture2D(Prev, uv);
+    vec4 b = texture2D(Texture, uv);
+    float al = mix(a.a, b.a, Fade);
+    vec3 c = mix(a.rgb * a.a, b.rgb * b.a, Fade);
+    gl_FragColor = vec4(al > 0.0 ? c / al : c, al);
 }"#;
 
 /// Solids: like `FS`, but surfaces tagged with u = 1 (fungus on infected blocks) throb with
@@ -153,6 +181,20 @@ pub fn flat_material() -> Material {
         MaterialParams {
             pipeline_params: PipelineParams { depth_test: Comparison::Always, depth_write: true, color_blend: Some(blend), alpha_blend: Some(blend), ..Default::default() },
             ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+/// The horde layer (see `FS_HORDE`): a ground layer like `flat_material`.
+pub fn horde_material() -> Material {
+    let blend = BlendState::new(Equation::Add, BlendFactor::Value(BlendValue::SourceAlpha), BlendFactor::OneMinusValue(BlendValue::SourceAlpha));
+    load_material(
+        ShaderSource::Glsl { vertex: VS_HORDE, fragment: FS_HORDE },
+        MaterialParams {
+            pipeline_params: PipelineParams { depth_test: Comparison::Always, depth_write: true, color_blend: Some(blend), alpha_blend: Some(blend), ..Default::default() },
+            uniforms: vec![UniformDesc::new("Fade", UniformType::Float1)],
+            textures: vec!["Prev".to_string()],
         },
     )
     .unwrap()
@@ -592,7 +634,14 @@ pub struct Scene {
     ground: Vec<Mesh>,
     tiles: Vec<Tile>,
     looks: Vec<BLook>,
-    units: Texture2D,
+    /// the horde as of the last two ticks; `units[cur]` is the newest
+    units: [Texture2D; 2],
+    cur: usize,
+    /// the horde tick each of `units` shows
+    units_tick: [u64; 2],
+    horde: Material,
+    /// how far between the last two ticks the horde is drawn (0 = the older, 1 = the newest)
+    pub fade: f32,
     ubuf: Vec<u8>,
     glow: Texture2D,
     gbuf: Vec<u8>,
@@ -631,8 +680,11 @@ fn infected_set(g: &Game) -> std::collections::HashSet<usize> {
 impl Scene {
     /// `painter`: the GPU's depth buffer doesn't work, draw solid things far to near instead.
     pub fn new(g: &Game, th: &Theme, painter: bool) -> Scene {
-        let units = Texture2D::from_rgba8(W as u16, H as u16, &vec![0u8; N * 4]);
-        units.set_filter(FilterMode::Nearest);
+        let units = [0, 1].map(|_| {
+            let t = Texture2D::from_rgba8(W as u16, H as u16, &vec![0u8; N * 4]);
+            t.set_filter(FilterMode::Nearest);
+            t
+        });
         let glow = Texture2D::from_rgba8(CW as u16, CH as u16, &vec![0u8; CW * CH * 4]);
         glow.set_filter(FilterMode::Linear);
         let zone = Texture2D::from_rgba8(ZW as u16, ZH as u16, &vec![0u8; ZW * ZH * 4]);
@@ -656,6 +708,10 @@ impl Scene {
             tiles,
             looks: (0..g.world.buildings.len()).map(|b| look(g, b, &inf)).collect(),
             units,
+            cur: 0,
+            units_tick: [0; 2],
+            horde: horde_material(),
+            fade: 1.0,
             ubuf: vec![0; N * 4],
             glow,
             gbuf: vec![0; CW * CH * 4],
@@ -693,16 +749,27 @@ impl Scene {
         }
         self.dark = th.dark;
         self.need_zone = true;
+        // redraw the whole horde in the new colours
+        self.units_tick = [0; 2];
+        self.units_fresh = false;
     }
 
-    /// Refresh the horde texture and glow from this tick's density grid.
+    /// Refresh the horde texture and glow from this tick's density grid. The older of the two horde
+    /// textures becomes the newest; only the bands of the map where the horde has been since that
+    /// texture was drawn are redrawn and uploaded, so a small horde costs next to nothing.
     pub fn update_units(&mut self, g: &Game) {
         let f = g.faction();
         let chaos = g.fac == CHAOS;
         let dens = &g.swarm.dens;
         let tint = &g.swarm.tint;
         let dark = self.dark;
+        let next = 1 - self.cur;
+        let since = self.units_tick[next];
+        let band: Vec<bool> = (0..swarm::TH).map(|ty| (0..swarm::TW).any(|tx| g.swarm.last_seen(ty * swarm::TW + tx) >= since)).collect();
         self.ubuf.par_chunks_mut(W * 4).enumerate().for_each(|(y, row)| {
+            if !band[y / swarm::TS] {
+                return;
+            }
             for x in 0..W {
                 let c = y * W + x;
                 let d = dens[c].load(Relaxed);
@@ -755,7 +822,23 @@ impl Scene {
                 row[o + 3] = a as u8;
             }
         });
-        self.units.update_from_bytes(W as u32, H as u32, &self.ubuf);
+        let gl = unsafe { get_internal_gl() };
+        let id = self.units[next].raw_miniquad_id();
+        let mut ty = 0;
+        while ty < swarm::TH {
+            if !band[ty] {
+                ty += 1;
+                continue;
+            }
+            let t0 = ty;
+            while ty < swarm::TH && band[ty] {
+                ty += 1;
+            }
+            let (y0, y1) = (t0 * swarm::TS, ty * swarm::TS);
+            gl.quad_context.texture_update_part(id, 0, y0 as i32, W as i32, (y1 - y0) as i32, &self.ubuf[y0 * W * 4..y1 * W * 4]);
+        }
+        self.units_tick[next] = g.swarm.tick();
+        self.cur = next;
         self.units_fresh = true;
         for i in 0..CW * CH {
             let n = g.swarm.coarse_at(i) as f32;
@@ -1424,7 +1507,11 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
         draw_mesh(m);
     }
     draw_texture_ex(&sc.glow, 0.0, 0.0, WHITE, full.clone());
-    draw_texture_ex(&sc.units, 0.0, 0.0, WHITE, full.clone());
+    gl_use_material(&sc.horde);
+    sc.horde.set_texture("Prev", sc.units[1 - sc.cur].clone());
+    sc.horde.set_uniform("Fade", sc.fade);
+    draw_texture_ex(&sc.units[sc.cur], 0.0, 0.0, WHITE, full.clone());
+    gl_use_material(&sc.flat);
     for m in ground_dynamic(g, th, v).finish() {
         draw_mesh(&m);
     }

@@ -15,6 +15,17 @@
 //!
 //! Dead units and leavers leave holes in a tile's list, which is swept once a quarter of it is holes.
 //!
+//! Clumps: where the horde is packed (dozens to hundreds of units per cell), the units sharing a cell
+//! are merged now and then into clumps of up to `MAX_CLUMP`, each stepped as one unit that carries a
+//! member count. The renderer only ever sees units per cell, and a packed cell is drawn the same
+//! whether it holds 30 units or 3 clumps of 10, so the swarm looks just as it did while the work per
+//! tick drops by the clump size. Each packed cell keeps about `CLUMPS_PER_CELL` clumps (big ones are
+//! broken up as the crowd thins), so the crowd still spreads out the way single units do. A clump
+//! splits back into single units where the crowd around it thins out (the edge of the horde, where
+//! single units are visible), wherever outside a packed crowd its members would have taken different
+//! steps, and when it takes damage, which kills its members unevenly (their health is spread like
+//! single units' is).
+//!
 //! Nothing depends on how many threads there are: random seeds come from (tick, tile, chunk), chunk
 //! sizes are fixed, and results are gathered in tile order, so co-op lockstep stays in sync.
 //!
@@ -39,6 +50,22 @@ pub const TH: usize = H / TS;
 pub const NT: usize = TW * TH;
 /// Units stepped per task inside a busy tile.
 const CHUNK: usize = 4096;
+/// Most members one clump carries.
+pub const MAX_CLUMP: u16 = 64;
+/// A tile merges its packed cells every this many ticks (tiles take turns).
+const MERGE_EVERY: u64 = 8;
+/// Units per cell, averaged over the 3x3 cells around, from which a cell's units get merged (and
+/// above which a clump keeps together even where its members would part ways) ...
+const MERGE_AT: u32 = 16;
+/// ... as long as none of those cells holds fewer than this (the edge of a crowd).
+const MERGE_LEAST: u32 = 4;
+/// Units per cell, averaged over the 3x3 cells around, below which a clump splits back into single units.
+const SPLIT_AT: u32 = 6;
+/// The same two for fliers, which flutter apart as they go: they keep together in thicker crowds only.
+const FLY_MERGE_AT: u32 = 32;
+const FLY_SPLIT_AT: u32 = 16;
+/// Clumps per packed cell to aim for, so a packed crowd still flows out in several directions.
+const CLUMPS_PER_CELL: u32 = 8;
 
 /// Cell coordinate of a position: one instruction instead of a saturating cast, which matters when it
 /// runs several times per unit per tick.
@@ -109,6 +136,8 @@ pub struct Unit {
     pub tg: u16,
     pub hd: u8,
     pub fl: u8,
+    /// members: 1 for a single unit, more for a clump (see the module notes)
+    pub n: u16,
 }
 
 /// A zombie that died where damage from attacker `src` landed.
@@ -133,6 +162,10 @@ pub struct Swarm {
     holes: Vec<u32>,
     /// bit 0: tile had units this tick, bit 1: last tick (so stale grid cells get cleared)
     seen: Vec<u8>,
+    /// the last tick each tile had units (so the renderer knows which parts of the map changed)
+    last: Vec<u64>,
+    /// members per tile
+    members: Vec<u64>,
     count: usize,
     /// units per cell this tick and last tick (16-bit keeps these grids small and cache friendly).
     /// Atomics only so tiles can share the grid; each cell is written by its own tile alone.
@@ -253,6 +286,21 @@ fn descend(m: u8, c: usize, mut bv: f32, field: impl Fn(usize) -> u32, inf: u32,
     best
 }
 
+/// The costs `descend` weighs (before jitter), into `out`: infinity where the step is closed.
+#[inline(always)]
+fn costs(out: &mut [f32; 8], m: u8, c: usize, field: impl Fn(usize) -> u32, inf: u32, prev: &[AtomicU16], pk: f32) {
+    for k in 0..8 {
+        if m & (1 << k) == 0 {
+            continue;
+        }
+        let nc = (c as isize + OFF[k]) as usize;
+        let fv = field(nc);
+        if fv != inf {
+            out[k] = fv as f32 + prev[nc].load(Relaxed) as f32 * pk;
+        }
+    }
+}
+
 /// `descend` over precomputed costs from `cell_costs`, with one row of the jitter table.
 /// Written as two plain passes (sum and min, then find) so the compiler can use SIMD.
 #[inline(always)]
@@ -294,6 +342,8 @@ struct Ctx<'a> {
     any_dmg: bool,
     tick: u64,
     jt: &'a Jitter,
+    /// PH_NOCLUMP=1 turns clumping off (to compare the horde's looks and speed)
+    merge: bool,
 }
 
 /// The cell grids one tile writes: its own cells only.
@@ -365,11 +415,13 @@ fn tint_of(u: &Unit, tm: Tm) -> u8 {
 }
 
 /// Right after a run of units has moved (while it is still in cache): drops the dead and the leavers
-/// (they become holes, leavers also go to `out`) and counts the rest into `acc`. Returns the kills.
-fn settle_units(t: usize, us: &mut [Unit], acc: &mut Acc, out: &mut Vec<Unit>, tm: Tm) -> (u32, u32) {
+/// (they become holes, leavers also go to `out`) and counts the rest into `acc`. Returns the kills,
+/// the holes and the members still standing in the run.
+fn settle_units(t: usize, us: &mut [Unit], acc: &mut Acc, out: &mut Vec<Unit>, tm: Tm) -> (u32, u32, u64) {
     let (x0, y0) = ((t % TW) * TS, (t / TW) * TS);
     let mut killed = 0;
     let mut holes = 0;
+    let mut members = 0;
     for u in us.iter_mut() {
         if u.fl & F_GONE != 0 {
             holes += 1;
@@ -378,11 +430,11 @@ fn settle_units(t: usize, us: &mut [Unit], acc: &mut Acc, out: &mut Vec<Unit>, t
         // zombies that just went down count as kills too, but stay (lying down)
         let just_down = u.hd & 0x80 != 0;
         if just_down {
-            killed += 1;
+            killed += u.n as u32;
             u.hd &= 0x7f;
         }
         if u.hp <= 0.0 {
-            killed += 1;
+            killed += u.n as u32;
             u.fl |= F_GONE;
             holes += 1;
             continue;
@@ -394,12 +446,13 @@ fn settle_units(t: usize, us: &mut [Unit], acc: &mut Acc, out: &mut Vec<Unit>, t
             holes += 1;
             continue;
         }
+        members += u.n as u64;
         if just_down {
             continue;
         }
         let i = ly * TS + lx;
         if u.fl & F_DOWN == 0 {
-            acc.dens[i] = acc.dens[i].saturating_add(1);
+            acc.dens[i] = acc.dens[i].saturating_add(u.n);
         }
         acc.tint[i] = acc.tint[i].max(tint_of(u, tm));
     }
@@ -409,7 +462,7 @@ fn settle_units(t: usize, us: &mut [Unit], acc: &mut Acc, out: &mut Vec<Unit>, t
             acc.coarse[(ly / CG) * TC + lx / CG] += acc.dens[ly * TS + lx] as u32;
         }
     }
-    (killed, holes)
+    (killed, holes, members)
 }
 
 impl Grids<'_> {
@@ -438,9 +491,9 @@ impl Grids<'_> {
         let c = cl(u.y) * W + cl(u.x);
         if u.fl & F_DOWN == 0 {
             let d = &self.dens[c];
-            d.store(d.load(Relaxed).saturating_add(1), Relaxed);
+            d.store(d.load(Relaxed).saturating_add(u.n), Relaxed);
             let g = &self.coarse[(cl(u.y) / CG) * CW + cl(u.x) / CG];
-            g.store(g.load(Relaxed) + 1, Relaxed);
+            g.store(g.load(Relaxed) + u.n as u32, Relaxed);
         }
         let t = &self.tint[c];
         t.store(t.load(Relaxed).max(tint_of(u, tm)), Relaxed);
@@ -485,7 +538,27 @@ fn cell_costs(k: &Ctx, t: usize, tab: &mut [[f32; 8]; TS * TS], use_hunt: bool) 
 /// Crowding weight when following the HQ or hunting field.
 const DK: f32 = 6.0;
 
-fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>) {
+/// Splits `n` members off a clump as single units in its cell (they go to `out`, which hands them
+/// back to this tile), each with about the clump's health.
+fn split_off(u: &Unit, n: u16, hp: f32, s: &mut u64, out: &mut Vec<Unit>) {
+    let (cx, cy) = (cl(u.x) as f32, cl(u.y) as f32);
+    for _ in 0..n {
+        let r = xr(s);
+        let fr = |b: u32| ((r >> b) & 0xffff) as f32 * (1.0 / 65536.0);
+        out.push(Unit {
+            x: (cx + fr(0)).min(cx + 0.999),
+            y: (cy + fr(16)).min(cy + 0.999),
+            hp: hp * (0.9 + 0.2 * fr(32)),
+            n: 1,
+            hd: (r >> 48) as u8 & 7,
+            ..*u
+        });
+    }
+}
+
+/// Moves a run of units one tick. Returns the members of clumps killed here (single units' deaths
+/// are counted when the run settles).
+fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>, out: &mut Vec<Unit>) -> u32 {
     let inp = k.inp;
     let mixed = inp.mixed;
     let st0 = inp.stats;
@@ -506,6 +579,7 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
         tab_buf = Some(b);
     }
     let tab = tab_buf.as_deref();
+    let mut killed = 0u32;
     // orcs: deaths around each coarse cell of this tile last tick (3x3 coarse cells), worked out once
     let mut rage_near = [0u32; TC * TC];
     if st0.mode == Behaviour::Orc || mixed.is_some() {
@@ -554,6 +628,45 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
             continue;
         }
         let dm = if any_dmg { dmg[c] } else { 0.0 };
+        if dm > 0.0 && u.n > 1 {
+            // members' health is spread ±20% around the clump's, so damage kills them unevenly:
+            // the dead drop out (zombies lie down as a clump of their own), the rest split up
+            let n = u.n as u32;
+            let f = ((dm / u.hp - 0.8) / 0.4).clamp(0.0, 1.0);
+            let dead = ((f * n as f32 + xs(&mut s)) as u32).min(n);
+            if dead > 0 {
+                deaths[gi].fetch_add(dead, Relaxed);
+                killed += dead;
+                if zombie {
+                    if dsrc[c] != 0 {
+                        ev.push(Death { p: vec2(x, y), src: dsrc[c] });
+                    }
+                    if u.fl & F_REVIVED == 0 {
+                        out.push(Unit {
+                            hp: 0.5,
+                            aux: 2.5 + xs(&mut s) * 2.0,
+                            tg: 0,
+                            hd: u.hd & 7,
+                            fl: u.fl | F_DOWN,
+                            n: dead as u16,
+                            ..*u
+                        });
+                    }
+                }
+            }
+            let left = n - dead;
+            if left == 0 {
+                u.fl |= F_GONE;
+                continue;
+            }
+            // the survivors' average health once the hit is taken
+            let lo = dm.max(0.8 * u.hp);
+            let hp = ((lo + 1.2 * u.hp) * 0.5 - dm).max(0.05);
+            split_off(u, left as u16 - 1, hp, &mut s, out);
+            u.n = 1;
+            u.hp = hp;
+            continue;
+        }
         if dm > 0.0 {
             u.hp -= dm;
             if u.hp <= 0.0 {
@@ -575,6 +688,17 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
                     }
                 }
                 continue;
+            }
+        }
+        // a clump on the thin edge of the crowd breaks up into single units
+        let mut packed = false;
+        if u.n > 1 && cx > 0 && cy > 0 && cx < W as i32 - 1 && cy < H as i32 - 1 {
+            let p = |i: usize| prev[i].load(Relaxed) as u32;
+            let near = p(c - W - 1) + p(c - W) + p(c - W + 1) + p(c - 1) + p(c) + p(c + 1) + p(c + W - 1) + p(c + W) + p(c + W + 1);
+            packed = near >= MERGE_AT * 9;
+            if near < if u.fl & F_FLY != 0 { FLY_SPLIT_AT } else { SPLIT_AT } * 9 {
+                split_off(u, u.n - 1, u.hp, &mut s, out);
+                u.n = 1;
             }
         }
         let mut spd = st.spd;
@@ -611,7 +735,7 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
             let o = obj[c2];
             if o >= 0 && !inp.low.get(o as usize).copied().unwrap_or(true) {
                 if let Some(a) = inp.sd.get(o as usize) {
-                    a.fetch_add((st.atk * dt * DMG_SCALE) as u32, Relaxed);
+                    a.fetch_add((st.atk * dt * DMG_SCALE * u.n as f32) as u32, Relaxed);
                 }
             } else {
                 u.x = px;
@@ -667,11 +791,19 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
                 field_hq = false;
             }
         }
+        // the field-following cases: each neighbour's cost before jitter, where a clump checks
+        // whether its members would all take the same step
+        let follow = field_hq && !(wander && !(use_hunt && hunt[c] < U16));
+        let mut cs = [f32::INFINITY; 8];
         if !field_hq {
-        } else if let (Some(tab), false) = (tab, wander && !(use_hunt && hunt[c] < U16)) {
-            best = pick(&tab[((cy - y0) * TS as i32 + cx - x0) as usize], &k.jt[(xr(&mut s) & 255) as usize]);
+        } else if let (Some(tab), true) = (tab, follow) {
+            cs = tab[((cy - y0) * TS as i32 + cx - x0) as usize];
+            best = pick(&cs, &k.jt[(xr(&mut s) & 255) as usize]);
         } else if use_hunt && hunt[c] < U16 {
             best = descend(m, c, f32::MAX, |i| hunt[i] as u32, U16 as u32, prev, dk, &k.jt[(xr(&mut s) & 255) as usize]);
+            if u.n > 1 {
+                costs(&mut cs, m, c, |i| hunt[i] as u32, U16 as u32, prev, dk);
+            }
         } else if wander {
             let mut k = (u.hd & 7) as usize;
             if xs(&mut s) < 0.03 {
@@ -689,8 +821,16 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
             u.hd = (u.hd & 0x80) | k as u8;
         } else {
             best = descend(m, c, f32::MAX, |i| hq[i], INF, prev, dk, &k.jt[(xr(&mut s) & 255) as usize]);
+            if u.n > 1 {
+                costs(&mut cs, m, c, |i| hq[i], INF, prev, dk);
+            }
         }
-        if best >= 0 {
+        // steps one unit or clump to neighbour `best`: into it if it is open, otherwise attacking
+        // whatever stands there
+        let step = |u: &mut Unit, best: i32, s: &mut u64| {
+            if best < 0 {
+                return;
+            }
             let k = best as usize;
             let nx = cx + DX[k];
             let ny = cy + DY[k];
@@ -698,15 +838,15 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
             let o = obj[nc];
             if o >= 0 {
                 if let Some(a) = inp.sd.get(o as usize) {
-                    a.fetch_add((st.atk * dt * DMG_SCALE) as u32, Relaxed);
+                    a.fetch_add((st.atk * dt * DMG_SCALE * u.n as f32) as u32, Relaxed);
                 }
             } else if o <= -2 && o != SOLID {
                 if let Some(a) = inp.bd.get((-o - 2) as usize) {
-                    a.fetch_add((st.atk * dt * DMG_SCALE) as u32, Relaxed);
+                    a.fetch_add((st.atk * dt * DMG_SCALE * u.n as f32) as u32, Relaxed);
                 }
             } else if o == FREE {
                 // (an f32 like 1535.99999 can round up to the next cell, so stay inside it)
-                let r = xr(&mut s);
+                let r = xr(s);
                 let fr = |b: u32| ((r >> b) & 0xffff) as f32 * (1.0 / 65536.0);
                 let tx = (nx as f32 + fr(0)).min(nx as f32 + 0.999);
                 let ty = (ny as f32 + fr(16)).min(ny as f32 + 0.999);
@@ -724,8 +864,134 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
                     u.y = py;
                 }
             }
+        };
+        // single units here would part ways when two steps cost about the same (within the jitter).
+        // Where the crowd is thin enough to see single units, the clump then breaks up into single
+        // units, each taking its own step; inside a packed crowd it keeps together (merging keeps its
+        // share of the cell small, so the crowd still spreads out much as single units would).
+        if u.n > 1 && follow && !packed {
+            let (mut b1, mut b2) = (f32::INFINITY, f32::INFINITY);
+            for &v in &cs {
+                if v < b1 {
+                    b2 = b1;
+                    b1 = v;
+                } else if v < b2 {
+                    b2 = v;
+                }
+            }
+            if b2 < f32::INFINITY && b2 - b1 < st.jit {
+                for _ in 1..u.n {
+                    let r = xr(&mut s);
+                    let mut q = Unit { n: 1, hp: u.hp * (0.9 + 0.2 * (r & 0xffff) as f32 / 65536.0), ..*u };
+                    step(&mut q, pick(&cs, &k.jt[(r >> 56) as usize]), &mut s);
+                    out.push(q);
+                }
+                u.n = 1;
+            }
+        }
+        step(u, best, &mut s);
+    }
+    killed
+}
+
+/// Merges the units sharing each packed cell of a tile into clumps, and breaks clumps that are too
+/// big for their cell into smaller ones, so a clump never carries more than its share of the cell
+/// (see the module notes; without that a crowd that thins out a little would keep moving in big
+/// lumps and stop spreading out the way single units do). Units merged into another become holes;
+/// returns how many.
+fn merge_units(t: usize, us: &mut Vec<Unit>, prev: &[AtomicU16], seed: u64) -> u32 {
+    let (x0, y0) = ((t % TW) * TS, (t / TW) * TS);
+    // members per cell, counted from the units themselves
+    let mut cnt = [0u32; TS * TS];
+    let mut clumps = false;
+    for u in us.iter() {
+        if u.fl & (F_GONE | F_DOWN) == 0 {
+            cnt[(cl(u.y) - y0) * TS + cl(u.x) - x0] += u.n as u32;
+            clumps |= u.n > 1;
         }
     }
+    // the biggest clump each cell holds: its share of the cell's members, where the 3x3 cells
+    // around it were packed last tick (elsewhere single units, apart from clumps already formed)
+    let mut cap = [1u16; TS * TS];
+    let mut merge = [0u8; TS * TS];
+    let mut any = clumps;
+    for ly in 0..TS {
+        for lx in 0..TS {
+            let i = ly * TS + lx;
+            cap[i] = (cnt[i] / CLUMPS_PER_CELL).clamp(1, MAX_CLUMP as u32) as u16;
+            if cap[i] < 2 {
+                continue;
+            }
+            let (x, y) = (x0 + lx, y0 + ly);
+            let mut near = 0;
+            let mut least = u32::MAX;
+            for yy in y.saturating_sub(1)..=(y + 1).min(H - 1) {
+                for xx in x.saturating_sub(1)..=(x + 1).min(W - 1) {
+                    let v = prev[yy * W + xx].load(Relaxed) as u32;
+                    near += v;
+                    least = least.min(v);
+                }
+            }
+            if least < MERGE_LEAST {
+                continue;
+            }
+            merge[i] = (near >= MERGE_AT * 9) as u8 + (near >= FLY_MERGE_AT * 9) as u8;
+            any |= merge[i] != 0;
+        }
+    }
+    if !any {
+        return 0;
+    }
+    let mut s = seed;
+    // per cell and kind of unit (flier, revived zombie, army in chaos), the clump taking in members
+    let mut open = [[u32::MAX; TS * TS]; 16];
+    let mut gone = 0;
+    for i in 0..us.len() {
+        let u = us[i];
+        if u.fl & (F_GONE | F_DOWN) != 0 {
+            continue;
+        }
+        let ci = (cl(u.y) - y0) * TS + cl(u.x) - x0;
+        let cp = cap[ci];
+        if u.n > cp {
+            // too big for how packed its cell is: break off pieces of the cell's clump size (they
+            // land at the end of the list, out of this pass)
+            let (cx, cy) = (cl(u.x) as f32, cl(u.y) as f32);
+            let mut left = u.n - cp;
+            us[i].n = cp;
+            while left > 0 {
+                let k = left.min(cp);
+                left -= k;
+                let r = xr(&mut s);
+                let fr = |b: u32| ((r >> b) & 0xffff) as f32 * (1.0 / 65536.0);
+                us.push(Unit {
+                    x: (cx + fr(0)).min(cx + 0.999),
+                    y: (cy + fr(16)).min(cy + 0.999),
+                    n: k,
+                    ..u
+                });
+            }
+            continue;
+        }
+        let fly = u.fl & F_FLY != 0;
+        if merge[ci] < 1 + fly as u8 || u.n == cp || u.tg != 0 {
+            continue;
+        }
+        let kind = (fly as usize) | (((u.fl & F_REVIVED != 0) as usize) << 1) | (kind_of(u.fl) << 2);
+        let o = open[kind][ci];
+        if o != u32::MAX && us[o as usize].n + u.n <= cp {
+            let a = &mut us[o as usize];
+            let (na, nb) = (a.n as f32, u.n as f32);
+            a.hp = (a.hp * na + u.hp * nb) / (na + nb);
+            a.aux = (a.aux * na + u.aux * nb) / (na + nb);
+            a.n += u.n;
+            us[i].fl |= F_GONE;
+            gone += 1;
+        } else {
+            open[kind][ci] = i as u32;
+        }
+    }
+    gone
 }
 
 impl Swarm {
@@ -736,6 +1002,8 @@ impl Swarm {
             out: (0..NT).map(|_| Vec::new()).collect(),
             holes: vec![0; NT],
             seen: vec![0; NT],
+            members: vec![0; NT],
+            last: vec![0; NT],
             count: 0,
             dens: (0..N).map(|_| AtomicU16::new(0)).collect(),
             prev: (0..N).map(|_| AtomicU16::new(0)).collect(),
@@ -752,9 +1020,23 @@ impl Swarm {
     pub fn len(&self) -> usize {
         self.count
     }
-    /// Every unit, in a fixed order (tile by tile).
+    /// Every unit and clump, in a fixed order (tile by tile).
     pub fn units(&self) -> impl Iterator<Item = &Unit> {
         self.tiles.iter().flatten().filter(|u| u.fl & F_GONE == 0)
+    }
+    /// Units and clumps actually stepped (`len` counts every member).
+    pub fn entities(&self) -> usize {
+        self.tiles.iter().zip(&self.holes).map(|(v, &h)| v.len() - h as usize).sum()
+    }
+    /// Ticks stepped so far.
+    pub fn tick(&self) -> u64 {
+        self.tick
+    }
+    /// The last tick tile `t` had units: its cells are unchanged since any picture of the horde
+    /// taken after that.
+    #[inline]
+    pub fn last_seen(&self, t: usize) -> u64 {
+        self.last[t]
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -796,8 +1078,11 @@ impl Swarm {
                 tg: 0,
                 hd: (xs(&mut s) * 8.0) as u8,
                 fl,
+                n: 1,
             };
-            self.tiles[tile_of(x, y)].push(u);
+            let t = tile_of(x, y);
+            self.tiles[t].push(u);
+            self.members[t] += 1;
         }
     }
 
@@ -834,6 +1119,7 @@ impl Swarm {
             dsrc: &self.dsrc,
             any_dmg: !self.touched.is_empty(),
             tick: self.tick,
+            merge: std::env::var("PH_NOCLUMP").is_err(),
         };
         let gr = Grids {
             dens: &self.dens,
@@ -855,49 +1141,58 @@ impl Swarm {
             .zip(self.out.par_iter_mut())
             .zip(self.seen.par_iter_mut())
             .zip(self.holes.par_iter_mut())
+            .zip(self.members.par_iter_mut())
             .enumerate()
-            .map(|(t, (((us, out), seen), holes))| {
+            .map(|(t, ((((us, out), seen), holes), members))| {
                 out.clear();
                 if us.is_empty() {
                     if *seen != 0 {
                         gr.clear(t);
                     }
                     *seen = (*seen << 1) & 3;
+                    *members = 0;
                     return (0, Vec::new());
+                }
+                let base = (k.tick.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (t as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1;
+                let seed = |ci: usize| (base ^ (ci as u64).wrapping_mul(0x94D0_49BB_1331_11EB)) | 1;
+                // tiles take turns merging their packed cells into clumps (and resizing clumps)
+                if k.merge && (k.tick + t as u64) % MERGE_EVERY == 0 {
+                    *holes += merge_units(t, us, k.prev, seed(usize::MAX));
                 }
                 // sweep out the holes once they take up a quarter of the list
                 if *holes as usize * 4 > us.len() {
                     us.retain(|u| u.fl & F_GONE == 0);
                 }
-                let base = (k.tick.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (t as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1;
-                let seed = |ci: usize| (base ^ (ci as u64).wrapping_mul(0x94D0_49BB_1331_11EB)) | 1;
                 let mut ev = Vec::new();
                 let mut acc = Acc::new();
-                let (killed, h) = if us.len() <= CHUNK {
-                    step_units(&k, t, seed(0), us, &mut ev);
-                    settle_units(t, us, &mut acc, out, tm)
+                let (killed, h, m) = if us.len() <= CHUNK {
+                    let kc = step_units(&k, t, seed(0), us, &mut ev, out);
+                    let (kl, h, m) = settle_units(t, us, &mut acc, out, tm);
+                    (kl + kc, h, m)
                 } else {
-                    let parts: Vec<(Acc, Vec<Death>, Vec<Unit>, u32, u32)> = us
+                    let parts: Vec<(Acc, Vec<Death>, Vec<Unit>, u32, u32, u64)> = us
                         .par_chunks_mut(CHUNK)
                         .enumerate()
                         .map(|(ci, c)| {
                             let (mut a, mut e, mut o) = (Acc::new(), Vec::new(), Vec::new());
-                            step_units(&k, t, seed(ci), c, &mut e);
-                            let (kl, h) = settle_units(t, c, &mut a, &mut o, tm);
-                            (a, e, o, kl, h)
+                            let kc = step_units(&k, t, seed(ci), c, &mut e, &mut o);
+                            let (kl, h, m) = settle_units(t, c, &mut a, &mut o, tm);
+                            (a, e, o, kl + kc, h, m)
                         })
                         .collect();
-                    let (mut kl, mut h) = (0, 0);
-                    for (a, e, o, k2, h2) in parts {
+                    let (mut kl, mut h, mut m) = (0, 0, 0);
+                    for (a, e, o, k2, h2, m2) in parts {
                         acc.add(&a);
                         ev.extend(e);
                         out.extend(o);
                         kl += k2;
                         h += h2;
+                        m += m2;
                     }
-                    (kl, h)
+                    (kl, h, m)
                 };
                 *holes = h;
+                *members = m;
                 if h as usize == us.len() {
                     us.clear();
                     *holes = 0;
@@ -907,18 +1202,20 @@ impl Swarm {
                 (killed, ev)
             })
             .collect();
-        // pass 3: hand-over. Each tile takes in the units that walked over from its neighbours.
+        // pass 3: hand-over. Each tile takes in the units that walked over from its neighbours (and the
+        // units split off its own clumps).
         let out = &self.out;
         let moved: usize = self
             .tiles
             .par_iter_mut()
             .zip(self.seen.par_iter_mut())
+            .zip(self.members.par_iter_mut())
             .enumerate()
-            .map(|(t, (us, seen))| {
+            .map(|(t, ((us, seen), members))| {
                 let (tx, ty) = ((t % TW) as i32, (t / TW) as i32);
                 let mut n = 0;
-                for k in 0..8 {
-                    let (nx, ny) = (tx + DX[k], ty + DY[k]);
+                for k in 0..9 {
+                    let (nx, ny) = if k == 8 { (tx, ty) } else { (tx + DX[k], ty + DY[k]) };
                     if nx < 0 || ny < 0 || nx >= TW as i32 || ny >= TH as i32 {
                         continue;
                     }
@@ -926,6 +1223,7 @@ impl Swarm {
                         if tile_of(u.x, u.y) == t {
                             gr.mark(u, tm);
                             us.push(*u);
+                            *members += u.n as u64;
                             n += 1;
                         }
                     }
@@ -948,9 +1246,16 @@ impl Swarm {
                     if dx.abs() > 1 || dy.abs() > 1 {
                         gr.mark(&u, tm);
                         self.seen[d] |= 1;
+                        self.members[d] += u.n as u64;
                         self.tiles[d].push(u);
                     }
                 }
+            }
+        }
+        let tick = self.tick;
+        for (l, s) in self.last.iter_mut().zip(&self.seen) {
+            if s & 1 != 0 {
+                *l = tick;
             }
         }
         // clear the damage that was applied this tick
@@ -965,7 +1270,7 @@ impl Swarm {
             killed += kl;
             events.extend(ev);
         }
-        self.count = self.tiles.iter().zip(&self.holes).map(|(v, &h)| v.len() - h as usize).sum();
+        self.count = self.members.iter().sum::<u64>() as usize;
         (killed, events)
     }
 
