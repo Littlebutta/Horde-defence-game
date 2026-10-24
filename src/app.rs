@@ -807,7 +807,7 @@ impl App {
             self.wait_pack = true;
             self.status = format!("Getting the {} map", city.name);
         } else {
-            self.loader = Some(osm::start(city.query.to_string()));
+            self.loader = Some(osm::start(city.query.to_string(), campaign::AIRPORT_M));
             self.status = "Starting download".into();
         }
     }
@@ -1008,7 +1008,7 @@ impl App {
                     return;
                 }
             }
-            self.loader = Some(osm::start(self.city.trim().to_string()));
+            self.loader = Some(osm::start(self.city.trim().to_string(), 35_000));
             self.status = "Starting download".into();
             self.screen = Screen::Loading;
         } else {
@@ -1063,7 +1063,7 @@ impl App {
             if !self.pack.busy() {
                 // the pack didn't have it: straight from OpenStreetMap
                 self.wait_pack = false;
-                self.loader = Some(osm::start(city.query.to_string()));
+                self.loader = Some(osm::start(city.query.to_string(), campaign::AIRPORT_M));
                 self.status = "Starting download".into();
             }
         }

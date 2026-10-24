@@ -47,6 +47,7 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 
 Pick **World campaign** on the menu to fight through ten of the world's biggest cities, smallest first: Osaka, Dhaka, Beijing, Mumbai, Cairo, Mexico City, São Paulo, Shanghai, Delhi and Tokyo.
 
+- The maps are the city centres. Megacity airports are mostly far out of town, so the HQ only goes at an airport when one is close enough to share the map with downtown; otherwise it sits in the middle of the city.
 - Hold each city until the evac timer runs out (7 minutes in Osaka, 30 seconds longer every city). The horde is 30% bigger in every city, so Tokyo has about 10 times Osaka's.
 - Troops that survive (rifle squads and tanks, with however many soldiers are left) march on to the next city and roll out of the HQ when it starts. Scrap, ammo and buildings stay behind: every city starts from the same small base.
 - Civilians you fly out are the campaign's currency. Between cities you spend them on the research the lab sells for scrap in a normal game (Bigger squads, Carpet bombing, Nuclear warhead, Reinforced armour, Shell presses, Long barrels) or on recruiting more troops. There is no research lab inside campaign cities.

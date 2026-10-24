@@ -31,9 +31,10 @@ const MIRRORS: [&str; 4] = [
     "https://overpass.kumi.systems/api/interpreter",
 ];
 
-pub fn start(query: String) -> Loader {
+/// Loads a city in the background; the HQ goes at an airport up to `air_m` metres away.
+pub fn start(query: String, air_m: u32) -> Loader {
     let (tx, rx) = channel();
-    std::thread::spawn(move || match load(&query, &tx, 2) {
+    std::thread::spawn(move || match load(&query, &tx, 2, air_m) {
         Ok(d) => {
             let _ = tx.send(OsmMsg::Done(Box::new(d)));
         }
@@ -237,15 +238,16 @@ fn road_style(h: &str) -> Option<(f32, u8)> {
     })
 }
 
-/// Downloads a city in `tiles`×`tiles` pieces (more pieces = smaller Overpass queries).
-pub fn load(query: &str, tx: &Sender<OsmMsg>, tiles: usize) -> Result<Desc, String> {
+/// Downloads a city in `tiles`×`tiles` pieces (more pieces = smaller Overpass queries). The HQ goes
+/// at the nearest airport within `air_m` metres, else in the middle of town.
+pub fn load(query: &str, tx: &Sender<OsmMsg>, tiles: usize, air_m: u32) -> Result<Desc, String> {
     let a = agent();
     let _ = tx.send(OsmMsg::Status(format!("Looking up {}", query)));
     let (lat, lon, name) = geocode(&a, query)?;
 
     // nearest airport
     let _ = tx.send(OsmMsg::Status("Finding the nearest airport".into()));
-    let q = format!("[out:json][timeout:60];(way[\"aeroway\"=\"aerodrome\"](around:35000,{lat},{lon});relation[\"aeroway\"=\"aerodrome\"](around:35000,{lat},{lon}););out tags center;");
+    let q = format!("[out:json][timeout:60];(way[\"aeroway\"=\"aerodrome\"](around:{air_m},{lat},{lon});relation[\"aeroway\"=\"aerodrome\"](around:{air_m},{lat},{lon}););out tags center;");
     let mut air: Option<(f64, f64, String)> = None;
     if let Ok(j) = overpass(&a, &q, tx, "Finding the nearest airport") {
         let mut best = f64::MAX;

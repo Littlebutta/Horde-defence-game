@@ -224,8 +224,14 @@ fn map_dir() -> PathBuf {
     let _ = std::fs::create_dir_all(&d);
     d
 }
+/// Megacity airports are mostly far out of town, so the campaign holds the city itself: only an
+/// airport close enough to share the map with downtown gets the HQ.
+pub const AIRPORT_M: u32 = 4_000;
+/// Bumped when the maps are made differently, so old downloads are fetched again.
+const PACK: u32 = 2;
+
 pub fn file_name(c: &City) -> String {
-    format!("{}.phmap", c.file)
+    format!("{}-v{}.phmap", c.file, PACK)
 }
 pub fn map_path(c: &City) -> PathBuf {
     map_dir().join(file_name(c))
@@ -322,7 +328,13 @@ pub fn fetch_all(out: &Path) -> bool {
                     }
                 }
             });
-            let r = crate::osm::load(c.query, &tx, 3);
+            let r = crate::osm::load(c.query, &tx, 3, AIRPORT_M).map(|mut d| {
+                d.name = c.name.to_string();
+                if d.airport.is_none() {
+                    d.note = "HQ set up in the middle of town.".into();
+                }
+                d
+            });
             drop(tx);
             let _ = printer.join();
             match r {
