@@ -131,6 +131,9 @@ async fn run(steam: Option<net::Steam>) {
                 if std::env::var("PH_SCRIPT").is_ok() {
                     selftest::abilities(g);
                 }
+                if std::env::var("PH_GALLERY").is_ok() {
+                    selftest::gallery(g);
+                }
                 let mut hq = g.world.hq;
                 if let Some(v) = std::env::var("PH_AT").ok() {
                     let v: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
