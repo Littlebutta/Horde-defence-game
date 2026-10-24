@@ -8,6 +8,7 @@ mod defs;
 mod fields;
 mod game;
 mod globe;
+mod menubg;
 mod music;
 mod net;
 mod osm;

@@ -6,6 +6,7 @@ use crate::defs::*;
 use crate::game::*;
 use crate::net::{self, Cmd};
 use crate::osm::{self, OsmMsg};
+use crate::menubg::MenuBg;
 use crate::music;
 use crate::storage;
 use crate::render::{self, text, text_w, Fonts, Scene, ViewInfo, WorldLabels};
@@ -124,6 +125,8 @@ pub struct App {
     render_pct: u32,
     /// the graphics settings changed: rebuild the scene's way of drawing
     regfx: bool,
+    /// the battle behind the menu, made on the first menu frame
+    bg: Option<MenuBg>,
 }
 
 /// Colours of the co-op players' cursors, host first.
@@ -252,6 +255,7 @@ impl App {
             aa: st.aa,
             render_pct: st.render,
             regfx: false,
+            bg: None,
         }
     }
 
@@ -502,23 +506,16 @@ impl App {
         let th = self.theme();
         clear_background(th.bg);
         let p = pal(self.dark);
-        let s = ui::screen();
-        // a faint street grid behind the menu
-        let gc = if self.dark {
-            rgba(255, 255, 255, 0.035)
-        } else {
-            rgba(255, 255, 255, 0.06)
-        };
-        let mut x = (self.clock * 6.0) % 60.0 - 60.0;
-        while x < s.w {
-            draw_rectangle(x, 0.0, 10.0, s.h, gc);
-            x += 60.0;
+        // a random city behind the menu, its civilians hunted by all three armies (in pixels)
+        ui::end();
+        let (sw, sh) = (screen_width(), screen_height());
+        if !self.bg.as_ref().map_or(false, |b| b.fits(sw, sh, th)) {
+            self.bg = Some(MenuBg::new(sw, sh, th, macroquad::miniquad::date::now() as u64));
         }
-        let mut y = 0.0;
-        while y < s.h {
-            draw_rectangle(0.0, y, s.w, 10.0, gc);
-            y += 72.0;
+        if let Some(b) = &mut self.bg {
+            b.frame(get_frame_time().min(0.1), th);
         }
+        ui::begin();
         if self.client() {
             while get_char_pressed().is_some() {}
             self.client_lobby();
