@@ -656,42 +656,76 @@ pub fn fungus(mb: &mut MB, b: &Building, bi: usize) {
         best
     };
     let mid = if point_in_poly(b.c, pts) { b.c } else { pts[0] };
-    let dark = rgb(96, 30, 140);
+    let mat = rgb(74, 22, 104);
+    let dark = rgb(104, 34, 150);
     let vein = rgb(186, 84, 240);
-    let core = rgb(236, 150, 255);
+    let core = rgb(240, 160, 255);
     let z = b.h;
-    // roof blotches, each linked to an earlier one by a vein
-    let want = ((b.area.abs() / 30.0) as usize).clamp(3, 16);
-    let mut blots: Vec<(Vec2, f32)> = Vec::new();
-    let mut k = 0u32;
-    while blots.len() < want && k < want as u32 * 8 {
-        k += 1;
-        let p = vec2(lo.x + (hi.x - lo.x) * rnd(k * 2), lo.y + (hi.y - lo.y) * rnd(k * 2 + 1));
-        if !point_in_poly(p, pts) {
-            continue;
-        }
-        let r = (0.5 + 2.0 * rnd(k + 500)).min(edge_dist(p) * 0.9);
-        if r < 0.35 {
-            continue;
-        }
-        blots.push((p, r));
-    }
     let phase = |p: Vec2| -p.distance(mid) * 0.45;
     let tag = |mb: &mut MB, p: Vec2| mb.uv = vec2(1.0, phase(p));
-    for (j, (p, r)) in blots.iter().enumerate() {
-        tag(mb, *p);
-        let to = if j == 0 { mid } else { blots[(rnd(j as u32 + 900) * j as f32) as usize].0 };
-        if to.distance(*p) > 0.3 {
-            let d = (to - *p).normalize_or_zero();
-            let nn = vec2(-d.y, d.x) * 0.18;
-            mb.poly_at(&[*p + nn, to + nn, to - nn, *p - nn], z + 0.05, vein);
+    let inside_at = |p: Vec2, r: f32| point_in_poly(p, pts) && edge_dist(p) > r;
+    let wobbly = |p: Vec2, r: f32, m: usize, salt: u32| -> Vec<Vec2> {
+        (0..m).map(|q| {
+            let a = q as f32 / m as f32 * std::f32::consts::TAU;
+            p + vec2(a.cos(), a.sin()) * r * (0.72 + 0.28 * rnd(salt * 31 + q as u32))
+        }).collect()
+    };
+    // colonies: a mycelium mat, tendrils creeping out of it and clusters of little caps
+    let area = b.area.abs();
+    let colonies = ((area / 160.0) as u32).clamp(1, 5);
+    let reach = (area / colonies as f32).sqrt() * 0.5;
+    let mut salt = 0u32;
+    for col in 0..colonies {
+        let mut ctr = None;
+        for k in 0..12 {
+            let p = if col == 0 && k == 0 { mid } else { vec2(lo.x + (hi.x - lo.x) * rnd(col * 40 + k * 2), lo.y + (hi.y - lo.y) * rnd(col * 40 + k * 2 + 1)) };
+            if inside_at(p, 0.6) {
+                ctr = Some(p);
+                break;
+            }
         }
-        let blob: Vec<Vec2> = (0..9).map(|q| {
-            let a = q as f32 / 9.0 * std::f32::consts::TAU;
-            *p + vec2(a.cos(), a.sin()) * *r * (0.7 + 0.3 * rnd(j as u32 * 16 + q + 1200))
-        }).collect();
-        mb.poly_at(&blob, z + 0.08, dark);
-        mb.poly_at(&shrink(&blob, *r * 0.55), z + 0.11, core);
+        let Some(ctr) = ctr else { continue };
+        tag(mb, ctr);
+        let mr = (reach * 0.55).min(edge_dist(ctr) * 0.95);
+        salt += 1;
+        mb.poly_at(&wobbly(ctr, mr, 14, salt), z + 0.04, mat);
+        // tendrils: wandering, tapering veins
+        let arms = 5 + (rnd(col + 70) * 4.0) as u32;
+        for arm in 0..arms {
+            let mut a = arm as f32 / arms as f32 * std::f32::consts::TAU + rnd(col * 16 + arm + 80) * 0.8;
+            let mut p = ctr;
+            let steps = 4 + (rnd(col * 16 + arm + 90) * 4.0) as u32;
+            for st in 0..steps {
+                a += (rnd(col * 256 + arm * 16 + st + 100) - 0.5) * 1.1;
+                let q = p + vec2(a.cos(), a.sin()) * reach * 0.22;
+                if !inside_at(q, 0.2) {
+                    break;
+                }
+                let wdt = 0.26 * (1.0 - st as f32 / steps as f32) + 0.06;
+                let d = (q - p).normalize_or_zero();
+                let nn = vec2(-d.y, d.x) * wdt;
+                tag(mb, q);
+                mb.poly_at(&[p + nn, q + nn * 0.8, q - nn * 0.8, p - nn], z + 0.06, vein);
+                p = q;
+            }
+        }
+        // caps, thicker near the middle
+        let caps = ((area / colonies as f32 / 7.0) as u32).clamp(5, 24);
+        for k in 0..caps {
+            let a = rnd(col * 512 + k * 3 + 300) * std::f32::consts::TAU;
+            let dist = reach * rnd(col * 512 + k * 3 + 301).powf(1.6);
+            let p = ctr + vec2(a.cos(), a.sin()) * dist;
+            let r = (0.4 + 1.0 * rnd(col * 512 + k * 3 + 302)) * (1.0 - 0.5 * dist / reach.max(0.1));
+            if !inside_at(p, r) {
+                continue;
+            }
+            tag(mb, p);
+            salt += 1;
+            let rim = wobbly(p, r, 9, salt);
+            mb.poly_at(&rim, z + 0.08, dark);
+            mb.poly_at(&shrink(&rim, r * 0.3), z + 0.1, vein);
+            mb.poly_at(&ngon(p, r * 0.28, 6, 0.0), z + 0.12, core);
+        }
     }
     // streaks down the walls
     let ccw = b.area > 0.0;
@@ -706,7 +740,7 @@ pub fn fungus(mb: &mut MB, b: &Building, bi: usize) {
         if !ccw {
             out = -out;
         }
-        let drips = ((len / 4.0) as u32).clamp(1, 5);
+        let drips = ((len / 2.5) as u32).clamp(1, 10);
         for q in 0..drips {
             let s = rnd(e as u32 * 64 + q * 3 + 3000);
             if s < 0.35 {
@@ -714,11 +748,15 @@ pub fn fungus(mb: &mut MB, b: &Building, bi: usize) {
             }
             let at = a + dir * len * ((q as f32 + 0.2 + 0.6 * rnd(e as u32 * 64 + q * 3 + 3001)) / drips as f32);
             let wid = 0.25 + 0.4 * rnd(e as u32 * 64 + q * 3 + 3002);
-            let drop = z * (0.25 + 0.6 * s);
+            let drop = z * (0.2 + 0.65 * s);
             let p = at + out * 0.08;
             tag(mb, at);
             let inside = p3(at - out, z * 0.5);
             face(mb, &[p3(p - dir * wid, z), p3(p + dir * wid, z), p3(p + dir * wid * 0.3, z - drop), p3(p - dir * wid * 0.3, z - drop)], inside, vein);
+            // a bulb where the drip ends
+            let e = p + out * 0.02;
+            let r = wid * 0.7;
+            face(mb, &[p3(e - dir * r, z - drop + r), p3(e + dir * r, z - drop + r), p3(e + dir * r * 0.6, z - drop - r), p3(e - dir * r * 0.6, z - drop - r)], inside, core);
         }
     }
     mb.uv = Vec2::ZERO;

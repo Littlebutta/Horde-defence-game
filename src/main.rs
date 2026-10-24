@@ -135,6 +135,10 @@ async fn run(steam: Option<net::Steam>) {
                     selftest::gallery(g);
                 }
                 let mut hq = g.world.hq;
+                // PH_HIVE=1: look at the first alien hive instead
+                if let (true, Some(h)) = (std::env::var("PH_HIVE").is_ok(), g.hives.iter().find(|h| !h.dead)) {
+                    hq = h.p;
+                }
                 if let Some(v) = std::env::var("PH_AT").ok() {
                     let v: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
                     if v.len() == 2 {
@@ -151,7 +155,7 @@ async fn run(steam: Option<net::Steam>) {
             }
         }
         app.frame();
-        if let (Some(path), true) = (&shot, frame == if menu_shot { 40 } else { 4 }) {
+        if let (Some(path), true) = (&shot, frame == if menu_shot { 40 } else { std::env::var("PH_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(4) }) {
             get_screen_data().export_png(path);
             break;
         }
