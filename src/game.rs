@@ -176,6 +176,8 @@ pub struct Heli {
 }
 pub struct Tracer {
     pub a: Vec2,
+    /// height the shot starts from (rooftops, aircraft)
+    pub az: f32,
     pub b: Vec2,
     pub t: f32,
     pub kind: u8,
@@ -279,7 +281,6 @@ pub struct Game {
     pub struct_dirty: bool,
     pub sim_ms: f32,
     pub rng: Rng,
-    pub tilt: f32,
     sd: Vec<AtomicU32>,
     bd: Vec<AtomicU32>,
 }
@@ -369,7 +370,6 @@ impl Game {
             struct_dirty: true,
             sim_ms: 0.0,
             rng: Rng::new(seed),
-            tilt: 0.85,
             sd: Vec::new(),
             bd: (0..nb).map(|_| AtomicU32::new(0)).collect(),
         };
@@ -434,7 +434,7 @@ impl Game {
         let mut o: Vec<i32> = (0..N)
             .map(|i| {
                 let t = w.terrain[i];
-                if t == T_WATER || t == T_LAND {
+                if t == T_WATER {
                     SOLID
                 } else if w.bid[i] >= 0 {
                     -(w.bid[i] + 2)
@@ -581,8 +581,10 @@ impl Game {
                         src.push((c.p.y as usize * W + c.p.x as usize) as u32);
                     }
                 }
+                // walls are never a target in themselves: the horde walks around them, and only
+                // chews through one when it blocks the way to the HQ (the HQ field handles that)
                 for s in &self.structs {
-                    if s.dead || s.pending || s.roof >= 0 {
+                    if s.dead || s.pending || s.roof >= 0 || s.t == S::Wall {
                         continue;
                     }
                     for y in s.y..s.y + s.h {
@@ -661,23 +663,16 @@ impl Game {
 
     // ----------------------------------------------------------------------------- structures
 
-    pub fn count(&self, t: S) -> usize {
-        self.structs.iter().filter(|s| !s.dead && s.t == t).count()
-    }
     pub fn has(&self, t: S) -> bool {
         self.structs
             .iter()
             .any(|s| !s.dead && !s.pending && s.t == t)
     }
 
-    /// Price of a structure at a spot: extractors get dearer the more you own, turrets get dearer
-    /// the further they are from the HQ.
+    /// Price of a structure at a spot: turrets get dearer the further they are from the HQ.
     pub fn cost_at(&self, t: S, at: Vec2) -> f32 {
         let d = def(t);
         let mut c = d.cost;
-        if t == S::Extractor {
-            c *= 1.25f32.powi(self.count(S::Extractor) as i32);
-        }
         if d.turret {
             let dist = at.distance(self.world.hq);
             c *= 1.0 + (dist - 100.0).max(0.0) / 350.0;
@@ -708,32 +703,13 @@ impl Game {
         true
     }
 
-    /// The building whose drawn roof is under the cursor (roofs are drawn shifted up by their height).
+    /// The building standing on a ground point (the app turns a click on a roof into that point).
     pub fn roof_at(&self, w: Vec2) -> Option<(usize, Vec2)> {
-        let mut best = None;
-        let mut by = f32::MIN;
-        let max_h = if self.tilt > 0.0 { 90.0 } else { 0.0 };
-        let mut k = 0.0;
-        while k <= max_h {
-            let p = vec2(w.x - 0.35 * k * self.tilt, w.y + k * self.tilt);
-            k += 0.5;
-            if p.x < 0.0 || p.y < 0.0 || p.x >= W as f32 || p.y >= H as f32 {
-                continue;
-            }
-            let b = self.world.bid[p.y as usize * W + p.x as usize];
-            if b < 0 {
-                continue;
-            }
-            let bb = &self.world.buildings[b as usize];
-            if self.tilt > 0.0 && (bb.h - (k - 0.5)).abs() > 0.6 {
-                continue;
-            }
-            if p.y > by {
-                by = p.y;
-                best = Some((b as usize, p));
-            }
+        if w.x < 0.0 || w.y < 0.0 || w.x >= W as f32 || w.y >= H as f32 {
+            return None;
         }
-        best
+        let b = self.world.bid[w.y as usize * W + w.x as usize];
+        (b >= 0).then_some((b as usize, w))
     }
     pub fn roof_slots(&self, b: usize) -> usize {
         ((self.world.buildings[b].cells / 70) as usize).clamp(1, 6)
@@ -843,7 +819,7 @@ impl Game {
             if s.dead || s.t == S::Hq {
                 return false;
             }
-            let off = if s.roof >= 0 { self.roof_off(s.roof as usize) } else { Vec2::ZERO };
+            let off = if s.roof >= 0 { Vec2::ZERO } else { Vec2::ZERO };
             let q = p - off;
             q.x >= s.x as f32 && q.y >= s.y as f32 && q.x < (s.x + s.w) as f32 && q.y < (s.y + s.h) as f32
         });
@@ -1569,10 +1545,6 @@ impl Game {
         }
     }
 
-    pub fn roof_off(&self, b: usize) -> Vec2 {
-        let hh = self.world.buildings[b].h * self.tilt;
-        vec2(hh * 0.35, -hh)
-    }
 
     fn turrets(&mut self) {
         for i in 0..self.structs.len() {
@@ -1596,14 +1568,10 @@ impl Game {
                 self.structs[i].cd = d.rate;
                 self.structs[i].last_fire = self.time;
                 self.structs[i].aim = (tg.y - center.y).atan2(tg.x - center.x);
-                let off = if roof >= 0 {
-                    self.roof_off(roof as usize)
-                } else {
-                    Vec2::ZERO
-                };
-                let muzzle = center + off + vec2(d.ht * self.tilt * 0.35, -d.ht * self.tilt);
+                let base = if roof >= 0 { self.world.buildings[roof as usize].h } else { 0.0 };
                 self.tracers.push(Tracer {
-                    a: muzzle,
+                    a: center,
+                    az: base + d.ht,
                     b: tg,
                     t: 0.09,
                     kind: if t == S::Cannon { 1 } else { 0 },
@@ -1880,6 +1848,7 @@ impl Game {
                             self.damage_hives(t, 1.6, 14.0);
                             self.tracers.push(Tracer {
                                 a: g.p,
+                                az: 16.0,
                                 b: t,
                                 t: 0.06,
                                 kind: 2,
@@ -2478,6 +2447,7 @@ impl Game {
                 self.damage_hives(b, 1.2, 10.0);
                 self.tracers.push(Tracer {
                     a,
+                    az: 1.0,
                     b,
                     t: 0.07,
                     kind: 3,
@@ -2647,7 +2617,7 @@ impl Game {
             }
             if g.state == GState::Garrison {
                 let b = g.b as usize;
-                let c = self.world.buildings[b].c + self.roof_off(b);
+                let c = self.world.buildings[b].c;
                 if c.distance(p) < bd {
                     bd = c.distance(p);
                     best = Some(i);
@@ -2716,9 +2686,9 @@ impl Game {
                 if m.cd <= 0.0 && self.ammo >= d.ammo {
                     let (origin, muzzle, range) = if gar {
                         let bb = &self.world.buildings[b as usize];
-                        (bb.c, bb.c + self.roof_off(b as usize), d.range * 1.6)
+                        (bb.c, (bb.c, bb.h + 1.0), d.range * 1.6)
                     } else {
-                        (m.p, m.p, d.range)
+                        (m.p, (m.p, 1.0), d.range)
                     };
                     if let Some(t) = self
                         .find_target(origin, range)
@@ -2737,11 +2707,12 @@ impl Game {
             } else {
                 self.rev_src(RevKey::Group(gi))
             };
-            for (a, t) in shots {
+            for ((a, az), t) in shots {
                 self.blast(t, d.rad, d.dmg, d.bdmg, src, d.dmg);
                 self.ammo -= d.ammo;
                 self.tracers.push(Tracer {
                     a,
+                    az,
                     b: t,
                     t: 0.08,
                     kind: if kind == U::Tank { 4 } else { 3 },

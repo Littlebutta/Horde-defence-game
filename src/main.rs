@@ -9,6 +9,7 @@ mod game;
 mod osm;
 mod render;
 mod selftest;
+mod storage;
 mod swarm;
 mod update;
 mod world;
@@ -97,6 +98,8 @@ async fn main() {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(2.5);
                 app.set_view(hq, z);
+                let ang = |k: &str, d: f32| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
+                app.set_angles(ang("PH_YAW", 0.0), ang("PH_PITCH", 0.95));
             }
         }
         app.frame();

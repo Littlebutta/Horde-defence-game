@@ -90,7 +90,7 @@ pub fn def(s: S) -> &'static Def {
         top: rgb(56, 217, 169),
         side: rgb(18, 134, 106),
         zone: true,
-        tip: "Makes 2.5 scrap per second. Each one costs more than the last. Base zone only.",
+        tip: "Makes 2.5 scrap per second. Base zone only.",
         ..BASE
     };
     static PLANT: Def = Def {

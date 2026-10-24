@@ -3,6 +3,7 @@
 use crate::defs::*;
 use crate::game::*;
 use crate::osm::{self, OsmMsg};
+use crate::storage;
 use crate::render::{self, text, text_w, Fonts, Scene, ViewInfo, WorldLabels};
 use crate::update::{UpState, Updater};
 use crate::world::*;
@@ -42,8 +43,7 @@ pub struct App {
     loader: Option<osm::Loader>,
     game: Option<Game>,
     scene: Option<Scene>,
-    cam: Vec2,
-    scale: f32,
+    cam: Orbit,
     tool: Tool,
     press: Option<(Vec2, Vec2)>, // (screen, world) where the left button went down
     panning: bool,
@@ -56,6 +56,60 @@ pub struct App {
     tip: Option<String>,
     msg: (String, f32),
     last_m: Vec2,
+    saved: Vec<storage::SavedMap>,
+}
+
+/// The orbit camera: looks at a point on the ground from `dist` cells away, turned by `yaw` and
+/// tilted `pitch` above the horizon (pi/2 would be straight down).
+#[derive(Clone, Copy)]
+struct Orbit {
+    t: Vec2,
+    dist: f32,
+    yaw: f32,
+    pitch: f32,
+}
+const FOVY: f32 = 0.8;
+const TOP_PITCH: f32 = 1.5;
+const MIN_PITCH: f32 = 0.3;
+impl Orbit {
+    /// Ground direction from the look-at point back towards the camera.
+    fn back(&self) -> Vec2 {
+        vec2(-self.yaw.sin(), self.yaw.cos())
+    }
+    fn right(&self) -> Vec2 {
+        vec2(self.yaw.cos(), self.yaw.sin())
+    }
+    fn camera(&self) -> Camera3D {
+        let eye = render::p3(self.t + self.back() * self.dist * self.pitch.cos(), self.dist * self.pitch.sin());
+        Camera3D {
+            position: eye,
+            target: render::p3(self.t, 0.0),
+            up: vec3(0.0, 0.0, -1.0),
+            fovy: FOVY,
+            z_near: (self.dist * 0.02).max(0.5),
+            z_far: self.dist * 8.0 + 4000.0,
+            ..Default::default()
+        }
+    }
+    /// Screen pixels per map cell at the look-at point.
+    fn scale(&self) -> f32 {
+        screen_height() / (2.0 * self.dist * (FOVY / 2.0).tan())
+    }
+    fn set_scale(&mut self, s: f32) {
+        self.dist = (screen_height() / (2.0 * s.max(0.05) * (FOVY / 2.0).tan())).clamp(20.0, 2600.0);
+    }
+    fn top(&self) -> bool {
+        self.pitch > TOP_PITCH - 0.01
+    }
+}
+
+fn to_screen(m: &Mat4, p: Vec3) -> Option<Vec2> {
+    let c = *m * p.extend(1.0);
+    if c.w <= 0.01 {
+        return None;
+    }
+    let n = c.truncate() / c.w;
+    (n.z <= 1.0).then(|| vec2((n.x + 1.0) / 2.0 * screen_width(), (1.0 - n.y) / 2.0 * screen_height()))
 }
 
 struct Pal {
@@ -87,20 +141,21 @@ fn pal(dark: bool) -> Pal {
 
 impl App {
     pub fn new() -> App {
+        let st = storage::load_settings();
         App {
             screen: Screen::Menu,
             fonts: render::load_fonts(),
-            dark: true,
-            fac: 0,
-            diff: 1,
-            real: false,
-            city: String::new(),
+            dark: st.dark,
+            fac: st.fac,
+            diff: st.diff,
+            real: st.real,
+            city: st.city,
+            saved: storage::list_maps(),
             status: String::new(),
             loader: None,
             game: None,
             scene: None,
-            cam: vec2(W as f32 / 2.0, H as f32 / 2.0),
-            scale: 2.0,
+            cam: Orbit { t: vec2(W as f32 / 2.0, H as f32 / 2.0), dist: 400.0, yaw: 0.0, pitch: 0.95 },
             tool: Tool::None,
             press: None,
             panning: false,
@@ -130,7 +185,12 @@ impl App {
         self.ui_rects.clear();
         self.tip = None;
         match self.screen {
-            Screen::Menu => self.menu(),
+            Screen::Menu => {
+                self.menu();
+                if let Some(t) = self.tip.clone() {
+                    self.tooltip(&t);
+                }
+            }
             Screen::Loading => self.loading(),
             Screen::Play => self.play(dt),
         }
@@ -214,7 +274,7 @@ impl App {
             y += 72.0;
         }
         let w = 760.0f32.min(sw - 32.0);
-        let h = 600.0f32.min(sh - 32.0);
+        let h = 650.0f32.min(sh - 32.0);
         let r = Rect::new((sw - w) / 2.0, (sh - h) / 2.0, w, h);
         self.panel(r);
         let (x0, mut y) = (r.x + 28.0, r.y + 52.0);
@@ -333,6 +393,51 @@ impl App {
             y += 50.0;
             text(&self.fonts.mono, "Streets and buildings come from OpenStreetMap. Your HQ goes at the nearest airport.", x0, y, 13.0, p.dim);
             y += 18.0;
+            // cities downloaded before: one click to play again, no download
+            if !self.saved.is_empty() {
+                y += 6.0;
+                text(&self.fonts.mono, "Played before:", x0, y + 16.0, 13.0, p.dim);
+                let mut x = x0 + 112.0;
+                let mut pick = None;
+                let mut del = None;
+                for (i, m) in self.saved.iter().take(8).enumerate() {
+                    let label = m.query.clone();
+                    let bw = text_w(&self.fonts.head, &label, 16.0) + 24.0;
+                    if x + bw + 26.0 > x0 + w - 56.0 {
+                        break;
+                    }
+                    let r = Rect::new(x, y, bw, 26.0);
+                    let rx = Rect::new(x + bw, y, 22.0, 26.0);
+                    let hot = self.hot(r);
+                    draw_rectangle(r.x, r.y, r.w, r.h, if hot { mix(p.panel2, p.accent, 0.2) } else { p.panel2 });
+                    text(&self.fonts.head, &label, r.x + 12.0, r.y + 18.0, 15.0, p.text);
+                    let hx = self.hot(rx);
+                    draw_rectangle(rx.x, rx.y, rx.w, rx.h, if hx { rgb(201, 42, 42) } else { p.panel2 });
+                    text(&self.fonts.mono, "x", rx.x + 7.0, rx.y + 17.0, 13.0, if hx { WHITE } else { p.dim });
+                    self.ui_rects.push(r);
+                    self.ui_rects.push(rx);
+                    if hot {
+                        self.tip = Some(format!("{}: play again without downloading", m.name));
+                    }
+                    if is_mouse_button_pressed(MouseButton::Left) {
+                        if hot {
+                            pick = Some(i);
+                        } else if hx {
+                            del = Some(i);
+                        }
+                    }
+                    x += bw + 30.0;
+                }
+                if let Some(i) = del {
+                    storage::delete_map(&self.saved[i].path);
+                    self.saved = storage::list_maps();
+                } else if let Some(i) = pick {
+                    self.city = self.saved[i].query.clone();
+                    self.start();
+                    return;
+                }
+                y += 34.0;
+            }
         } else {
             while get_char_pressed().is_some() {}
             text(&self.fonts.mono, "A new random city every game: river, airport, avenues and downtown all move around.", x0, y + 6.0, 13.0, p.dim);
@@ -411,14 +516,30 @@ impl App {
     pub fn game_mut(&mut self) -> Option<&mut Game> {
         self.game.as_mut()
     }
-    pub fn set_view(&mut self, cam: Vec2, scale: f32) {
-        self.cam = cam;
-        self.scale = scale;
+    pub fn set_view(&mut self, at: Vec2, scale: f32) {
+        self.cam.t = at;
+        self.cam.set_scale(scale);
+    }
+    pub fn set_angles(&mut self, yaw: f32, pitch: f32) {
+        self.cam.yaw = yaw;
+        self.cam.pitch = pitch.clamp(MIN_PITCH, TOP_PITCH);
+    }
+
+    fn save_settings(&self) {
+        storage::save_settings(&storage::Settings { dark: self.dark, fac: self.fac, diff: self.diff, real: self.real, city: self.city.clone() });
     }
 
     fn start(&mut self) {
         self.status.clear();
+        self.save_settings();
         if self.real {
+            // a city played before loads straight from the data folder
+            if let Some(p) = storage::find_map(self.city.trim()) {
+                if let Some(d) = storage::load_map(&p) {
+                    self.begin(d, 7);
+                    return;
+                }
+            }
             self.loader = Some(osm::start(self.city.trim().to_string()));
             self.status = "Starting download".into();
             self.screen = Screen::Loading;
@@ -433,8 +554,8 @@ impl App {
         let note = d.note.clone();
         let name = d.name.clone();
         let g = Game::new(d, self.fac, DIFFS[self.diff].1, seed);
-        self.cam = g.world.hq;
-        self.scale = (screen_height() / 260.0).max(1.5);
+        self.cam = Orbit { t: g.world.hq, dist: 0.0, yaw: 0.0, pitch: 0.95 };
+        self.cam.set_scale((screen_height() / 260.0).max(1.5));
         self.scene = Some(Scene::new(&g, self.theme()));
         self.game = Some(g);
         self.tool = Tool::None;
@@ -462,6 +583,8 @@ impl App {
                     OsmMsg::Done(d) => {
                         self.loader = None;
                         self.status.clear();
+                        storage::save_map(self.city.trim(), &d);
+                        self.saved = storage::list_maps();
                         self.begin(*d, 7);
                         return;
                     }
@@ -506,8 +629,50 @@ impl App {
 
     // ------------------------------------------------------------------------------------- game
 
-    fn to_world(&self, s: Vec2) -> Vec2 {
-        self.cam + (s - vec2(screen_width(), screen_height()) / 2.0) / self.scale
+    /// The ray under a screen point, as (origin, direction) in world space.
+    fn ray(&self, s: Vec2) -> (Vec3, Vec3) {
+        let inv = self.cam.camera().matrix().inverse();
+        let n = vec2(2.0 * s.x / screen_width() - 1.0, 1.0 - 2.0 * s.y / screen_height());
+        let a = inv.project_point3(vec3(n.x, n.y, -1.0));
+        let b = inv.project_point3(vec3(n.x, n.y, 1.0));
+        (a, (b - a).normalize_or_zero())
+    }
+    /// Where a screen point lands on the ground plane.
+    fn ground_at(&self, s: Vec2) -> Vec2 {
+        let (o, d) = self.ray(s);
+        if d.z > 1e-3 {
+            (o + d * (-o.z / d.z)).truncate()
+        } else {
+            // above the horizon: somewhere far out along the view
+            o.truncate() + vec2(d.x, d.y).normalize_or_zero() * self.cam.dist * 6.0
+        }
+    }
+    /// The map point under the mouse: the first building the ray hits (wall or roof), else the ground.
+    fn pick(&self, g: &Game, s: Vec2) -> Vec2 {
+        let ground = self.ground_at(s);
+        let (o, d) = self.ray(s);
+        if d.z <= 1e-3 {
+            return ground;
+        }
+        const TALLEST: f32 = 160.0;
+        let t0 = ((-TALLEST - o.z) / d.z).max(0.0);
+        let t1 = -o.z / d.z;
+        let step = 0.5 / vec2(d.x, d.y).length().max(1e-4);
+        let n = (((t1 - t0) / step) as usize).min(6000);
+        for k in 0..n {
+            let p = o + d * (t0 + k as f32 * step);
+            if p.x < 0.0 || p.y < 0.0 || p.x >= W as f32 || p.y >= H as f32 {
+                continue;
+            }
+            let b = g.world.bid[p.y as usize * W + p.x as usize];
+            if b >= 0 {
+                let bb = &g.world.buildings[b as usize];
+                if bb.alive && bb.h >= -p.z {
+                    return p.truncate();
+                }
+            }
+        }
+        ground
     }
 
     fn play(&mut self, dt: f32) {
@@ -549,32 +714,34 @@ impl App {
         // camera
         let (sw, sh) = (screen_width(), screen_height());
         clear_background(th.bg);
-        set_camera(&Camera2D {
-            target: self.cam,
-            zoom: vec2(2.0 * self.scale / sw, 2.0 * self.scale / sh),
-            ..Default::default()
-        });
-        let tl = self.to_world(vec2(0.0, 0.0));
-        let br = self.to_world(vec2(sw, sh));
+        let cam = self.cam.camera();
+        set_camera(&cam);
+        let radius = [vec2(0.0, 0.0), vec2(sw, 0.0), vec2(0.0, sh), vec2(sw, sh)]
+            .iter()
+            .map(|c| self.ground_at(*c).distance(self.cam.t))
+            .fold(0.0, f32::max);
         let mut labels = WorldLabels { items: Vec::new() };
         render::draw_world(
             &mut sc,
             &g,
             th,
             &ViewInfo {
-                tl,
-                br,
-                scale: self.scale,
+                center: self.cam.t,
+                radius,
+                scale: self.cam.scale(),
                 selected: self.selected,
                 time: self.clock,
             },
             &mut labels,
         );
-        let mw = self.to_world(self.mouse());
-        let cursor_label = self.preview(&g, mw);
+        let mw = self.pick(&g, self.mouse());
+        gl_use_material(&sc.flat);
+        let cursor_label = self.preview(&g, &sc.flat, mw);
+        gl_use_default_material();
         set_default_camera();
+        let m = cam.matrix();
         for (p, s, c, size) in &labels.items {
-            let q = self.cam_to_screen(*p);
+            let Some(q) = to_screen(&m, *p) else { continue };
             let tw = text_w(&self.fonts.head, s, *size);
             text(
                 &self.fonts.head,
@@ -610,8 +777,13 @@ impl App {
         }
     }
 
-    fn cam_to_screen(&self, p: Vec2) -> Vec2 {
-        (p - self.cam) * self.scale + vec2(screen_width(), screen_height()) / 2.0
+    fn toggle_top(&mut self) {
+        if self.cam.top() {
+            self.cam.pitch = 0.95;
+        } else {
+            self.cam.pitch = TOP_PITCH;
+            self.cam.yaw = 0.0;
+        }
     }
 
     fn over_ui(&self) -> bool {
@@ -661,29 +833,27 @@ impl App {
     }
 
     /// Draws the ghost of whatever the current tool would do. Returns the label for the cursor.
-    fn preview(&self, g: &Game, mw: Vec2) -> Option<(String, Color)> {
+    /// Ground marks are drawn with `flat`; ghosts of buildings are real 3D boxes.
+    fn preview(&self, g: &Game, flat: &Material, mw: Vec2) -> Option<(String, Color)> {
+        let ghost = |x: f32, y: f32, w: f32, h: f32, z: f32, ok: bool| {
+            gl_use_default_material();
+            render::ghost(x, y, w, h, z, ok);
+            gl_use_material(flat);
+        };
         if self.over_ui() {
             return None;
         }
-        let ok = rgba(64, 192, 87, 0.55);
-        let bad = rgba(250, 82, 82, 0.55);
         match self.tool {
             Tool::Build(t) => {
                 let d = def(t);
                 // rooftop spot for turrets
                 if d.turret && self.press.is_none() {
                     if let Some((b, p)) = g.roof_at(mw) {
-                        let q = p + g.roof_off(b);
+                        let q = p;
                         let can = g.can_place_roof(b, p);
                         let cost = g.cost_at(t, p);
                         let afford = g.scrap >= cost;
-                        draw_rectangle(
-                            q.x - d.w as f32 / 2.0,
-                            q.y - d.h as f32 / 2.0,
-                            d.w as f32,
-                            d.h as f32,
-                            if can && afford { ok } else { bad },
-                        );
+                        ghost(q.x - d.w as f32 / 2.0, q.y - d.h as f32 / 2.0, d.w as f32, d.h as f32, g.world.buildings[b].h, can && afford);
                         draw_circle_lines(q.x, q.y, d.range * 1.6, 0.4, rgba(255, 212, 59, 0.6));
                         let extra = cost - d.cost;
                         let s = if !can {
@@ -737,13 +907,7 @@ impl App {
                             "Blocked"
                         };
                     }
-                    draw_rectangle(
-                        *x as f32,
-                        *y as f32,
-                        d.w as f32,
-                        d.h as f32,
-                        if can { ok } else { bad },
-                    );
+                    ghost(*x as f32, *y as f32, d.w as f32, d.h as f32, 0.0, can);
                 }
                 if d.turret && spots.len() == 1 {
                     let c = vec2(
@@ -904,11 +1068,11 @@ impl App {
         }
         if self.button(
             Rect::new(bx + 80.0, 6.0, 74.0, 28.0),
-            if g.tilt > 0.0 { "Top view" } else { "2.5D" },
+            if self.cam.top() { "3D view" } else { "Top view" },
             true,
             false,
         ) {
-            g.tilt = if g.tilt > 0.0 { 0.0 } else { 0.85 };
+            self.toggle_top();
         }
         if self.button(
             Rect::new(bx + 160.0, 6.0, 74.0, 28.0),
@@ -1270,13 +1434,13 @@ impl App {
                 }
             } else {
                 match ch {
-                    't' => g.tilt = if g.tilt > 0.0 { 0.0 } else { 0.85 },
+                    't' => self.toggle_top(),
                     'k' => self.dark = !self.dark,
                     'p' | ' ' => self.paused = !self.paused,
-                    'h' => self.cam = g.world.hq,
+                    'h' => self.cam.t = g.world.hq,
                     'f' => {
-                        self.cam = vec2(W as f32, H as f32) / 2.0;
-                        self.scale = (screen_height() / H as f32).min(screen_width() / W as f32);
+                        self.cam.t = vec2(W as f32, H as f32) / 2.0;
+                        self.cam.set_scale((screen_height() / H as f32).min(screen_width() / W as f32));
                     }
                     'x' => {
                         if g.sell_at(mw) {
@@ -1295,33 +1459,56 @@ impl App {
         if is_key_pressed(KeyCode::F9) {
             g.stress();
         }
-        let pan = 500.0 / self.scale * dt;
+        // camera: WASD pans along the view, Z/C turn, PageUp/PageDown tilt
+        let pan = 500.0 / self.cam.scale() * dt;
+        let (fwd, right) = (-self.cam.back(), self.cam.right());
         if is_key_down(KeyCode::W) || is_key_down(KeyCode::Up) {
-            self.cam.y -= pan;
+            self.cam.t += fwd * pan;
         }
         if is_key_down(KeyCode::S) || is_key_down(KeyCode::Down) {
-            self.cam.y += pan;
+            self.cam.t -= fwd * pan;
         }
         if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) {
-            self.cam.x -= pan;
+            self.cam.t -= right * pan;
         }
         if is_key_down(KeyCode::D) || is_key_down(KeyCode::Right) {
-            self.cam.x += pan;
+            self.cam.t += right * pan;
+        }
+        if is_key_down(KeyCode::Z) {
+            self.cam.yaw -= 1.8 * dt;
+        }
+        if is_key_down(KeyCode::C) {
+            self.cam.yaw += 1.8 * dt;
+        }
+        if is_key_down(KeyCode::PageUp) {
+            self.cam.pitch -= 1.2 * dt;
+        }
+        if is_key_down(KeyCode::PageDown) {
+            self.cam.pitch += 1.2 * dt;
         }
         let (_, wy) = mouse_wheel();
         if wy != 0.0 && !ui {
-            let before = mw;
-            let k = if wy > 0.0 { 1.15 } else { 1.0 / 1.15 };
-            self.scale = (self.scale * k).clamp(0.35, 14.0);
-            let after = self.to_world(self.mouse());
-            self.cam += before - after;
+            // zoom towards the point under the cursor
+            let before = self.ground_at(self.mouse());
+            let k = if wy > 0.0 { 1.0 / 1.15 } else { 1.15 };
+            self.cam.dist = (self.cam.dist * k).clamp(20.0, 2600.0);
+            let after = self.ground_at(self.mouse());
+            self.cam.t += before - after;
         }
         let md = self.mouse() - self.last_m;
+        let last = self.last_m;
         self.last_m = self.mouse();
-        if is_mouse_button_down(MouseButton::Middle) {
-            self.cam -= md / self.scale;
+        // middle drag (or Alt + left drag) orbits: sideways turns, up and down tilts
+        let alt = is_key_down(KeyCode::LeftAlt) || is_key_down(KeyCode::RightAlt);
+        if is_mouse_button_down(MouseButton::Middle) || (alt && is_mouse_button_down(MouseButton::Left) && self.press.is_some()) {
+            self.cam.yaw += md.x * 0.008;
+            self.cam.pitch += md.y * 0.006;
+            if alt {
+                self.panning = true;
+            }
         }
-        self.cam = self.cam.clamp(vec2(0.0, 0.0), vec2(W as f32, H as f32));
+        self.cam.pitch = self.cam.pitch.clamp(MIN_PITCH, TOP_PITCH);
+        self.cam.t = self.cam.t.clamp(vec2(0.0, 0.0), vec2(W as f32, H as f32));
         let _ = sc;
 
         // right click: order the selected group, or drop the tool
@@ -1344,8 +1531,9 @@ impl App {
                 if self.tool == Tool::None && (self.mouse() - s0).length() > 6.0 {
                     self.panning = true;
                 }
-                if self.panning {
-                    self.cam -= md / self.scale;
+                if self.panning && !alt {
+                    // grab the ground: the point under the cursor stays under the cursor
+                    self.cam.t += self.ground_at(last) - self.ground_at(self.mouse());
                 }
             }
         }

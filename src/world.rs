@@ -340,7 +340,9 @@ impl World {
 
     #[inline]
     pub fn walkable_terrain(t: u8) -> bool {
-        !(t == T_LAND || t == T_WATER)
+        // everything but water: open ground, streets, parks, airport, rubble. Buildings are handled
+        // separately (units can't be inside one)
+        t != T_WATER
     }
 
     pub fn add_outpost(&mut self, at: Vec2) {
