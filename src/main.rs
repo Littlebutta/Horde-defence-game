@@ -7,6 +7,7 @@ mod citygen;
 mod defs;
 mod fields;
 mod game;
+mod globe;
 mod menubg;
 mod music;
 mod net;
@@ -63,7 +64,7 @@ async fn run(steam: Option<net::Steam>) {
     // PH_SHOT=<png> renders a test game headlessly and saves a screenshot (used in CI-less testing)
     let shot = std::env::var("PH_SHOT").ok();
     let menu_shot = std::env::var("PH_MENU").is_ok();
-    // PH_CAMP=<city 0-9>: the test game is that campaign city, with a small veteran army; PH_HUB=1 shows the campaign screen
+    // PH_CAMP=<city 0-10>: the test game is that campaign city, with a small veteran army; PH_HUB=1 shows the campaign screen
     let camp: Option<usize> = std::env::var("PH_CAMP").ok().and_then(|s| s.parse().ok());
     if std::env::var("PH_HUB").is_ok() {
         app.test_campaign(camp.unwrap_or(3), false);
