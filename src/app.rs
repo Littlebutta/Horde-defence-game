@@ -1,6 +1,6 @@
 //! Screens, HUD and input: the start menu, the city loader, and the game itself.
 
-use crate::campaign::{self, Campaign, Fate, CITIES};
+use crate::campaign::{self, Campaign, City, Fate, POOL};
 use crate::globe;
 use crate::defs::*;
 use crate::game::*;
@@ -759,11 +759,15 @@ impl App {
                 text(&self.fonts.mono, l, d.x, d.y + 13.0 + i as f32 * 18.0, 13.0, p.dim);
             }
             d.cut_top(lines.len() as f32 * 18.0 + 8.0, 0.0);
-            let ready = self.pack.ready();
-            let (maps, f) = match self.pack.get() {
-                campaign::PackState::Fetching(i) if ready < CITIES.len() => (format!("City maps {}/{} · getting {}…", ready, CITIES.len(), CITIES[i].name), ready as f32 / CITIES.len() as f32),
-                campaign::PackState::Failed(_) if ready < CITIES.len() => (format!("City maps {}/{} · the rest download when you reach them", ready, CITIES.len()), ready as f32 / CITIES.len() as f32),
-                _ => (format!("City maps: all {} ready", CITIES.len()), 1.0),
+            let cities: Vec<&City> = saved_camp.as_ref().map(|c| c.all().collect()).unwrap_or_else(|| vec![&POOL[0]]);
+            self.pack.want(&cities);
+            let n = cities.len();
+            let ready = cities.iter().filter(|c| campaign::have_map(c)).count();
+            let f = ready as f32 / n as f32;
+            let maps = match self.pack.getting(cities.iter().copied()) {
+                _ if ready == n => format!("City maps: all {} ready", n),
+                Some(c) => format!("City maps {}/{} · getting {}…", ready, n, c.name),
+                None => format!("City maps {}/{} · the rest download when you reach them", ready, n),
             };
             let m = d.cut_top(30.0, 6.0);
             text(&self.fonts.mono, &maps, m.x, m.y + 13.0, 12.5, p.text);
@@ -986,7 +990,8 @@ impl App {
             return;
         }
         self.screen = Screen::Loading;
-        if self.pack.busy() {
+        self.pack.want(&[city]);
+        if self.pack.pending(city) {
             self.wait_pack = true;
             self.status = format!("Getting the {} map", city.name);
         } else {
@@ -1003,6 +1008,9 @@ impl App {
             self.screen = Screen::Menu;
             return;
         };
+        // this campaign's maps, the city picked first
+        let want: Vec<&City> = std::iter::once(c.city()).chain(c.all()).collect();
+        self.pack.want(&want);
         let before = (c.points, c.tech.len(), c.units.len(), c.current);
         // space
         clear_background(rgb(6, 9, 16));
@@ -1035,8 +1043,8 @@ impl App {
             self.globe_city = Some(c.current);
             globe.focus(c.city().lat, c.city().lon);
         }
-        let marks: Vec<globe::Mark> = CITIES
-            .iter()
+        let marks: Vec<globe::Mark> = c
+            .all()
             .enumerate()
             .map(|(i, city)| {
                 let s = &c.cities[i];
@@ -1113,14 +1121,14 @@ impl App {
             // every city, closest to falling first
             text(&self.fonts.head, "Cities", x0, y, 16.0, p.text);
             y += 8.0;
-            let mut order: Vec<usize> = (0..CITIES.len()).collect();
+            let mut order: Vec<usize> = (0..c.cities.len()).collect();
             order.sort_by(|a, b| {
                 let k = |i: usize| (c.cities[i].fate != Fate::Open, c.cities[i].days);
                 let (ka, kb) = (k(*a), k(*b));
                 ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
             });
             let by = left.y + left.h - 120.0;
-            let rh = ((by - y - 8.0) / CITIES.len() as f32).clamp(14.0, 26.0);
+            let rh = ((by - y - 8.0) / c.cities.len() as f32).clamp(14.0, 26.0);
             for j in order {
                 let st = &c.cities[j];
                 let rr = Rect::new(left.x + 10.0, y, left.w - 20.0, rh - 2.0);
@@ -1135,7 +1143,7 @@ impl App {
                     Fate::Fallen => (p.dim, "fallen".to_string()),
                 };
                 let ty = rr.y + rh / 2.0 + 4.0;
-                text(&self.fonts.mono, CITIES[j].name, rr.x + 10.0, ty, 12.5, col);
+                text(&self.fonts.mono, c.info(j).name, rr.x + 10.0, ty, 12.5, col);
                 text(&self.fonts.mono, &right_s, rr.x + rr.w - 10.0 - text_w(&self.fonts.mono, &right_s, 12.0), ty, 12.0, if st.fate == Fate::Open { p.dim } else { col });
                 if hot {
                     self.tip = Some(self.city_tip(&c, j));
@@ -1237,7 +1245,7 @@ impl App {
 
     /// What the globe's pins and the city list show on hover.
     fn city_tip(&self, c: &Campaign, i: usize) -> String {
-        let city = &CITIES[i];
+        let city = c.info(i);
         let s = &c.cities[i];
         match s.fate {
             Fate::Open => format!(
@@ -1282,7 +1290,7 @@ impl App {
     /// already playing a random city.
     pub fn test_campaign(&mut self, city: usize, play: bool) {
         let mut c = Campaign::with_seed(std::env::var("PH_FAC").ok().and_then(|s| s.parse().ok()).unwrap_or(0), 1, 42);
-        c.current = city.min(CITIES.len() - 1);
+        c.current = city.min(c.cities.len() - 1);
         c.fought = 3;
         c.lost = 1;
         c.cities[0].fate = Fate::Held;
@@ -1295,11 +1303,12 @@ impl App {
         c.kills = 182_000;
         c.tech = vec![campaign::Tech::Build(S::Gun), campaign::Tech::Ability(A::Rescue), campaign::Tech::Research(R::Rescue), campaign::Tech::Research(R::Armour)];
         c.units = vec![(U::Rifle, 6), (U::Rifle, 4), (U::Tank, 1), (U::Rifle, 6)];
+        let c_city = c.city();
         self.camp = Some(c);
         self.screen = Screen::Hub;
         if play {
             self.in_camp = true;
-            let d = campaign::load_map(&CITIES[city.min(CITIES.len() - 1)]).unwrap_or_else(|| crate::citygen::generate(42));
+            let d = campaign::load_map(c_city).unwrap_or_else(|| crate::citygen::generate(42));
             self.begin(d, 1000 + city as u64);
         }
     }
@@ -1512,13 +1521,13 @@ impl App {
         clear_background(th.bg);
         let p = pal(self.dark);
         if self.wait_pack {
-            let city = self.camp.as_ref().map(|c| c.city()).unwrap_or(&CITIES[0]);
+            let city = self.camp.as_ref().map(|c| c.city()).unwrap_or(&POOL[0]);
             if let Some(d) = campaign::have_map(city).then(|| campaign::load_map(city)).flatten() {
                 self.wait_pack = false;
                 self.begin(d, 7);
                 return;
             }
-            if !self.pack.busy() {
+            if !self.pack.pending(city) {
                 // the pack didn't have it: straight from OpenStreetMap
                 self.wait_pack = false;
                 self.loader = Some(osm::start(city.query.to_string(), campaign::AIRPORT_M));
@@ -2437,7 +2446,7 @@ impl App {
         }
         let l = a.cut_top(22.0, 2.0);
         text(&self.fonts.mono, &army, l.x, l.y + 14.0, 14.0, p.text);
-        let fell: Vec<&str> = (0..CITIES.len()).filter(|i| c.cities[*i].fate == Fate::Open && next.cities[*i].fate == Fate::Fallen).map(|i| CITIES[i].name).collect();
+        let fell: Vec<&str> = (0..c.cities.len()).filter(|i| c.cities[*i].fate == Fate::Open && next.cities[*i].fate == Fate::Fallen).map(|i| c.info(i).name).collect();
         let world = if fell.is_empty() {
             format!("{} days pass. {} kills · score {:.0}", campaign::DAYS_PER_CITY, fmt_n(g.kills as usize), g.score)
         } else {

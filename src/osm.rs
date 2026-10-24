@@ -3,8 +3,8 @@
 //!
 //! 1. Find the place (Nominatim, falling back to Photon).
 //! 2. Find the nearest airport; the HQ goes there.
-//! 3. Download streets, buildings, water, parks and the airport in 2×2 tiles, trying several Overpass
-//!    mirrors in turn, and project it all onto the map grid at 4 m per cell.
+//! 3. Download streets, buildings, water, parks and the airport in tiles, several at once from
+//!    different Overpass mirrors, and project it all onto the map grid at 4 m per cell.
 
 use crate::world::*;
 use macroquad::prelude::{vec2, Vec2};
@@ -24,6 +24,8 @@ pub struct Loader {
 }
 
 const MPC: f32 = 4.0;
+/// Map tiles downloaded at once.
+const PARALLEL: usize = 4;
 const MIRRORS: [&str; 4] = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
@@ -112,10 +114,12 @@ fn geocode(a: &ureq::Agent, q: &str) -> Result<(f64, f64, String), String> {
     }
 }
 
-fn overpass(a: &ureq::Agent, q: &str, tx: &Sender<OsmMsg>, what: &str) -> Result<Value, String> {
+/// Runs an Overpass query, starting at mirror `first` so parallel queries spread over the mirrors.
+fn overpass(a: &ureq::Agent, q: &str, tx: &Sender<OsmMsg>, what: &str, first: usize) -> Result<Value, String> {
     let mut last = String::new();
     for round in 0..2 {
-        for m in MIRRORS {
+        for k in 0..MIRRORS.len() {
+            let m = MIRRORS[(first + k) % MIRRORS.len()];
             let host = m.split('/').nth(2).unwrap_or(m);
             let _ = tx.send(OsmMsg::Status(format!(
                 "{} from {}{}",
@@ -249,7 +253,7 @@ pub fn load(query: &str, tx: &Sender<OsmMsg>, tiles: usize, air_m: u32) -> Resul
     let _ = tx.send(OsmMsg::Status("Finding the nearest airport".into()));
     let q = format!("[out:json][timeout:60];(way[\"aeroway\"=\"aerodrome\"](around:{air_m},{lat},{lon});relation[\"aeroway\"=\"aerodrome\"](around:{air_m},{lat},{lon}););out tags center;");
     let mut air: Option<(f64, f64, String)> = None;
-    if let Ok(j) = overpass(&a, &q, tx, "Finding the nearest airport") {
+    if let Ok(j) = overpass(&a, &q, tx, "Finding the nearest airport", 0) {
         let mut best = f64::MAX;
         for e in j["elements"].as_array().into_iter().flatten() {
             let (Some(alat), Some(alon)) =
@@ -307,6 +311,7 @@ pub fn load(query: &str, tx: &Sender<OsmMsg>, tiles: usize, air_m: u32) -> Resul
     let mut seen: HashSet<(bool, u64)> = HashSet::new();
     let mut aerodromes: Vec<Poly> = Vec::new();
     let nt = tiles.max(1);
+    let mut queries = Vec::new();
     for ty in 0..nt {
         for tx_ in 0..nt {
             let ts = s + (n - s) * ty as f64 / nt as f64;
@@ -316,8 +321,52 @@ pub fn load(query: &str, tx: &Sender<OsmMsg>, tiles: usize, air_m: u32) -> Resul
             let q = format!(
                 "[out:json][timeout:170][bbox:{ts:.6},{tw:.6},{tn:.6},{te:.6}];(way[\"highway\"];way[\"building\"];way[\"natural\"=\"water\"];relation[\"natural\"=\"water\"];way[\"waterway\"~\"^(river|canal)$\"];way[\"landuse\"~\"^(grass|forest|recreation_ground|cemetery|meadow|village_green)$\"];way[\"leisure\"~\"^(park|garden|pitch|golf_course)$\"];way[\"aeroway\"~\"^(aerodrome|apron|runway|taxiway)$\"];relation[\"aeroway\"=\"aerodrome\"];);out geom qt;"
             );
-            let k = ty * nt + tx_ + 1;
-            let j = overpass(&a, &q, tx, &format!("Downloading map tile {}/{}", k, nt * nt))?;
+            queries.push(q);
+        }
+    }
+    // a few tiles at once, each from its own mirror; they're used in order so the map comes out the
+    // same however the downloads finish
+    let total = queries.len();
+    let (rtx, rrx) = channel::<(usize, Result<Value, String>)>();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|sc| -> Result<(), String> {
+        for _ in 0..PARALLEL.min(total) {
+            let (rtx, a, queries, next) = (rtx.clone(), &a, &queries, &next);
+            let tx = tx.clone();
+            sc.spawn(move || loop {
+                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if k >= total {
+                    break;
+                }
+                let r = overpass(a, &queries[k], &tx, &format!("Downloading map tile {}/{}", k + 1, total), k);
+                let failed = r.is_err();
+                if rtx.send((k, r)).is_err() || failed {
+                    break;
+                }
+            });
+        }
+        drop(rtx);
+        let mut waiting: HashMap<usize, Value> = HashMap::new();
+        let mut done = 0;
+        for k in 0..total {
+            let j = loop {
+                if let Some(j) = waiting.remove(&k) {
+                    break j;
+                }
+                match rrx.recv() {
+                    Ok((i, r)) => {
+                        let v = r.map_err(|e| {
+                            // stop the other downloads
+                            next.store(total, std::sync::atomic::Ordering::Relaxed);
+                            e
+                        })?;
+                        done += 1;
+                        let _ = tx.send(OsmMsg::Status(format!("Downloaded {}/{} map tiles", done, total)));
+                        waiting.insert(i, v);
+                    }
+                    Err(_) => return Err("map download stopped".into()),
+                }
+            };
             for el in j["elements"].as_array().into_iter().flatten() {
                 let id = el["id"].as_u64().unwrap_or(0);
                 let rel = el["type"] == "relation";
@@ -385,7 +434,8 @@ pub fn load(query: &str, tx: &Sender<OsmMsg>, tiles: usize, air_m: u32) -> Resul
                 }
             }
         }
-    }
+        Ok(())
+    })?;
     if d.roads.is_empty() {
         return Err("no streets came back for that area".into());
     }

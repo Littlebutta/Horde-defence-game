@@ -34,8 +34,9 @@ pub struct City {
     pub pop: f32,
 }
 
-/// New York, where it starts, and the ten largest urban areas.
-pub const CITIES: [City; 11] = [
+/// Well-known cities a campaign picks from. New York, where every campaign starts, comes first.
+/// Saves store indices into it, so new cities go at the end.
+pub const POOL: [City; 40] = [
     City { name: "New York", query: "Manhattan, New York, USA", file: "new-york", lat: 40.75, lon: -73.99, pop: 19.6 },
     City { name: "Osaka", query: "Osaka, Japan", file: "osaka", lat: 34.69, lon: 135.50, pop: 19.0 },
     City { name: "Dhaka", query: "Dhaka, Bangladesh", file: "dhaka", lat: 23.81, lon: 90.41, pop: 23.2 },
@@ -47,9 +48,48 @@ pub const CITIES: [City; 11] = [
     City { name: "Shanghai", query: "Shanghai, China", file: "shanghai", lat: 31.23, lon: 121.47, pop: 29.2 },
     City { name: "Delhi", query: "Delhi, India", file: "delhi", lat: 28.61, lon: 77.21, pop: 33.8 },
     City { name: "Tokyo", query: "Tokyo, Japan", file: "tokyo", lat: 35.68, lon: 139.69, pop: 37.2 },
+    City { name: "London", query: "London, United Kingdom", file: "london", lat: 51.51, lon: -0.13, pop: 9.6 },
+    City { name: "Paris", query: "Paris, France", file: "paris", lat: 48.86, lon: 2.35, pop: 11.3 },
+    City { name: "Los Angeles", query: "Los Angeles, USA", file: "los-angeles", lat: 34.05, lon: -118.24, pop: 12.5 },
+    City { name: "Chicago", query: "Chicago, USA", file: "chicago", lat: 41.88, lon: -87.63, pop: 8.9 },
+    City { name: "Rio de Janeiro", query: "Rio de Janeiro, Brazil", file: "rio-de-janeiro", lat: -22.91, lon: -43.17, pop: 13.8 },
+    City { name: "Buenos Aires", query: "Buenos Aires, Argentina", file: "buenos-aires", lat: -34.60, lon: -58.38, pop: 15.6 },
+    City { name: "Moscow", query: "Moscow, Russia", file: "moscow", lat: 55.76, lon: 37.62, pop: 12.7 },
+    City { name: "Istanbul", query: "Fatih, Istanbul, Turkey", file: "istanbul", lat: 41.01, lon: 28.98, pop: 15.8 },
+    City { name: "Seoul", query: "Seoul, South Korea", file: "seoul", lat: 37.57, lon: 126.98, pop: 10.0 },
+    City { name: "Hong Kong", query: "Central, Hong Kong", file: "hong-kong", lat: 22.28, lon: 114.16, pop: 7.6 },
+    City { name: "Singapore", query: "Downtown Core, Singapore", file: "singapore", lat: 1.29, lon: 103.85, pop: 6.1 },
+    City { name: "Bangkok", query: "Bangkok, Thailand", file: "bangkok", lat: 13.76, lon: 100.50, pop: 11.2 },
+    City { name: "Jakarta", query: "Jakarta, Indonesia", file: "jakarta", lat: -6.18, lon: 106.83, pop: 11.2 },
+    City { name: "Manila", query: "Manila, Philippines", file: "manila", lat: 14.60, lon: 120.98, pop: 14.9 },
+    City { name: "Sydney", query: "Sydney, Australia", file: "sydney", lat: -33.87, lon: 151.21, pop: 5.1 },
+    City { name: "Lagos", query: "Lagos Island, Lagos, Nigeria", file: "lagos", lat: 6.45, lon: 3.39, pop: 15.9 },
+    City { name: "Nairobi", query: "Nairobi, Kenya", file: "nairobi", lat: -1.29, lon: 36.82, pop: 5.3 },
+    City { name: "Johannesburg", query: "Johannesburg, South Africa", file: "johannesburg", lat: -26.20, lon: 28.05, pop: 6.2 },
+    City { name: "Cape Town", query: "Cape Town, South Africa", file: "cape-town", lat: -33.92, lon: 18.42, pop: 4.9 },
+    City { name: "Dubai", query: "Downtown Dubai, Dubai, United Arab Emirates", file: "dubai", lat: 25.20, lon: 55.27, pop: 3.0 },
+    City { name: "Rome", query: "Rome, Italy", file: "rome", lat: 41.90, lon: 12.50, pop: 4.3 },
+    City { name: "Berlin", query: "Berlin, Germany", file: "berlin", lat: 52.52, lon: 13.40, pop: 3.6 },
+    City { name: "Madrid", query: "Madrid, Spain", file: "madrid", lat: 40.42, lon: -3.70, pop: 6.8 },
+    City { name: "Toronto", query: "Toronto, Canada", file: "toronto", lat: 43.65, lon: -79.38, pop: 6.4 },
+    City { name: "San Francisco", query: "San Francisco, USA", file: "san-francisco", lat: 37.77, lon: -122.42, pop: 3.3 },
+    City { name: "Lima", query: "Lima, Peru", file: "lima", lat: -12.05, lon: -77.04, pop: 11.2 },
+    City { name: "Tehran", query: "Tehran, Iran", file: "tehran", lat: 35.69, lon: 51.39, pop: 9.5 },
+    City { name: "Washington", query: "Washington, D.C., USA", file: "washington", lat: 38.90, lon: -77.04, pop: 5.4 },
+    City { name: "Barcelona", query: "Barcelona, Spain", file: "barcelona", lat: 41.39, lon: 2.17, pop: 5.7 },
 ];
 
+/// Cities in a campaign: New York and ten more from the pool.
+pub const CAMPAIGN_CITIES: usize = 11;
+/// No two campaign cities closer than this, so each campaign spreads over the world.
+const SPREAD_KM: f32 = 1_000.0;
+
 impl City {
+    pub fn km_to(&self, o: &City) -> f32 {
+        let (a, b) = ((self.lat.to_radians(), self.lon.to_radians()), (o.lat.to_radians(), o.lon.to_radians()));
+        let c = a.0.sin() * b.0.sin() + a.0.cos() * b.0.cos() * (a.1 - b.1).cos();
+        6371.0 * c.clamp(-1.0, 1.0).acos()
+    }
     /// The country, from the lookup ("Cairo, Egypt" -> "Egypt").
     pub fn country(&self) -> &'static str {
         self.query.rsplit(", ").next().unwrap_or("")
@@ -244,12 +284,33 @@ fn hash(seed: u64, k: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
+/// New York, then cities from the pool in a seeded order, skipping any too close to one already in.
+pub fn pick_cities(seed: u64) -> Vec<usize> {
+    let mut order: Vec<usize> = (1..POOL.len()).collect();
+    order.sort_by(|a, b| hash(seed, 500 + *a as u64).total_cmp(&hash(seed, 500 + *b as u64)));
+    let mut picks = vec![0];
+    for &i in &order {
+        if picks.len() < CAMPAIGN_CITIES && picks.iter().all(|&p| POOL[p].km_to(&POOL[i]) >= SPREAD_KM) {
+            picks.push(i);
+        }
+    }
+    // a crowded draw fills up with whatever is left
+    for &i in &order {
+        if picks.len() < CAMPAIGN_CITIES && !picks.contains(&i) {
+            picks.push(i);
+        }
+    }
+    picks
+}
+
 #[derive(Clone)]
 pub struct Campaign {
     pub fac: usize,
     pub diff: usize,
     /// picks the cities' days and speeds
     pub seed: u64,
+    /// this campaign's cities, indices into `POOL`; New York first
+    pub picks: Vec<usize>,
     pub cities: Vec<CityState>,
     /// the city picked to defend next
     pub current: usize,
@@ -272,14 +333,17 @@ impl Campaign {
         Campaign::with_seed(fac, diff, seed)
     }
     pub fn with_seed(fac: usize, diff: usize, seed: u64) -> Campaign {
-        let cities = (0..CITIES.len())
+        Campaign::with_picks(fac, diff, seed, pick_cities(seed))
+    }
+    fn with_picks(fac: usize, diff: usize, seed: u64, picks: Vec<usize>) -> Campaign {
+        let cities = (0..picks.len())
             .map(|i| {
                 // New York is where it starts: the horde is already in the streets
                 let days = if i == 0 { 40.0 } else { 30.0 + 90.0 * hash(seed, i as u64) };
                 CityState { days, start: days, rate: 0.7 + 0.8 * hash(seed, 100 + i as u64), fate: Fate::Open }
             })
             .collect();
-        Campaign { fac, diff, seed, cities, current: 0, fought: 0, lost: 0, points: 0, tech: Vec::new(), units: Vec::new(), flown: 0, kills: 0 }
+        Campaign { fac, diff, seed, picks, cities, current: 0, fought: 0, lost: 0, points: 0, tech: Vec::new(), units: Vec::new(), flown: 0, kills: 0 }
     }
     /// Fired after three lost cities.
     pub fn fired(&self) -> bool {
@@ -290,20 +354,28 @@ impl Campaign {
     }
     /// Over: fired, or no city left standing to defend.
     pub fn finished(&self) -> bool {
-        self.fired() || !(0..CITIES.len()).any(|i| self.open(i))
+        self.fired() || !(0..self.cities.len()).any(|i| self.open(i))
     }
     pub fn held(&self) -> usize {
         self.cities.iter().filter(|c| c.fate == Fate::Held).count()
     }
+    /// The campaign's city `i`.
+    pub fn info(&self, i: usize) -> &'static City {
+        &POOL[self.picks[i.min(self.picks.len() - 1)]]
+    }
+    /// Every city in the campaign, in its own order.
+    pub fn all(&self) -> impl Iterator<Item = &'static City> + '_ {
+        self.picks.iter().map(|&p| &POOL[p])
+    }
     pub fn city(&self) -> &'static City {
-        &CITIES[self.current.min(CITIES.len() - 1)]
+        self.info(self.current)
     }
     pub fn state(&self) -> &CityState {
-        &self.cities[self.current.min(CITIES.len() - 1)]
+        &self.cities[self.current.min(self.cities.len() - 1)]
     }
     /// Millions of people still alive in city `i`.
     pub fn alive(&self, i: usize) -> f32 {
-        CITIES[i].pop * self.cities[i].share()
+        self.info(i).pop * self.cities[i].share()
     }
     /// How much bigger the horde is in city `i` than on the chosen difficulty: from ×0.8 for a
     /// quiet city to ×3.2 for one about to fall, and 6% more for every city fought before.
@@ -324,7 +396,7 @@ impl Campaign {
     }
     /// The open city closest to falling.
     pub fn most_urgent(&self) -> Option<usize> {
-        (0..CITIES.len()).filter(|i| self.open(*i)).min_by(|a, b| self.cities[*a].days.total_cmp(&self.cities[*b].days))
+        (0..self.cities.len()).filter(|i| self.open(*i)).min_by(|a, b| self.cities[*a].days.total_cmp(&self.cities[*b].days))
     }
     pub fn select(&mut self, i: usize) {
         if self.open(i) {
@@ -481,12 +553,19 @@ pub fn save(c: &Campaign) {
 pub fn from_text(t: &str) -> Campaign {
     let field = |k: &str| t.lines().find_map(|l| l.split_once('=').filter(|(a, _)| a.trim() == k).map(|(_, v)| v.trim().to_string()));
     let num = |k: &str| field(k).and_then(|v| v.parse::<u64>().ok());
-    let mut c = Campaign::with_seed(
+    // saves from before the city pool had the first eleven cities
+    let picks: Vec<usize> = match field("picks") {
+        Some(v) => v.split(',').filter_map(|x| x.trim().parse::<usize>().ok()).filter(|i| *i < POOL.len()).collect(),
+        None => (0..CAMPAIGN_CITIES).collect(),
+    };
+    let picks = if picks.is_empty() { vec![0] } else { picks };
+    let mut c = Campaign::with_picks(
         num("faction").unwrap_or(0).min(FACTIONS.len() as u64 - 1) as usize,
         num("difficulty").unwrap_or(1).min(3) as usize,
         num("seed").unwrap_or(1),
+        picks,
     );
-    c.current = num("current").unwrap_or(0).min(CITIES.len() as u64 - 1) as usize;
+    c.current = num("current").unwrap_or(0).min(c.cities.len() as u64 - 1) as usize;
     c.fought = num("fought").unwrap_or(0) as u32;
     c.lost = num("lost").unwrap_or(0) as u32;
     c.points = num("points").unwrap_or(0) as u32;
@@ -531,6 +610,7 @@ pub fn from_text(t: &str) -> Campaign {
 /// The whole campaign as text: the save file, and what the co-op host sends its guests. Floats are
 /// written exactly, so both sides build the same game.
 pub fn to_text(c: &Campaign) -> String {
+    let picks: Vec<String> = c.picks.iter().map(|i| i.to_string()).collect();
     let tech: Vec<String> = c.tech.iter().filter_map(|t| TECH.iter().position(|x| x == t)).map(|i| i.to_string()).collect();
     let units: Vec<String> = c.units.iter().map(|(u, n)| format!("{}{}", if *u == U::Rifle { 'r' } else { 't' }, n)).collect();
     let cities: Vec<String> = c
@@ -547,10 +627,11 @@ pub fn to_text(c: &Campaign) -> String {
         })
         .collect();
     format!(
-        "faction={}\ndifficulty={}\nseed={}\ncurrent={}\nfought={}\nlost={}\npoints={}\nflown={}\nkills={}\ncities={}\ntech={}\nunits={}\n",
+        "faction={}\ndifficulty={}\nseed={}\npicks={}\ncurrent={}\nfought={}\nlost={}\npoints={}\nflown={}\nkills={}\ncities={}\ntech={}\nunits={}\n",
         c.fac,
         c.diff,
         c.seed,
+        picks.join(","),
         c.current,
         c.fought,
         c.lost,
@@ -597,78 +678,117 @@ pub fn save_map(c: &City, d: &Desc) {
     let _ = std::fs::write(map_path(c), storage::encode(c.query, d));
 }
 
-#[derive(Clone, PartialEq)]
-pub enum PackState {
-    Fetching(usize),
-    Done,
-    Failed(String),
+/// Maps downloaded from the city pack at once.
+const PACK_WORKERS: usize = 3;
+
+#[derive(Default)]
+struct PackQueue {
+    /// pool indices waiting, the most wanted first
+    queue: std::collections::VecDeque<usize>,
+    active: Vec<usize>,
+    /// not in the pack (or no connection): these come from OpenStreetMap instead
+    failed: Vec<usize>,
 }
 
-/// Downloads the pre-built city pack from the `cities` GitHub release in the background.
+/// Downloads campaign maps from the `cities` GitHub release in the background, a few at once, the
+/// ones asked for most recently first.
 pub struct Pack {
-    pub state: Arc<Mutex<PackState>>,
+    q: Arc<(Mutex<PackQueue>, std::sync::Condvar)>,
 }
 
 impl Pack {
     pub fn start() -> Pack {
-        let state = Arc::new(Mutex::new(PackState::Fetching(0)));
-        let st = state.clone();
-        std::thread::spawn(move || {
-            let a = ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(120))
-                .user_agent(concat!("PixelHorde/", env!("CARGO_PKG_VERSION")))
-                .build();
-            let mut err = None;
-            for (i, c) in CITIES.iter().enumerate() {
-                if map_path(c).exists() {
-                    continue;
-                }
-                *st.lock().unwrap() = PackState::Fetching(i);
-                let url = format!("https://github.com/{}/releases/download/cities/{}.z", crate::update::REPO, file_name(c));
-                let got = a.get(&url).call().map_err(|e| e.to_string()).and_then(|r| {
-                    let mut z = Vec::new();
-                    r.into_reader().read_to_end(&mut z).map_err(|e| e.to_string())?;
-                    let b = miniz_oxide::inflate::decompress_to_vec(&z).map_err(|_| "damaged download".to_string())?;
-                    storage::decode(&b).ok_or("damaged map")?;
-                    Ok(b)
-                });
-                match got {
-                    Ok(b) => {
-                        let _ = std::fs::write(map_path(c), b);
+        let q: Arc<(Mutex<PackQueue>, std::sync::Condvar)> = Arc::default();
+        for _ in 0..PACK_WORKERS {
+            let q = q.clone();
+            std::thread::spawn(move || {
+                let a = ureq::AgentBuilder::new()
+                    .timeout(std::time::Duration::from_secs(120))
+                    .user_agent(concat!("PixelHorde/", env!("CARGO_PKG_VERSION")))
+                    .build();
+                loop {
+                    let i = {
+                        let mut g = q.0.lock().unwrap();
+                        loop {
+                            if let Some(i) = g.queue.pop_front() {
+                                g.active.push(i);
+                                break i;
+                            }
+                            g = q.1.wait(g).unwrap();
+                        }
+                    };
+                    let c = &POOL[i];
+                    let url = format!("https://github.com/{}/releases/download/cities/{}.z", crate::update::REPO, file_name(c));
+                    let got = a.get(&url).call().map_err(|e| e.to_string()).and_then(|r| {
+                        let mut z = Vec::new();
+                        r.into_reader().read_to_end(&mut z).map_err(|e| e.to_string())?;
+                        let b = miniz_oxide::inflate::decompress_to_vec(&z).map_err(|_| "damaged download".to_string())?;
+                        storage::decode(&b).ok_or("damaged map")?;
+                        Ok(b)
+                    });
+                    let ok = got.is_ok_and(|b| std::fs::write(map_path(c), b).is_ok());
+                    let mut g = q.0.lock().unwrap();
+                    g.active.retain(|x| *x != i);
+                    if !ok {
+                        g.failed.push(i);
                     }
-                    // an older map still plays; the new one is tried again next time
-                    Err(_) if old_path(c).exists() => {}
-                    Err(e) => err = Some(e.chars().take(60).collect::<String>()),
                 }
+            });
+        }
+        let p = Pack { q };
+        p.want(&[&POOL[0]]);
+        p
+    }
+    /// Queues these maps ahead of everything else, in this order.
+    pub fn want(&self, cities: &[&'static City]) {
+        let mut g = self.q.0.lock().unwrap();
+        for c in cities.iter().rev() {
+            let Some(i) = POOL.iter().position(|p| std::ptr::eq(p, *c)) else { continue };
+            if map_path(c).exists() || g.active.contains(&i) || g.failed.contains(&i) {
+                continue;
             }
-            *st.lock().unwrap() = match err {
-                Some(e) => PackState::Failed(e),
-                None => PackState::Done,
-            };
-        });
-        Pack { state }
+            g.queue.retain(|x| *x != i);
+            g.queue.push_front(i);
+        }
+        self.q.1.notify_all();
     }
-    pub fn get(&self) -> PackState {
-        self.state.lock().unwrap().clone()
+    /// Still on its way from the pack.
+    pub fn pending(&self, c: &City) -> bool {
+        let g = self.q.0.lock().unwrap();
+        POOL.iter().position(|p| std::ptr::eq(p, c)).is_some_and(|i| g.queue.contains(&i) || g.active.contains(&i))
     }
-    pub fn busy(&self) -> bool {
-        matches!(self.get(), PackState::Fetching(_))
-    }
-    pub fn ready(&self) -> usize {
-        CITIES.iter().filter(|c| have_map(c)).count()
+    /// The first of these still downloading, if any.
+    pub fn getting<'a>(&self, cities: impl IntoIterator<Item = &'a City>) -> Option<&'a City> {
+        cities.into_iter().find(|c| self.pending(c))
     }
 }
 
-/// `PH_FETCH=<dir>`: downloads every campaign city from OpenStreetMap into `<dir>` as compressed
-/// maps for the `cities` release. Run by the GitHub workflow, not by players. Returns false if any
-/// city failed.
+/// `PH_FETCH=<dir>`: downloads campaign cities from OpenStreetMap into `<dir>` as compressed maps
+/// for the `cities` release. Run by the GitHub workflow, not by players. `PH_FETCH_ONLY` names
+/// cities, `PH_FETCH_PART=k/n` takes every n-th city from the k-th (so n jobs split the pool) and
+/// `PH_FETCH_HAVE` lists files already in the release, which are skipped. Returns false if any city
+/// failed.
 pub fn fetch_all(out: &Path) -> bool {
     let _ = std::fs::create_dir_all(out);
-    let only: Option<String> = std::env::var("PH_FETCH_ONLY").ok().filter(|s| !s.trim().is_empty());
+    let env = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
+    let only = env("PH_FETCH_ONLY");
+    let have = env("PH_FETCH_HAVE").unwrap_or_default();
+    let part = env("PH_FETCH_PART").and_then(|p| {
+        let (k, n) = p.split_once('/')?;
+        Some((k.trim().parse::<usize>().ok()?, n.trim().parse::<usize>().ok()?.max(1)))
+    });
     let mut ok = true;
-    for c in CITIES.iter() {
-        if only.as_ref().is_some_and(|o| !o.split(',').any(|x| x.trim().eq_ignore_ascii_case(c.name))) {
+    for (i, c) in POOL.iter().enumerate() {
+        if part.is_some_and(|(k, n)| i % n != k % n) {
             continue;
+        }
+        match &only {
+            Some(o) if !o.split(',').any(|x| x.trim().eq_ignore_ascii_case(c.name)) => continue,
+            None if have.split_whitespace().any(|h| h == format!("{}.z", file_name(c))) => {
+                eprintln!("== {} is already in the pack", c.name);
+                continue;
+            }
+            _ => {}
         }
         let mut done = false;
         for attempt in 1..=3 {
@@ -793,7 +913,7 @@ mod tests {
         let d0 = c.cities[3].days;
         c.harvest(&g);
         assert!(c.cities[3].days < d0);
-        assert!(c.alive(3) < CITIES[3].pop);
+        assert!(c.alive(3) < c.info(3).pop);
         for _ in 0..30 {
             if c.finished() {
                 break;
@@ -819,6 +939,30 @@ mod tests {
         assert!(g.won && g.over);
     }
 
+    /// Every campaign starts in New York and spreads over the world; different seeds, different cities.
+    #[test]
+    fn city_picks() {
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..40 {
+            let c = Campaign::with_seed(0, 1, seed);
+            assert_eq!(c.picks.len(), CAMPAIGN_CITIES);
+            assert_eq!(c.picks[0], 0);
+            let mut p = c.picks.clone();
+            p.sort();
+            p.dedup();
+            assert_eq!(p.len(), CAMPAIGN_CITIES);
+            for (k, a) in c.all().enumerate() {
+                assert!(c.all().skip(k + 1).all(|b| a.km_to(b) >= SPREAD_KM), "{} too close", a.name);
+            }
+            seen.extend(c.picks);
+        }
+        assert!(seen.len() > 30);
+        // an old save, from before the pool, keeps its eleven cities
+        let old = from_text("faction=0\nseed=3\ncities=40.0:40.0:1.0:o\n");
+        assert_eq!(old.picks, (0..CAMPAIGN_CITIES).collect::<Vec<_>>());
+        assert!((POOL[0].km_to(&POOL[11]) - 5570.0).abs() < 60.0);
+    }
+
     #[test]
     fn save_roundtrip() {
         let mut c = veteran();
@@ -830,6 +974,7 @@ mod tests {
         let d = from_text(&to_text(&c));
         assert_eq!((d.fac, d.diff, d.seed, d.current, d.fought, d.lost, d.points, d.kills), (2, 1, 77, 4, 3, 2, 321, 1_234_567));
         assert_eq!(d.cities, c.cities);
+        assert_eq!(d.picks, c.picks);
         assert_eq!(d.tech, c.tech);
         assert_eq!(d.units, c.units);
         assert_eq!(to_text(&d), to_text(&c));

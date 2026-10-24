@@ -1,14 +1,14 @@
 name: Download campaign cities
 
-# Downloads the ten campaign cities from OpenStreetMap once and publishes them as the `cities`
-# release. The game fetches that pack from GitHub when it starts, so players never wait on
-# OpenStreetMap. Run it again (Actions tab > Run workflow) to refresh the maps; `only` limits it to
-# some cities, e.g. "Tokyo, Delhi".
+# Downloads the campaign's city pool from OpenStreetMap and publishes it as the `cities` release.
+# The game fetches the maps it needs from there, so players never wait on OpenStreetMap. Eight jobs
+# split the pool and run at once. Cities already in the release are skipped; to refresh some, run it
+# (Actions tab > Run workflow) with `only`, e.g. "Tokyo, Delhi".
 on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Only these cities (comma separated, blank = all ten)"
+        description: "Only these cities, downloaded again (comma separated, blank = every missing city)"
         required: false
         default: ""
   push:
@@ -23,9 +23,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  fetch:
+  release:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    outputs:
+      have: ${{ steps.have.outputs.have }}
+    steps:
+      - name: Make sure the cities release exists
+        id: have
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # never marked latest: the game's self-updater reads the latest release
+          gh release view cities >/dev/null 2>&1 || gh release create cities \
+            --title "Campaign city maps" \
+            --notes "The campaign's world cities, downloaded from OpenStreetMap (c) OpenStreetMap contributors, ODbL. The game downloads these by itself; there is nothing to do here." \
+            --prerelease --latest=false
+          echo "have=$(gh release view cities --json assets -q '.assets[].name' | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+  fetch:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -40,24 +63,23 @@ jobs:
         env:
           PH_FETCH: cities
           PH_FETCH_ONLY: ${{ github.event.inputs.only }}
+          PH_FETCH_PART: ${{ matrix.part }}/8
+          PH_FETCH_HAVE: ${{ needs.release.outputs.have }}
         run: ./target/release/PixelHorde
-      - name: Publish the cities release
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
-          ls -la cities
-          if ! ls cities/*.phmap.z >/dev/null 2>&1; then
-            echo "No city downloaded"; exit 1
+          ls -la cities || true
+          if ls cities/*.phmap.z >/dev/null 2>&1; then
+            gh release upload cities cities/*.phmap.z --clobber
+          else
+            echo "Nothing new in this part"
           fi
-          # never marked latest: the game's self-updater reads the latest release
-          gh release view cities >/dev/null 2>&1 || gh release create cities \
-            --title "Campaign city maps" \
-            --notes "The ten world campaign cities, downloaded from OpenStreetMap (c) OpenStreetMap contributors, ODbL. The game downloads these by itself; there is nothing to do here." \
-            --prerelease --latest=false
-          gh release upload cities cities/*.phmap.z --clobber
       - name: Report missing cities
         if: steps.fetch.outcome == 'failure'
         run: |
-          echo "Some cities failed to download; the ones that worked were published. Run the workflow again with only the missing ones."
+          echo "Some cities failed to download; the ones that worked were published. Run the workflow again to fetch the missing ones."
           exit 1

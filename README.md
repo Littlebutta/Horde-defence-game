@@ -17,7 +17,7 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 
 | Input | Action |
 | --- | --- |
-| 1 to 7, O, L | Wall, gun turret, cannon, scrap extractor, ammo plant, missile silo, extraction pad, outpost, research lab |
+| 1 to 7, O, L | Wall, gun turret, cannon, scrap extractor, ammo plant, missile silo, evac point, outpost, research lab |
 | 8 / 9 | Rifle squad / tank, deployed from the HQ to where you click |
 | Left click / drag | Place. Drag walls along a street; drag other buildings to lay a row or grid |
 | Left click a unit, right click the map | Select troops, then move them (rifles can garrison a building) |
@@ -52,18 +52,18 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 
 ## World campaign
 
-Pick **World campaign** on the menu. The outbreak is spreading through the world's biggest cities and you're the one the governments send in. It starts in **New York**; after that you pick each city on a globe: New York, Osaka, Dhaka, Beijing, Mumbai, Cairo, Mexico City, São Paulo, Shanghai, Delhi and Tokyo.
+Pick **World campaign** on the menu. The outbreak is spreading through the world's biggest cities and you're the one the governments send in. It starts in **New York**; after that you pick each city on a globe. Every campaign draws ten more from a pool of forty well-known cities (London, Paris, Tokyo, Rio de Janeiro, Cairo, Sydney, Moscow, Mumbai, Lagos and the rest), at least 1,000 km apart, so no two campaigns visit the same places.
 
 - The globe between cities: drag to turn it, scroll to zoom, click a city (on the globe or in the list) to pick it. Every city shows its **days until it falls** and the **people still alive** there, from its real metro population.
 - Every city you fight in takes 10 days. Meanwhile the others count down, each at its own speed, and fewer people are left as a city nears its end. A city that reaches zero falls to the horde and can't be picked any more.
 - The closer a city is to falling, the bigger its horde: from ×0.8 for a quiet city to ×3.2 for one about to fall, plus 6% for every city fought before. Civilians on the map scale with the people still alive (about one per 1,700).
 - Hold each city until the evac timer runs out (7 minutes, 20 seconds longer for every city fought, at most 11).
 - The maps are the city centres. The suggested HQ spot is an airport only when one is close enough to share the map with downtown; otherwise it's the middle of the city. You can move it before the city starts.
-- Civilians flown out of a held city are the campaign's currency. Between cities you spend them on the research the lab sells for scrap in a normal game (Bigger squads, Carpet bombing, Nuclear warhead, Reinforced armour, Shell presses, Long barrels) or on recruiting more troops. There is no research lab inside campaign cities.
+- Every civilian flown out of a held city is a **research point**. Between cities you spend them on the **tech tree** or on recruiting troops. You start with only walls, the scrap extractor, the evac point, the rescue station and rifles; every turret, the tank, every ability and the lab's research must be unlocked. Unlocking your first turret brings the ammo plant with it, and every turret has two upgrades of its own (faster fire, armour piercing, napalm, wider rail beams and so on). There is no research lab inside campaign cities.
 - A lost city (the HQ overrun) pays nothing, but the campaign goes on. Lose **three** and the world's governments fire you: the campaign is over.
 - Troops that survive (rifle squads and tanks, with however many soldiers are left) march on to the next city and roll out of the HQ when it starts. Scrap, ammo and buildings stay behind.
 - Progress saves to `data/campaign.txt` after every city and every purchase; **Continue** picks it up.
-- The maps are downloaded from OpenStreetMap ahead of time by the **Download campaign cities** workflow and published as the `cities` release. The game fetches them from GitHub in the background when it starts (into `data/campaign`), so no campaign city waits on OpenStreetMap. A map that's missing anyway downloads live like any real city.
+- The maps are downloaded from OpenStreetMap ahead of time by the **Download campaign cities** workflow and published as the `cities` release. The game fetches the current campaign's maps from GitHub in the background, three at once and the city you picked first (into `data/campaign`), so no campaign city waits on OpenStreetMap. A map that's missing anyway downloads live like any real city: four map tiles at a time from different OpenStreetMap servers.
 - The globe's coastlines are Natural Earth's 1:50m land (public domain), baked into `assets/land.bin` by `tools/bake_land.py`.
 - The campaign is single player for now.
 

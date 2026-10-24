@@ -339,7 +339,6 @@ pub enum Up {
     ArtyRapid,
     ArtyHe,
 }
-pub const UPGRADES: [Up; 12] = [Up::GunRapid, Up::GunAp, Up::CannonAuto, Up::CannonSplash, Up::FlameNapalm, Up::FlameReach, Up::RailCaps, Up::RailWide, Up::HeliumReach, Up::HeliumHull, Up::ArtyRapid, Up::ArtyHe];
 pub struct UpDef {
     pub name: &'static str,
     pub tip: &'static str,
