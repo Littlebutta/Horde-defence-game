@@ -54,6 +54,8 @@ pub struct Desc {
     pub roads: Vec<Road>,
     pub buildings: Vec<BDesc>,
     pub water: Vec<Poly>,
+    /// land inside `water` (the holes of lake and river areas: river islands, lake islands)
+    pub islands: Vec<Poly>,
     pub water_lines: Vec<Line>,
     pub parks: Vec<Poly>,
     pub airport: Option<Poly>,
@@ -89,6 +91,19 @@ impl Rng {
     pub fn below(&mut self, n: usize) -> usize {
         (self.next_u64() % n.max(1) as u64) as usize
     }
+}
+
+/// Whether `p` is inside the polygon (even-odd rule).
+pub fn point_in(poly: &[Vec2], p: Vec2) -> bool {
+    let mut inside = false;
+    let n = poly.len();
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + n - 1) % n]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+            inside = !inside;
+        }
+    }
+    inside
 }
 
 pub fn centroid(p: &[Vec2]) -> Vec2 {
@@ -227,6 +242,12 @@ impl World {
         }
         for w in &desc.water {
             fill_poly(w, |c| terrain[c] = T_WATER);
+        }
+        for i in &desc.islands {
+            fill_poly(i, |c| terrain[c] = T_LAND);
+        }
+        for p in desc.parks.iter().filter(|p| desc.islands.iter().any(|i| point_in(i, centroid(p)))) {
+            fill_poly(p, |c| terrain[c] = T_PARK);
         }
         for l in &desc.water_lines {
             thick_line(&l.pts, l.w, |c| terrain[c] = T_WATER);

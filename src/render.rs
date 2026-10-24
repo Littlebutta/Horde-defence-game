@@ -170,7 +170,7 @@ impl MB {
     }
     /// Any simple polygon at height `h`.
     fn poly_at(&mut self, pts: &[Vec2], h: f32, col: Color) {
-        if pts.len() < 3 || pts.len() > 1500 {
+        if pts.len() < 3 || pts.len() > 60_000 {
             return;
         }
         let flat: Vec<f64> = pts.iter().flat_map(|p| [p.x as f64, p.y as f64]).collect();
@@ -190,13 +190,9 @@ impl MB {
     }
     fn poly(&mut self, pts: &[Vec2], col: Color) {
         if pts.len() > 1500 {
-            // huge areas (lakes, forests): fan from the middle so they still show
-            let c = centroid(pts);
-            for k in 0..pts.len() {
-                self.room(3);
-                let (a, b, d) = (self.vert(c, col), self.vert(pts[k], col), self.vert(pts[(k + 1) % pts.len()], col));
-                self.i.extend_from_slice(&[a, b, d]);
-            }
+            // huge areas (a river's whole course through the region): only the part on the map.
+            // These used to be drawn as a fan from their middle, which flooded half of Cairo.
+            self.poly_at(&clip_ring(pts), 0.0, col);
             return;
         }
         self.poly_at(pts, 0.0, col);
@@ -280,6 +276,32 @@ impl MB {
         self.flush();
         (self.out, self.anchors)
     }
+}
+
+/// Cuts a polygon to a little past the map's edges (Sutherland-Hodgman, one side at a time).
+fn clip_ring(pts: &[Vec2]) -> Vec<Vec2> {
+    let m = 4.0;
+    let (lo, hi) = (-m, W.max(H) as f32 + m);
+    let sides: [(usize, f32, bool); 4] = [(0, lo, true), (0, hi, false), (1, lo, true), (1, hi, false)];
+    let mut ring = pts.to_vec();
+    for (axis, at, keep_above) in sides {
+        let inside = |p: Vec2| if keep_above { p[axis] >= at } else { p[axis] <= at };
+        let mut out = Vec::with_capacity(ring.len());
+        for k in 0..ring.len() {
+            let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
+            if inside(a) {
+                out.push(a);
+            }
+            if inside(a) != inside(b) {
+                out.push(a + (b - a) * ((at - a[axis]) / (b[axis] - a[axis])));
+            }
+        }
+        ring = out;
+        if ring.len() < 3 {
+            return ring;
+        }
+    }
+    ring
 }
 
 /// Cuts every triangle to the square map, so streets, rivers and blocks that run past the edge of
@@ -399,6 +421,12 @@ fn build_ground(w: &World, th: &Theme) -> Vec<Mesh> {
     }
     for l in &d.water_lines {
         mb.line(&l.pts, l.w, th.water);
+    }
+    for i in &d.islands {
+        mb.poly(i, th.land);
+    }
+    for p in d.parks.iter().filter(|p| d.islands.iter().any(|i| point_in(i, centroid(p)))) {
+        mb.poly(p, th.park);
     }
     // casings first, then fills, minor to major so big roads sit on top at junctions
     let mut roads: Vec<&Road> = d.roads.iter().collect();

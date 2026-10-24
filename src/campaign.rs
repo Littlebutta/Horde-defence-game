@@ -228,7 +228,8 @@ fn map_dir() -> PathBuf {
 /// airport close enough to share the map with downtown gets the HQ.
 pub const AIRPORT_M: u32 = 4_000;
 /// Bumped when the maps are made differently, so old downloads are fetched again.
-const PACK: u32 = 2;
+/// v3: islands in rivers and lakes are land.
+const PACK: u32 = 3;
 
 pub fn file_name(c: &City) -> String {
     format!("{}-v{}.phmap", c.file, PACK)
@@ -236,11 +237,15 @@ pub fn file_name(c: &City) -> String {
 pub fn map_path(c: &City) -> PathBuf {
     map_dir().join(file_name(c))
 }
+/// The previous pack's map, still played until the new one has downloaded.
+fn old_path(c: &City) -> PathBuf {
+    map_dir().join(format!("{}-v{}.phmap", c.file, PACK - 1))
+}
 pub fn have_map(c: &City) -> bool {
-    map_path(c).exists()
+    map_path(c).exists() || old_path(c).exists()
 }
 pub fn load_map(c: &City) -> Option<Desc> {
-    storage::load_map(&map_path(c))
+    storage::load_map(&map_path(c)).or_else(|| storage::load_map(&old_path(c)))
 }
 pub fn save_map(c: &City, d: &Desc) {
     let _ = std::fs::write(map_path(c), storage::encode(c.query, d));
@@ -269,7 +274,7 @@ impl Pack {
                 .build();
             let mut err = None;
             for (i, c) in CITIES.iter().enumerate() {
-                if have_map(c) {
+                if map_path(c).exists() {
                     continue;
                 }
                 *st.lock().unwrap() = PackState::Fetching(i);
@@ -285,6 +290,8 @@ impl Pack {
                     Ok(b) => {
                         let _ = std::fs::write(map_path(c), b);
                     }
+                    // an older map still plays; the new one is tried again next time
+                    Err(_) if old_path(c).exists() => {}
                     Err(e) => err = Some(e.chars().take(60).collect::<String>()),
                 }
             }
@@ -438,3 +445,5 @@ mod tests {
         assert_eq!(c.army(U::Rifle), (1, 6));
     }
 }
+
+

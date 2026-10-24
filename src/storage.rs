@@ -175,6 +175,11 @@ pub fn encode(query: &str, d: &Desc) -> Vec<u8> {
         }
         None => w.u32(0),
     }
+    // added later: older maps end here, older games ignore it
+    w.u32(d.islands.len() as u32);
+    for p in &d.islands {
+        w.pts(p);
+    }
     w.0
 }
 
@@ -202,7 +207,8 @@ pub fn decode(b: &[u8]) -> Option<Desc> {
     let water_lines = r.list(|r| Some(Line { pts: r.pts()?, w: r.f32()? }))?;
     let runways = r.list(|r| Some(Line { pts: r.pts()?, w: r.f32()? }))?;
     let airport = if r.u32()? == 1 { Some(r.pts()?) } else { None };
-    Some(Desc { name, note, mpc, roads, buildings, water, water_lines, parks, airport, aprons, runways, hq })
+    let islands = r.list(|r| r.pts()).unwrap_or_default();
+    Some(Desc { name, note, mpc, roads, buildings, water, islands, water_lines, parks, airport, aprons, runways, hq })
 }
 
 pub fn save_map(query: &str, d: &Desc) {

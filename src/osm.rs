@@ -175,11 +175,11 @@ fn closed(mut v: Vec<Vec2>) -> Option<Poly> {
     Some(v)
 }
 
-/// Joins the outer ways of a multipolygon into closed rings.
-fn rings(e: &Value, pr: &Proj) -> Vec<Poly> {
+/// Joins the outer (or, with `inner`, the inner) ways of a multipolygon into closed rings.
+fn rings(e: &Value, pr: &Proj, inner: bool) -> Vec<Poly> {
     let mut parts: Vec<Vec<Vec2>> = Vec::new();
     for m in e["members"].as_array().into_iter().flatten() {
-        if m["type"] != "way" || m["role"].as_str().unwrap_or("outer") == "inner" {
+        if m["type"] != "way" || (m["role"].as_str().unwrap_or("outer") == "inner") != inner {
             continue;
         }
         let g = geom(m, pr);
@@ -327,9 +327,11 @@ pub fn load(query: &str, tx: &Sender<OsmMsg>, tiles: usize, air_m: u32) -> Resul
                 let t = &el["tags"];
                 if rel {
                     if t["natural"] == "water" {
-                        d.water.extend(rings(el, &pr));
+                        d.water.extend(rings(el, &pr, false));
+                        // islands in rivers and lakes are holes in the water area
+                        d.islands.extend(rings(el, &pr, true));
                     } else if t["aeroway"] == "aerodrome" {
-                        aerodromes.extend(rings(el, &pr));
+                        aerodromes.extend(rings(el, &pr, false));
                     }
                     continue;
                 }
@@ -439,14 +441,3 @@ pub fn load(query: &str, tx: &Sender<OsmMsg>, tiles: usize, air_m: u32) -> Resul
     Ok(d)
 }
 
-fn point_in(poly: &[Vec2], p: Vec2) -> bool {
-    let mut inside = false;
-    let n = poly.len();
-    for i in 0..n {
-        let (a, b) = (poly[i], poly[(i + n - 1) % n]);
-        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
-            inside = !inside;
-        }
-    }
-    inside
-}
