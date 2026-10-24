@@ -84,6 +84,14 @@ pub struct App {
     rt: Option<RenderTarget>,
     /// how this GPU gets working depth, found by `pick_depth` on the first game frame
     depth: Option<render::DepthMode>,
+    /// the match hasn't started: the player is choosing where the HQ goes (the map and seed to
+    /// rebuild from)
+    placing: Option<(Desc, u64)>,
+    /// set during a frame: move the HQ here / start the match
+    place_at: Option<Vec2>,
+    place_go: bool,
+    /// headless tests start right away with the suggested HQ (`PH_PLACE=1` shows the choice)
+    auto_place: bool,
 }
 
 /// Colours of the co-op players' cursors, host first.
@@ -217,6 +225,10 @@ impl App {
             test_log: 0,
             rt: None,
             depth: None,
+            placing: None,
+            place_at: None,
+            place_go: false,
+            auto_place: ["PH_SHOT", "PH_NETTEST"].iter().any(|k| std::env::var(k).is_ok()) && std::env::var("PH_PLACE").is_err(),
         }
     }
 
@@ -1011,6 +1023,11 @@ impl App {
         self.fac = fac;
         let d = crate::citygen::generate(seed);
         self.begin(d, seed);
+        // PH_HQ=x,y (with PH_PLACE=1): the HQ moved there, as if clicked
+        let at: Vec<f32> = std::env::var("PH_HQ").unwrap_or_default().split(',').filter_map(|x| x.parse().ok()).collect();
+        if let [x, y] = at[..] {
+            self.move_hq(vec2(x, y));
+        }
     }
     pub fn game_mut(&mut self) -> Option<&mut Game> {
         self.game.as_mut()
@@ -1053,24 +1070,37 @@ impl App {
         }
     }
 
-    fn begin(&mut self, mut d: Desc, seed: u64) {
-        if let Some(s) = self.sess.as_mut() {
-            if s.is_host() {
-                d = s.start_game(&d, self.fac, self.diff, seed);
-            }
+    /// A map is ready: first the player picks where the HQ goes (a co-op guest gets the host's
+    /// choice), then the match starts.
+    fn begin(&mut self, d: Desc, seed: u64) {
+        let guest = self.sess.as_ref().is_some_and(|s| !s.is_host());
+        if guest || self.auto_place {
+            self.launch(d, seed);
+            return;
         }
-        let note = d.note.clone();
-        let name = d.name.clone();
-        let camp = if self.in_camp { self.camp.clone() } else { None };
-        let mut g = match &camp {
+        let g = self.make_game(d.clone(), seed);
+        self.show(g, true);
+        self.placing = Some((d, seed));
+        self.msg = (String::new(), 0.0);
+    }
+
+    fn make_game(&self, d: Desc, seed: u64) -> Game {
+        let camp = if self.in_camp { self.camp.as_ref() } else { None };
+        let mut g = match camp {
             Some(c) => Game::new(d, c.fac, DIFFS[c.diff].1 * campaign::horde_mult(c.level), seed),
             None => Game::new(d, self.fac, DIFFS[self.diff].1, seed),
         };
-        if let Some(c) = &camp {
+        if let Some(c) = camp {
             c.apply(&mut g);
         }
-        self.cam = Orbit { t: g.world.hq, dist: 0.0, yaw: 0.0, pitch: 0.95 };
-        self.cam.set_scale((screen_height() / 260.0).max(1.5));
+        g
+    }
+
+    fn show(&mut self, g: Game, recentre: bool) {
+        if recentre {
+            self.cam = Orbit { t: g.world.hq, dist: 0.0, yaw: 0.0, pitch: 0.95 };
+            self.cam.set_scale((screen_height() / 260.0).max(1.5));
+        }
         let painter = *self.depth.get_or_insert_with(pick_depth) == render::DepthMode::Painter;
         self.scene = Some(Scene::new(&g, self.theme(), painter));
         self.game = Some(g);
@@ -1079,10 +1109,79 @@ impl App {
         self.paused = false;
         self.acc = 0.0;
         self.screen = Screen::Play;
-        self.msg = match &camp {
+    }
+
+    /// Starts the match on `d`. The co-op host sends the map (with the HQ where it was put) first.
+    fn launch(&mut self, mut d: Desc, seed: u64) {
+        let chosen = self.placing.take().is_some();
+        if let Some(s) = self.sess.as_mut() {
+            if s.is_host() {
+                d = s.start_game(&d, self.fac, self.diff, seed);
+            }
+        }
+        let note = d.note.clone();
+        let name = d.name.clone();
+        // alone, the game built for the chosen spot is the one to play; the host rebuilds from the
+        // map as sent, exactly like the guests do
+        if !chosen || self.sess.is_some() || self.game.is_none() {
+            let g = self.make_game(d, seed);
+            self.show(g, !chosen);
+        }
+        let camp = if self.in_camp { self.camp.as_ref() } else { None };
+        self.msg = match camp {
             Some(c) => (format!("{} ({}/{}). {} Hold out {} until the evac.", c.city().name, c.level + 1, CITIES.len(), note, mmss(campaign::hold_secs(c.level))), 8.0),
             None => (format!("{}. {}", name, note), 6.0),
         };
+    }
+
+    /// Whether the HQ can be set up at `p`: on dry land, not too close to the edge of the map.
+    fn hq_spot_ok(g: &Game, p: Vec2) -> bool {
+        let m = 40.0;
+        if p.x < m || p.y < m || p.x > W as f32 - m || p.y > H as f32 - m {
+            return false;
+        }
+        [vec2(0.0, 0.0), vec2(-7.0, -7.0), vec2(7.0, -7.0), vec2(-7.0, 7.0), vec2(7.0, 7.0)]
+            .iter()
+            .all(|o| g.world.terrain[(p.y + o.y) as usize * W + (p.x + o.x) as usize] != T_WATER)
+    }
+
+    /// Rebuilds the game around an HQ at `p` (the map itself stays the same).
+    fn move_hq(&mut self, p: Vec2) {
+        let Some((d, seed)) = self.placing.as_mut() else { return };
+        d.hq = p;
+        d.note = if near_airport(d, p) { "HQ set up at the airport you picked.".into() } else { "HQ set up where you picked.".into() };
+        let (d, seed) = (d.clone(), *seed);
+        let g = self.make_game(d, seed);
+        self.show(g, false);
+    }
+
+    /// The banner while choosing the HQ spot. Returns nothing; the clicks set `place_go`.
+    fn place_hud(&mut self) {
+        let p = pal(self.dark);
+        let sw = screen_width();
+        let r = Rect::new(sw / 2.0 - 360.0, 16.0, 720.0, 108.0);
+        self.panel(r);
+        text(&self.fonts.head, "Choose your HQ location", r.x + 22.0, r.y + 36.0, 22.0, p.text);
+        let line = match &self.sess {
+            Some(_) => "Click the map to move the HQ. Your co-op team starts there too.",
+            None => "Click the map to move the HQ. The horde comes once you start.",
+        };
+        text(&self.fonts.mono, line, r.x + 22.0, r.y + 64.0, 13.0, p.dim);
+        text(&self.fonts.mono, "Drag to look around, wheel to zoom, F for the whole map.", r.x + 22.0, r.y + 86.0, 13.0, p.dim);
+        if self.button(Rect::new(r.x + r.w - 160.0, r.y + 60.0, 140.0, 34.0), "Start here", true, true) || is_key_pressed(KeyCode::Enter) {
+            self.place_go = true;
+        }
+        if self.button(Rect::new(r.x + r.w - 160.0, r.y + 16.0, 140.0, 34.0), "Back", true, false) {
+            self.placing = None;
+            self.screen = if self.in_camp { Screen::Hub } else { Screen::Menu };
+            self.in_camp = false;
+        }
+        self.msg.1 -= get_frame_time();
+        if self.msg.1 > 0.0 && !self.msg.0.is_empty() {
+            let tw = text_w(&self.fonts.head, &self.msg.0, 16.0);
+            draw_rectangle((sw - tw) / 2.0 - 14.0, r.y + r.h + 10.0, tw + 28.0, 30.0, Color::new(0.0, 0.0, 0.0, 0.7));
+            text(&self.fonts.head, &self.msg.0, (sw - tw) / 2.0, r.y + r.h + 30.0, 16.0, rgb(255, 170, 170));
+        }
     }
 
     fn loading(&mut self) {
@@ -1229,8 +1328,10 @@ impl App {
         if sc.dark != self.dark {
             sc.retheme(&g, th);
         }
-        // fixed 20 Hz simulation; in co-op, in lockstep with the host
-        if let Some(s) = self.sess.as_mut() {
+        // fixed 20 Hz simulation; in co-op, in lockstep with the host. Nothing runs while the HQ
+        // spot is being chosen.
+        if self.placing.is_some() {
+        } else if let Some(s) = self.sess.as_mut() {
             let me = s.me;
             let mut said = Vec::new();
             let mut n = 0;
@@ -1335,7 +1436,7 @@ impl App {
         );
         let mw = self.pick(&g, self.mouse());
         // the other co-op players' cursors
-        if let Some(s) = self.sess.as_mut() {
+        if let (Some(s), None) = (self.sess.as_mut(), &self.placing) {
             s.cursor(mw, dt);
             let mk = (2.2 / self.cam.scale()).max(1.0);
             for (i, pl) in s.players.iter().enumerate() {
@@ -1368,7 +1469,11 @@ impl App {
             text(&self.fonts.head, s, q.x - tw / 2.0, q.y, *size, *c);
         }
 
-        self.hud(&mut g);
+        if self.placing.is_some() {
+            self.place_hud();
+        } else {
+            self.hud(&mut g);
+        }
         if let Some((s, c)) = cursor_label {
             let m = self.mouse();
             let tw = text_w(&self.fonts.mono, &s, 14.0);
@@ -1389,6 +1494,17 @@ impl App {
             self.game = Some(g);
             self.scene = Some(sc);
         }
+        if self.placing.is_some() {
+            if let Some(p) = self.place_at.take() {
+                self.move_hq(p);
+            }
+            if std::mem::take(&mut self.place_go) {
+                let (d, seed) = self.placing.clone().unwrap();
+                self.launch(d, seed);
+            }
+        }
+        self.place_at = None;
+        self.place_go = false;
     }
 
     fn toggle_top(&mut self) {
@@ -1415,6 +1531,19 @@ impl App {
         };
         if self.over_ui() {
             return None;
+        }
+        if self.placing.is_some() {
+            let ok = Self::hq_spot_ok(g, mw);
+            let air = near_airport(&g.world.desc, mw);
+            let col = if ok { rgba(252, 180, 40, 0.9) } else { rgba(255, 120, 120, 0.9) };
+            draw_circle_lines(mw.x, mw.y, if air { HQ_CLEAR + 20.0 } else { 110.0 }, 1.2, col);
+            ghost(mw.x - 7.0, mw.y - 7.0, 14.0, 14.0, 6.0, ok);
+            let s = match (ok, air) {
+                (false, _) => "Can't build the HQ here",
+                (true, true) => "HQ here (the airport joins your base zone)",
+                (true, false) => "HQ here",
+            };
+            return Some((s.to_string(), if ok { WHITE } else { rgb(255, 140, 140) }));
         }
         match self.tool {
             Tool::Build(t) => {
@@ -2048,12 +2177,13 @@ impl App {
         // keyboard
         while let Some(ch) = get_char_pressed() {
             let ch = ch.to_ascii_lowercase();
-            if let Some(s) = BUILD_ORDER.iter().find(|s| def(**s).key == ch && !(g.campaign && **s == S::Lab)) {
+            if let Some(s) = BUILD_ORDER.iter().find(|s| def(**s).key == ch && !(g.campaign && **s == S::Lab) && self.placing.is_none()) {
                 self.tool = if self.tool == Tool::Build(*s) {
                     Tool::None
                 } else {
                     Tool::Build(*s)
                 };
+            } else if self.placing.is_some() && !"tkmfh".contains(ch) {
             } else if let Some(u) = [U::Rifle, U::Tank].iter().find(|u| udef(**u).key == ch) {
                 self.tool = Tool::Unit(*u);
             } else if let Some(a) = ABILITIES.iter().find(|a| adef(**a).key == ch) {
@@ -2083,7 +2213,7 @@ impl App {
             self.selected = None;
             self.press = None;
         }
-        if is_key_pressed(KeyCode::F9) && self.sess.is_none() {
+        if is_key_pressed(KeyCode::F9) && self.sess.is_none() && self.placing.is_none() {
             g.stress();
         }
         // camera: WASD pans along the view, Z/C turn, PageUp/PageDown tilt
@@ -2168,6 +2298,14 @@ impl App {
             };
             if self.panning {
                 self.panning = false;
+                return;
+            }
+            if self.placing.is_some() {
+                if Self::hq_spot_ok(g, mw) {
+                    self.place_at = Some(mw);
+                } else {
+                    self.msg = ("The HQ needs dry land, away from the edge of the map".into(), 2.0);
+                }
                 return;
             }
             match self.tool {

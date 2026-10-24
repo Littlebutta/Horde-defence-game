@@ -160,6 +160,24 @@ pub fn fill_poly(poly: &[Vec2], mut f: impl FnMut(usize)) {
     }
 }
 
+/// Whether an HQ at `p` takes the airport into its base zone: on it, or within reach of its fence.
+pub fn near_airport(d: &Desc, p: Vec2) -> bool {
+    let Some(a) = &d.airport else { return false };
+    let n = a.len();
+    let mut inside = false;
+    let mut best = f32::MAX;
+    for i in 0..n {
+        let (u, v) = (a[i], a[(i + n - 1) % n]);
+        if (u.y > p.y) != (v.y > p.y) && p.x < (v.x - u.x) * (p.y - u.y) / (v.y - u.y) + u.x {
+            inside = !inside;
+        }
+        let e = v - u;
+        let t = ((p - u).dot(e) / e.length_squared().max(1e-6)).clamp(0.0, 1.0);
+        best = best.min(p.distance(u + e * t));
+    }
+    inside || best < HQ_CLEAR + 40.0
+}
+
 pub fn fill_disc(c: Vec2, r: f32, mut f: impl FnMut(usize)) {
     let y0 = ((c.y - r).floor() as i64).max(0);
     let y1 = ((c.y + r).ceil() as i64).min(H as i64 - 1);
@@ -271,6 +289,12 @@ impl World {
                 zone[c] = 1;
                 have_air = true;
             });
+            // the airport only counts when the HQ stands on it or next to it (the player can set
+            // the HQ up anywhere)
+            if !near_airport(&desc, hq) {
+                zone.fill(0);
+                have_air = false;
+            }
         }
         fill_disc(hq, if have_air { HQ_CLEAR + 20.0 } else { 110.0 }, |c| {
             zone[c] = 1

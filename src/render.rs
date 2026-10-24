@@ -527,6 +527,8 @@ pub struct Scene {
     gbuf: Vec<u8>,
     zone: Texture2D,
     zbuf: Vec<u8>,
+    /// the base zone's fill and outline
+    zone_mesh: Vec<Mesh>,
     pub flat: Material,
     /// painter mode (no depth buffer): solid faces, culled, and everything else, not culled
     pub painter: bool,
@@ -584,6 +586,7 @@ impl Scene {
             gbuf: vec![0; CW * CH * 4],
             zone,
             zbuf: vec![0; ZW * ZH * 4],
+            zone_mesh: Vec::new(),
             flat: flat_material(),
             painter,
             solid: painter_material(true),
@@ -680,22 +683,18 @@ impl Scene {
         self.glow.update_from_bytes(CW as u32, CH as u32, &self.gbuf);
     }
 
-    fn update_zone(&mut self, g: &Game, th: &Theme) {
-        let zc = th.zone;
-        let ze = th.zone_edge;
+    fn update_zone(&mut self, g: &Game, th: &Theme, base: bool) {
+        if base {
+            self.zone_mesh = zone_meshes(&g.world.zone, th);
+        }
         let rad = rgba(190, 230, 40, 0.30);
         let hive = rgba(170, 80, 220, 0.20);
         let w = &g.world;
-        let zone_at = |x: usize, y: usize| -> bool { w.zone[(y * ZS + ZS / 2).min(H - 1) * W + (x * ZS + ZS / 2).min(W - 1)] == 1 };
         for y in 0..ZH {
             for x in 0..ZW {
                 let o = (y * ZW + x) * 4;
                 let p = vec2((x * ZS) as f32 + 2.0, (y * ZS) as f32 + 2.0);
                 let mut c = Color::new(0.0, 0.0, 0.0, 0.0);
-                if zone_at(x, y) {
-                    let edge = (x > 0 && !zone_at(x - 1, y)) || (x + 1 < ZW && !zone_at(x + 1, y)) || (y > 0 && !zone_at(x, y - 1)) || (y + 1 < ZH && !zone_at(x, y + 1));
-                    c = if edge { ze } else { zc };
-                }
                 if w.irradiated_at(p) {
                     c = mix(c, rad, 0.85);
                 }
@@ -738,10 +737,217 @@ impl Scene {
         }
         if g.zone_dirty || self.need_zone || (!g.hives.is_empty() && self.ztimer <= 0.0) {
             self.ztimer = 2.0;
+            let base = g.zone_dirty || self.need_zone;
             g.zone_dirty = false;
             self.need_zone = false;
-            self.update_zone(g, th);
+            self.update_zone(g, th, base);
         }
+    }
+}
+
+// ------------------------------------------------------------------------------------------ base zone
+
+/// Contour grid spacing for the base zone outline, in cells.
+const ZG: usize = 2;
+const GW: usize = W / ZG + 1;
+const GH: usize = H / ZG + 1;
+/// The level of the blurred mask the outline follows: a little under half, so the line runs just
+/// outside the perimeter wall instead of under it.
+const ISO: f32 = 0.35;
+
+/// The base zone as crisp vector shapes: the zone mask is sampled every `ZG` cells and blurred so
+/// its stair steps round off, then marching squares traces the `ISO` line. The fill comes from
+/// the same squares, so it meets the outline exactly; the outline is a mitred strip like a road.
+fn zone_meshes(zone: &[u8], th: &Theme) -> Vec<Mesh> {
+    let mut f: Vec<f32> = (0..GW * GH)
+        .map(|k| {
+            let (x, y) = ((k % GW * ZG).min(W - 1), (k / GW * ZG).min(H - 1));
+            zone[y * W + x] as f32
+        })
+        .collect();
+    // two box blurs, radius 2 grid points, make a soft hump around every corner
+    let mut tmp = vec![0.0f32; GW * GH];
+    for _ in 0..2 {
+        tmp.par_chunks_mut(GW).enumerate().for_each(|(y, row)| {
+            for x in 0..GW {
+                let (a, b) = (x.saturating_sub(2), (x + 2).min(GW - 1));
+                row[x] = (a..=b).map(|i| f[y * GW + i]).sum::<f32>() / (b - a + 1) as f32;
+            }
+        });
+        f.par_chunks_mut(GW).enumerate().for_each(|(y, row)| {
+            let (a, b) = (y.saturating_sub(2), (y + 2).min(GH - 1));
+            for x in 0..GW {
+                row[x] = (a..=b).map(|j| tmp[j * GW + x]).sum::<f32>() / (b - a + 1) as f32;
+            }
+        });
+    }
+    let fill = th.zone;
+    let edge = Color { a: 1.0, ..mix(th.land, Color { a: 1.0, ..th.zone_edge }, (th.zone_edge.a + 0.25).min(1.0)) };
+    let mut mb = MB::default();
+    let at = |x: usize, y: usize| vec2((x * ZG) as f32, (y * ZG) as f32);
+    // crossing point on the grid edge from point (x, y) towards +x (dir 0) or +y (dir 1)
+    let cross = |x: usize, y: usize, dir: usize| -> Vec2 {
+        let (x2, y2) = if dir == 0 { (x + 1, y) } else { (x, y + 1) };
+        let (a, b) = (f[y * GW + x], f[y2 * GW + x2]);
+        let t = ((ISO - a) / (b - a)).clamp(0.0, 1.0);
+        at(x, y).lerp(at(x2, y2), t)
+    };
+    let eid = |x: usize, y: usize, dir: usize| ((y * GW + x) * 2 + dir) as u32;
+    let mut links: std::collections::HashMap<u32, (Vec2, [u32; 2])> = std::collections::HashMap::new();
+    let mut link = |a: (u32, Vec2), b: (u32, Vec2)| {
+        for (s, o) in [(a, b.0), (b, a.0)] {
+            let e = links.entry(s.0).or_insert((s.1, [u32::MAX; 2]));
+            if e.1[0] == u32::MAX {
+                e.1[0] = o;
+            } else {
+                e.1[1] = o;
+            }
+        }
+    };
+    for y in 0..GH - 1 {
+        let mut run: Option<usize> = None;
+        for x in 0..GW {
+            let full = x < GW - 1 && [f[y * GW + x], f[y * GW + x + 1], f[(y + 1) * GW + x], f[(y + 1) * GW + x + 1]].iter().all(|v| *v >= ISO);
+            if full {
+                run.get_or_insert(x);
+                continue;
+            }
+            // whole squares inside: one quad per run along the row
+            if let Some(x0) = run.take() {
+                mb.quad(at(x0, y), at(x, y), at(x, y + 1), at(x0, y + 1), fill);
+            }
+            if x == GW - 1 {
+                break;
+            }
+            // corners clockwise, with the edge each one starts
+            let corners = [(x, y, 0usize), (x + 1, y, 1), (x + 1, y + 1, 0), (x, y + 1, 1)];
+            let ins: Vec<bool> = corners.iter().map(|(cx, cy, _)| f[cy * GW + cx] >= ISO).collect();
+            if !ins.iter().any(|v| *v) {
+                continue;
+            }
+            let mut poly = Vec::with_capacity(8);
+            let mut xs: Vec<(u32, Vec2)> = Vec::with_capacity(4);
+            for k in 0..4 {
+                let (cx, cy, _) = corners[k];
+                if ins[k] {
+                    poly.push(at(cx, cy));
+                }
+                if ins[k] != ins[(k + 1) % 4] {
+                    // the edge between corner k and k+1, named by its lower-left end
+                    let (e, p) = match k {
+                        0 => (eid(x, y, 0), cross(x, y, 0)),
+                        1 => (eid(x + 1, y, 1), cross(x + 1, y, 1)),
+                        2 => (eid(x, y + 1, 0), cross(x, y + 1, 0)),
+                        _ => (eid(x, y, 1), cross(x, y, 1)),
+                    };
+                    poly.push(p);
+                    xs.push((e, p));
+                }
+            }
+            mb.room(poly.len());
+            let base = mb.v.len() as u16;
+            for p in &poly {
+                mb.vert(*p, fill);
+            }
+            for k in 1..poly.len() as u16 - 1 {
+                mb.i.extend_from_slice(&[base, base + k, base + k + 1]);
+            }
+            // outline pieces, paired the same way the fill polygon joins the corners
+            match xs.len() {
+                2 => link(xs[0], xs[1]),
+                4 if ins[0] => {
+                    link(xs[0], xs[1]);
+                    link(xs[2], xs[3]);
+                }
+                4 => {
+                    link(xs[1], xs[2]);
+                    link(xs[3], xs[0]);
+                }
+                _ => {}
+            }
+        }
+    }
+    // chain the pieces into lines: open ones from their ends first, then the loops
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut starts: Vec<u32> = links.iter().filter(|(_, v)| v.1[1] == u32::MAX).map(|(k, _)| *k).collect();
+    starts.sort_unstable();
+    let mut rest: Vec<u32> = links.keys().copied().collect();
+    rest.sort_unstable();
+    starts.extend(rest);
+    for s in starts {
+        if seen.contains(&s) {
+            continue;
+        }
+        let mut pts = Vec::new();
+        let (mut prev, mut cur) = (u32::MAX, s);
+        let mut closed = false;
+        loop {
+            seen.insert(cur);
+            let (p, nb) = links[&cur];
+            pts.push(p);
+            let next = if nb[0] != prev { nb[0] } else { nb[1] };
+            if next == u32::MAX {
+                break;
+            }
+            if next == s {
+                closed = true;
+                break;
+            }
+            if seen.contains(&next) {
+                break;
+            }
+            prev = cur;
+            cur = next;
+        }
+        border_line(&mut mb, &smooth(&pts, closed), closed, 1.3, edge);
+    }
+    mb.finish()
+}
+
+/// One round of Chaikin corner cutting.
+fn smooth(p: &[Vec2], closed: bool) -> Vec<Vec2> {
+    let n = p.len();
+    if n < 3 {
+        return p.to_vec();
+    }
+    let mut out = Vec::with_capacity(n * 2);
+    if !closed {
+        out.push(p[0]);
+    }
+    let segs = if closed { n } else { n - 1 };
+    for k in 0..segs {
+        let (a, b) = (p[k], p[(k + 1) % n]);
+        out.push(a.lerp(b, 0.25));
+        out.push(a.lerp(b, 0.75));
+    }
+    if !closed {
+        out.push(p[n - 1]);
+    }
+    out
+}
+
+/// A line `2 * r` wide with mitred joins, so a smooth curve stays one clean strip.
+fn border_line(mb: &mut MB, p: &[Vec2], closed: bool, r: f32, col: Color) {
+    let n = p.len();
+    if n < 2 {
+        return;
+    }
+    let seg_n = |k: usize| -> Vec2 {
+        let d = (p[(k + 1) % n] - p[k]).normalize_or_zero();
+        vec2(-d.y, d.x)
+    };
+    let off: Vec<Vec2> = (0..n)
+        .map(|k| {
+            let a = if k > 0 { seg_n(k - 1) } else if closed { seg_n(n - 1) } else { seg_n(0) };
+            let b = if k + 1 < n || closed { seg_n(k) } else { seg_n(k - 1) };
+            let m = (a + b).normalize_or_zero();
+            m * r / m.dot(b).max(0.4)
+        })
+        .collect();
+    let segs = if closed { n } else { n - 1 };
+    for k in 0..segs {
+        let j = (k + 1) % n;
+        mb.quad(p[k] + off[k], p[j] + off[j], p[j] - off[j], p[k] - off[k], col);
     }
 }
 
@@ -1190,6 +1396,9 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
         }
     }
     draw_texture_ex(&sc.zone, 0.0, 0.0, WHITE, full.clone());
+    for m in &sc.zone_mesh {
+        draw_mesh(m);
+    }
     draw_texture_ex(&sc.glow, 0.0, 0.0, WHITE, full.clone());
     draw_texture_ex(&sc.units, 0.0, 0.0, WHITE, full.clone());
     for m in ground_dynamic(g, th, v).finish() {

@@ -33,6 +33,7 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 | H / F | Jump to HQ / fit the whole map |
 | Space | Pause |
 
+- Every match starts by choosing where the HQ goes: the suggested spot is shown first, click anywhere on dry land to move it, then **Start here** (or Enter). An HQ next to the airport takes the whole airport into its base zone. In co-op the host picks.
 - Turrets cost more the further they are from the HQ; the extra is shown at the cursor. Outside the base zone they are flown in by helicopter.
 - Click a rooftop with a turret selected to mount it there for +60% range. If the building falls, so does the turret.
 - Outposts push the base zone outwards. Factories, silos, pads and labs must go inside the zone.
@@ -47,7 +48,7 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 
 Pick **World campaign** on the menu to fight through ten of the world's biggest cities, smallest first: Osaka, Dhaka, Beijing, Mumbai, Cairo, Mexico City, São Paulo, Shanghai, Delhi and Tokyo.
 
-- The maps are the city centres. Megacity airports are mostly far out of town, so the HQ only goes at an airport when one is close enough to share the map with downtown; otherwise it sits in the middle of the city.
+- The maps are the city centres. Megacity airports are mostly far out of town, so the suggested HQ spot is an airport only when one is close enough to share the map with downtown; otherwise it's the middle of the city. You can move it before the city starts.
 - Hold each city until the evac timer runs out (7 minutes in Osaka, 30 seconds longer every city). The horde is 30% bigger in every city, so Tokyo has about 10 times Osaka's.
 - Troops that survive (rifle squads and tanks, with however many soldiers are left) march on to the next city and roll out of the HQ when it starts. Scrap, ammo and buildings stay behind: every city starts from the same small base.
 - Civilians you fly out are the campaign's currency. Between cities you spend them on the research the lab sells for scrap in a normal game (Bigger squads, Carpet bombing, Nuclear warhead, Reinforced armour, Shell presses, Long barrels) or on recruiting more troops. There is no research lab inside campaign cities.
