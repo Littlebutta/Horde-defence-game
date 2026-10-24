@@ -6,6 +6,7 @@ mod citygen;
 mod defs;
 mod fields;
 mod game;
+mod net;
 mod osm;
 mod render;
 mod selftest;
@@ -32,12 +33,18 @@ fn conf() -> Conf {
     }
 }
 
-#[macroquad::main(conf)]
-async fn main() {
-    let mut app = app::App::new();
+fn main() {
+    // Steam has to start before the window exists, or its overlay (the invite window) can't hook in
+    let steam = net::Steam::init();
+    macroquad::Window::from_config(conf(), run(steam));
+}
+
+async fn run(steam: Option<net::Steam>) {
+    let mut app = app::App::new(steam);
     // PH_SHOT=<png> renders a test game headlessly and saves a screenshot (used in CI-less testing)
     let shot = std::env::var("PH_SHOT").ok();
-    if shot.is_some() {
+    let menu_shot = std::env::var("PH_MENU").is_ok();
+    if shot.is_some() && !menu_shot {
         let fac = std::env::var("PH_FAC")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -53,7 +60,15 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(200);
     let mut frame = 0u32;
+    // PH_NETTEST=<ticks> with PH_HOST/PH_JOIN: a headless co-op run that logs checksums, then quits
+    let net_test: Option<u64> = std::env::var("PH_NETTEST").ok().and_then(|s| s.parse().ok());
     loop {
+        if let Some(n) = net_test {
+            if app.net_test(n) {
+                eprintln!("net test done");
+                break;
+            }
+        }
         if let (Some(_), Some(g)) = (&shot, app.game_mut()) {
             // run the sim fast before the shot
             if frame == 1 {
@@ -103,7 +118,7 @@ async fn main() {
             }
         }
         app.frame();
-        if let (Some(path), true) = (&shot, frame == 4) {
+        if let (Some(path), true) = (&shot, frame == if menu_shot { 40 } else { 4 }) {
             get_screen_data().export_png(path);
             break;
         }

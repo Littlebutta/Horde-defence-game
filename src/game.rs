@@ -261,6 +261,8 @@ pub struct Game {
     pub extracted: u32,
     pub civ_lost: u32,
     pub time: f32,
+    /// simulation ticks so far
+    pub ticks: u64,
     pub cds: [f32; 4],
     pub research: Research,
     pub rush: bool,
@@ -350,6 +352,7 @@ impl Game {
             extracted: 0,
             civ_lost: 0,
             time: 0.0,
+            ticks: 0,
             cds: [0.0; 4],
             research: Research::default(),
             rush: false,
@@ -457,8 +460,11 @@ impl Game {
     }
 
     fn pump_fields(&mut self) {
-        while let Ok(d) = self.fw_hq.rx.try_recv() {
-            self.fw_hq.busy -= 1;
+        self.ticks += 1;
+        for fw in [&mut self.fw_hq, &mut self.fw_aux, &mut self.fw_hunt] {
+            fw.now = self.ticks;
+        }
+        while let Some(d) = self.fw_hq.poll() {
             match d {
                 Done::Hq { obj, d } => {
                     self.obj = obj;
@@ -482,8 +488,7 @@ impl Game {
                 _ => {}
             }
         }
-        while let Ok(d) = self.fw_aux.rx.try_recv() {
-            self.fw_aux.busy -= 1;
+        while let Some(d) = self.fw_aux.poll() {
             if let Done::Multi { id, d } = d {
                 if id == self.pad_job {
                     self.pad_field = Some(d);
@@ -534,8 +539,7 @@ impl Game {
                 });
             }
         }
-        while let Ok(d) = self.fw_hunt.rx.try_recv() {
-            self.fw_hunt.busy -= 1;
+        while let Some(d) = self.fw_hunt.poll() {
             if let Done::Hunt(h) = d {
                 self.hunt = Some(h);
             }
@@ -933,7 +937,7 @@ impl Game {
         if per_cell <= 0.0 {
             return;
         }
-        let mut hit: std::collections::HashMap<i32, f32> = std::collections::HashMap::new();
+        let mut hit: std::collections::BTreeMap<i32, f32> = std::collections::BTreeMap::new();
         let bid = &self.world.bid;
         fill_disc(at, r, |c| {
             let b = bid[c];
@@ -1160,6 +1164,39 @@ impl Game {
     }
 
     // ----------------------------------------------------------------------------- tick
+
+    /// A fingerprint of the simulation, compared between players to catch a game drifting apart.
+    pub fn checksum(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |v: u32| {
+            h ^= v as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        };
+        mix(self.swarm.u.len() as u32);
+        for u in &self.swarm.u {
+            mix(u.x.to_bits() ^ u.y.to_bits().rotate_left(16));
+            mix(u.hp.to_bits());
+        }
+        for c in &self.civs {
+            mix(c.p.x.to_bits() ^ c.p.y.to_bits().rotate_left(16) ^ c.st as u32);
+        }
+        for s in &self.structs {
+            mix(s.hp.to_bits() ^ s.dead as u32);
+        }
+        for g in &self.groups {
+            for m in &g.m {
+                mix(m.p.x.to_bits() ^ m.p.y.to_bits().rotate_left(16) ^ m.alive as u32);
+            }
+        }
+        for b in &self.world.buildings {
+            mix(b.hp.to_bits());
+        }
+        mix(self.scrap.to_bits());
+        mix(self.ammo.to_bits());
+        mix(self.score.to_bits());
+        mix(self.ticks as u32);
+        h
+    }
 
     pub fn tick(&mut self) {
         if self.over {
@@ -1567,7 +1604,7 @@ impl Game {
                 self.ammo -= d.ammo;
                 self.structs[i].cd = d.rate;
                 self.structs[i].last_fire = self.time;
-                self.structs[i].aim = (tg.y - center.y).atan2(tg.x - center.x);
+                self.structs[i].aim = libm::atan2f(tg.y - center.y, tg.x - center.x);
                 let base = if roof >= 0 { self.world.buildings[roof as usize].h } else { 0.0 };
                 self.tracers.push(Tracer {
                     a: center,
@@ -1671,7 +1708,7 @@ impl Game {
                     (from, to)
                 } else {
                     let ang = self.rng.f() * std::f32::consts::TAU;
-                    let d = vec2(ang.cos(), ang.sin());
+                    let d = vec2(libm::cosf(ang), libm::sinf(ang));
                     (to - d * 24.0, to + d * 24.0)
                 };
                 let dir = (end - start).normalize_or_zero();
@@ -1837,7 +1874,7 @@ impl Game {
                 1 => {
                     g.t -= DT;
                     g.ang += DT * 0.9;
-                    g.p = g.center + vec2(g.ang.cos(), g.ang.sin()) * 25.0;
+                    g.p = g.center + vec2(libm::cosf(g.ang), libm::sinf(g.ang)) * 25.0;
                     g.cd -= DT;
                     if g.cd <= 0.0 {
                         if let Some(t) = self
@@ -2242,7 +2279,7 @@ impl Game {
                     let away = if fx == 0.0 && fy == 0.0 {
                         self.rng.f() * std::f32::consts::TAU
                     } else {
-                        (fy as f32).atan2(fx as f32)
+                        libm::atan2f(fy as f32, fx as f32)
                     };
                     civ.hd = away + (self.rng.f() - 0.5) * 2.6;
                     civ.flee_t = 0.8 + self.rng.f() * 1.4;
@@ -2250,7 +2287,7 @@ impl Game {
             } else if self.rng.f() < 0.04 {
                 civ.hd += (self.rng.f() - 0.5) * 2.5;
             }
-            let np = civ.p + vec2(civ.hd.cos(), civ.hd.sin()) * sp * DT;
+            let np = civ.p + vec2(libm::cosf(civ.hd), libm::sinf(civ.hd)) * sp * DT;
             if np.x > 0.0
                 && np.y > 0.0
                 && np.x < W as f32
@@ -2817,6 +2854,27 @@ impl Game {
         }
         for (p, n) in waves {
             self.queue((p.x, p.y), n, 2.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// Two games from the same map, seed and commands must stay identical tick for tick.
+    #[test]
+    fn deterministic() {
+        for fac in 0..3 {
+            let mk = || Game::new(crate::citygen::generate(11), fac, 1.0, 99);
+            let (mut a, mut b) = (mk(), mk());
+            crate::selftest::abilities(&mut a);
+            crate::selftest::abilities(&mut b);
+            for _ in 0..300 {
+                a.tick();
+                b.tick();
+            }
+            assert_eq!(a.checksum(), b.checksum(), "faction {}", fac);
+            assert!(a.hostiles() > 0);
         }
     }
 }

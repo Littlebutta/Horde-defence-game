@@ -151,8 +151,8 @@ impl Swarm {
             for _ in 0..5 {
                 let a = xs(&mut s) * std::f32::consts::TAU;
                 let r = xs(&mut s) * rad;
-                let px = at.0 + a.cos() * r;
-                let py = at.1 + a.sin() * r;
+                let px = at.0 + libm::cosf(a) * r;
+                let py = at.1 + libm::sinf(a) * r;
                 if px >= 0.0 && py >= 0.0 && px < W as f32 && py < H as f32 {
                     let c = py as usize * W + px as usize;
                     if fl & F_FLY != 0 || (obj[c] == FREE && hq[c] != INF) {

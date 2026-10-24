@@ -6,8 +6,13 @@
 //! * `Mode::Open`: open ground only, from many sources, cut off at a maximum cost (what a unit "sees").
 //!
 //! Diagonal steps between two blocked cells are refused, so a wall line with touching corners seals a street.
+//!
+//! Results are handed back on a fixed tick (`LAG` ticks after the job was sent), waiting for the
+//! worker if it is late. That keeps the simulation deterministic, which multiplayer relies on:
+//! every machine runs the same game from the same commands.
 
 use crate::world::*;
+use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
@@ -123,10 +128,16 @@ pub enum Done {
     },
 }
 
+/// Ticks between sending a job and using its result.
+pub const LAG: u64 = 8;
+
 pub struct FieldWorker {
     tx: Sender<Job>,
-    pub rx: Receiver<Done>,
+    rx: Receiver<Done>,
     pub busy: usize,
+    /// the current simulation tick, set by the game
+    pub now: u64,
+    due: VecDeque<u64>,
 }
 
 impl FieldWorker {
@@ -165,10 +176,21 @@ impl FieldWorker {
                 }
             }
         });
-        FieldWorker { tx, rx, busy: 0 }
+        FieldWorker { tx, rx, busy: 0, now: 0, due: VecDeque::new() }
     }
     pub fn submit(&mut self, j: Job) {
         self.busy += 1;
+        self.due.push_back(self.now + LAG);
         let _ = self.tx.send(j);
+    }
+    /// The next result whose tick has come, waiting for the worker if needed.
+    pub fn poll(&mut self) -> Option<Done> {
+        if *self.due.front()? > self.now {
+            return None;
+        }
+        self.due.pop_front();
+        let d = self.rx.recv().ok()?;
+        self.busy -= 1;
+        Some(d)
     }
 }

@@ -9,7 +9,7 @@ It is a native Windows game written in Rust. The horde is simulated in parallel 
 1. Open the [latest release](https://github.com/Littlebutta/Horde-defence-game/releases/latest) and download `PixelHorde.exe`.
 2. Put it in any folder and double-click it. Windows SmartScreen may warn about an unknown app the first time: click **More info**, then **Run anyway**.
 
-That's all. No Git, browser or installer needed. Every time the game starts it checks this repo's releases; when a newer build exists it downloads it in the background and a **Restart now** button appears on the menu.
+That's all. No Git, browser or installer needed. The game keeps everything it saves in a `data` folder next to the exe: your settings and every real city you have downloaded, so you can move or back up the whole folder. Every time the game starts it checks this repo's releases; when a newer build exists it downloads it in the background and a **Restart now** button appears on the menu.
 
 Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publishes it as release `build-N`. The update check needs the repo to be public.
 
@@ -23,9 +23,12 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 | Left click a unit, right click the map | Select troops, then move them (rifles can garrison a building) |
 | R / Q / G / E | Rescue squad / airstrike / gunship / ICBM (panel on the right, greyed out until ready) |
 | X | Sell the structure under the cursor for 50% |
-| Left drag on empty map, middle drag, WASD | Pan |
-| Scroll | Zoom |
-| T | 2.5D or top-down view |
+| Left drag on empty map, WASD | Pan |
+| Middle drag, or Alt + left drag | Orbit the camera (sideways turns, up and down tilts) |
+| Z / C | Turn the camera |
+| Page Up / Page Down | Tilt the camera |
+| Scroll | Zoom towards the cursor |
+| T | Top-down or 3D view |
 | K | Dark or light map (dark is the default) |
 | H / F | Jump to HQ / fit the whole map |
 | Space | Pause |
@@ -36,7 +39,22 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 - Rescue squads walk up to civilians one by one and escort them back. Once inside the base, civilians walk to the nearest extraction pad. Each pad flies up to 16 out (+100 score, +20 scrap, +10 ammo each), then needs 30 seconds, so more pads means faster extraction. A crowded base slows your income.
 - Every missile silo has its own ICBM cooldown.
 - The research lab unlocks upgrades: bigger rescue squads, carpet bombing (drag to aim the bomb run) and a nuclear warhead that leaves radiation nobody of yours can enter or build in.
-- Hordes and civilians move along streets, plazas, parks, airport ground and the rubble of destroyed buildings.
+- Units go anywhere on land except inside buildings: water is the only barrier. Only your turrets and garrisoned rifles stand on rooftops.
+- Hordes walk around your walls and only chew through one when it blocks the way.
+- Real cities you have played appear under **Played before** on the menu and start instantly, without downloading again (the x removes one).
+
+## Co-op with Steam friends
+
+Up to 4 players share one base: the same scrap, buildings and troops, and everyone can build, deploy and fire abilities.
+
+1. Everyone starts Steam, then starts `PixelHorde.exe`.
+2. The host clicks **Play co-op with Steam friends**. The Steam invite window opens; invite your friends.
+3. Friends accept the invite in Steam (or right-click the host in the friends list and pick **Join game**) while Pixel Horde is open. They see a waiting room.
+4. The host picks the faction, map and difficulty and presses **Start**. The map is sent to everyone, so real cities only need downloading on the host.
+
+Everybody needs the same build; the auto-updater keeps that true, so restart if the game says the versions differ. For now the game uses Steam's free test app (Spacewar, App ID 480), so Steam shows you as playing Spacewar, and an invite accepted while Pixel Horde is closed launches Spacewar instead. Open Pixel Horde first, then accept.
+
+How it stays in sync: every player runs the same deterministic simulation and only commands go over the network (lockstep, like Factorio). The host bundles everyone's commands into a frame for each tick a few ticks ahead; nobody simulates a tick before they have its frame. Every 100 ticks the games compare checksums, and you get a warning if one ever drifts.
 
 ## Factions
 
@@ -52,19 +70,20 @@ cargo build --release
 
 The exe is at `target/release/PixelHorde.exe` (or `PixelHorde` on Linux/macOS). Builds without `BUILD_NUMBER` set report themselves as development builds and don't self-update.
 
-For headless testing on Linux: `PH_SHOT=out.png PH_FAC=1 PH_TICKS=2000 xvfb-run ./target/release/PixelHorde` runs a random city for 2000 ticks and saves a screenshot. Add `PH_STRESS=1` to drop a million units on the map, or `PH_SCRIPT=1` to build a base and fire every ability.
+Steam support is the default `steam` feature; `cargo build --release --no-default-features` builds without it. The Steam API DLL ships inside the exe and is written next to it on first start.
+
+For headless testing on Linux: `PH_SHOT=out.png PH_FAC=1 PH_TICKS=2000 xvfb-run ./target/release/PixelHorde` runs a random city for 2000 ticks and saves a screenshot. Add `PH_STRESS=1` to drop a million units on the map, or `PH_SCRIPT=1` to build a base and fire every ability. `PH_ZOOM`, `PH_YAW` and `PH_PITCH` set the camera. For co-op without Steam, `PH_HOST=47777` and `PH_JOIN=127.0.0.1:47777` connect two copies over TCP, and `PH_NETTEST=1000` runs a scripted co-op game for 1000 ticks and prints both sides' checksums. `cargo test --release` checks that two games given the same commands stay identical.
 
 ## How it works
 
 - **Swarm:** units live in one flat array that rayon splits across all cores each tick. Every unit reads shared grids (open streets, flow fields, last tick's crowd density, queued damage) and writes only itself, plus atomic counters for density and for damage to whatever it's chewing on.
 - **Pathing:** flow fields built with bucketed Dijkstra on background threads: one to the HQ that passes through buildings at a high cost (so the horde chews through when there's no way around), and "hunt" fields toward whatever the faction can see. Diagonal steps between two blocked cells are refused, so a wall line with touching corners seals a street.
-- **Rendering:** the city is baked into vertex meshes (roads, water, parks, 2.5D buildings), rebuilt only when something is destroyed. The horde is one map-sized texture refreshed from the density grid, with a soft glow under it that grows with the crowd.
+- **Rendering:** fully 3D. Roads, water and parks are baked into flat meshes; buildings are 3D blocks baked per map tile, so a destroyed building only rebuilds its own tile. Clicks are ray-cast into the scene, so rooftops can be picked from any angle. The horde is one map-sized texture refreshed from the density grid, with a soft glow under it that grows with the crowd.
 - **Real maps:** type a city in the menu. The game looks it up (Nominatim, then Photon), finds the nearest airport for your HQ and downloads streets, buildings, water and parks from OpenStreetMap through several Overpass mirrors at 4 m per cell, all over its own HTTPS.
 
 The original browser version is kept for reference in `web/`.
 
 ## Roadmap
 
-- Multiplayer
 - Factorio-style production chains
 - More units and abilities

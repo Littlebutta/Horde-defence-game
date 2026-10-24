@@ -2,6 +2,7 @@
 
 use crate::defs::*;
 use crate::game::*;
+use crate::net::{self, Cmd};
 use crate::osm::{self, OsmMsg};
 use crate::storage;
 use crate::render::{self, text, text_w, Fonts, Scene, ViewInfo, WorldLabels};
@@ -57,7 +58,19 @@ pub struct App {
     msg: (String, f32),
     last_m: Vec2,
     saved: Vec<storage::SavedMap>,
+    steam: Option<net::Steam>,
+    sess: Option<net::Session>,
+    test_step: u32,
+    test_log: u64,
 }
+
+/// Colours of the co-op players' cursors, host first.
+const PLAYER_COLS: [Color; 4] = [
+    Color::new(0.26, 0.52, 0.96, 1.0),
+    Color::new(0.98, 0.74, 0.02, 1.0),
+    Color::new(0.20, 0.66, 0.33, 1.0),
+    Color::new(0.85, 0.30, 0.85, 1.0),
+];
 
 /// The orbit camera: looks at a point on the ground from `dist` cells away, turned by `yaw` and
 /// tilted `pitch` above the horizon (pi/2 would be straight down).
@@ -140,7 +153,7 @@ fn pal(dark: bool) -> Pal {
 }
 
 impl App {
-    pub fn new() -> App {
+    pub fn new(steam: Option<net::Steam>) -> App {
         let st = storage::load_settings();
         App {
             screen: Screen::Menu,
@@ -168,6 +181,10 @@ impl App {
             tip: None,
             msg: (String::new(), 0.0),
             last_m: Vec2::ZERO,
+            steam,
+            sess: test_session(),
+            test_step: 0,
+            test_log: 0,
         }
     }
 
@@ -184,6 +201,7 @@ impl App {
         self.clock += dt;
         self.ui_rects.clear();
         self.tip = None;
+        self.net_frame();
         match self.screen {
             Screen::Menu => {
                 self.menu();
@@ -193,6 +211,149 @@ impl App {
             }
             Screen::Loading => self.loading(),
             Screen::Play => self.play(dt),
+        }
+    }
+
+    // ------------------------------------------------------------------------------------- co-op
+
+    fn net_frame(&mut self) {
+        if let Some(st) = &self.steam {
+            st.tick();
+            if let Some(id) = st.take_join() {
+                if self.sess.is_none() && self.screen != Screen::Play {
+                    st.join(id);
+                    self.status = "Joining your friend's game".into();
+                } else {
+                    self.msg = ("Leave this game first to join a friend".into(), 3.0);
+                }
+            }
+            if let Some(r) = st.take_lobby() {
+                match r {
+                    Ok((lobby, host)) => {
+                        let (link, name) = (st.link(lobby), st.name());
+                        self.status.clear();
+                        self.sess = Some(if host {
+                            let s = net::Session::new_host(link, name);
+                            s.invite();
+                            s
+                        } else {
+                            net::Session::new_client(link, name)
+                        });
+                    }
+                    Err(e) => self.status = e,
+                }
+            }
+        }
+        let notes = match self.sess.as_mut() {
+            Some(s) => s.pump(),
+            None => return,
+        };
+        for n in notes {
+            match n {
+                net::Note::Started { desc, fac, diff, seed } => {
+                    self.fac = fac;
+                    self.diff = diff;
+                    self.begin(*desc, seed);
+                }
+                net::Note::Ended => {
+                    if self.screen == Screen::Play {
+                        self.screen = Screen::Menu;
+                        self.status = "The host ended the game".into();
+                    }
+                }
+                net::Note::Closed(why) => {
+                    if let Some(mut s) = self.sess.take() {
+                        s.leave();
+                    }
+                    self.status = why;
+                    self.screen = Screen::Menu;
+                }
+                net::Note::Msg(m) => {
+                    if self.screen != Screen::Play {
+                        self.status = m.clone();
+                    }
+                    self.msg = (m, 4.0);
+                }
+            }
+        }
+    }
+
+    fn client(&self) -> bool {
+        self.sess.as_ref().is_some_and(|s| !s.is_host())
+    }
+    fn paused_now(&self) -> bool {
+        match &self.sess {
+            Some(s) => s.paused,
+            None => self.paused,
+        }
+    }
+    fn toggle_pause(&mut self) {
+        match self.sess.as_mut() {
+            Some(s) => s.toggle_pause(),
+            None => self.paused = !self.paused,
+        }
+    }
+    /// Back to the menu. The co-op host takes everybody with it; a client leaves the co-op game.
+    fn leave_game(&mut self) {
+        self.screen = Screen::Menu;
+        if let Some(s) = self.sess.as_mut() {
+            if s.is_host() {
+                s.end_game();
+            } else {
+                s.leave();
+                self.sess = None;
+            }
+        }
+    }
+    fn leave_coop(&mut self) {
+        if let Some(mut s) = self.sess.take() {
+            if s.is_host() && s.in_game {
+                s.end_game();
+            }
+            s.leave();
+        }
+    }
+    /// Carries out a player command: straight away when playing alone, through the host in co-op.
+    /// Returns the message shown for it (alone only).
+    fn act(&mut self, g: &mut Game, c: Cmd) -> Option<&'static str> {
+        if let Some(s) = self.sess.as_mut() {
+            s.issue(c);
+            return None;
+        }
+        let m = net::apply(g, c);
+        if let Some(m) = m {
+            self.msg = (m.into(), 1.5);
+        }
+        m
+    }
+
+    /// The waiting room a client sees until the host starts.
+    fn client_lobby(&mut self) {
+        let p = pal(self.dark);
+        let (sw, sh) = (screen_width(), screen_height());
+        let r = Rect::new(sw / 2.0 - 300.0, sh / 2.0 - 140.0, 600.0, 280.0);
+        self.panel(r);
+        let s = self.sess.as_ref().unwrap();
+        let title = format!("{}'s co-op game", s.host_name());
+        let line = if let Some(f) = s.receiving() {
+            format!("Receiving the map  {:.0}%", f * 100.0)
+        } else if s.host_busy {
+            "The host is in the middle of a game. You will join the next one.".to_string()
+        } else {
+            "Waiting for the host to start the game".to_string()
+        };
+        let names: Vec<String> = s.players.iter().map(|p| p.name.clone()).collect();
+        text(&self.fonts.head, &title, r.x + 28.0, r.y + 52.0, 26.0, p.text);
+        text(&self.fonts.mono, &line, r.x + 28.0, r.y + 92.0, 15.0, p.dim);
+        text(&self.fonts.mono, &format!("Players: {}", names.join(", ")), r.x + 28.0, r.y + 126.0, 14.0, p.text);
+        text(&self.fonts.mono, "The host picks the faction, city and difficulty. You all share one base.", r.x + 28.0, r.y + 156.0, 13.0, p.dim);
+        for k in 0..12 {
+            let a = self.clock * 4.0 + k as f32 * 0.52;
+            let c = vec2(r.x + r.w - 50.0, r.y + 44.0) + vec2(a.cos(), a.sin()) * 14.0;
+            draw_circle(c.x, c.y, 2.0, alpha(p.accent, k as f32 / 12.0));
+        }
+        if self.button(Rect::new(r.x + 28.0, r.y + r.h - 62.0, 140.0, 38.0), "Leave", true, false) {
+            self.leave_coop();
         }
     }
 
@@ -272,6 +433,11 @@ impl App {
         while y < sh {
             draw_rectangle(0.0, y, sw, 10.0, gc);
             y += 72.0;
+        }
+        if self.client() {
+            while get_char_pressed().is_some() {}
+            self.client_lobby();
+            return;
         }
         let w = 760.0f32.min(sw - 32.0);
         let h = 650.0f32.min(sh - 32.0);
@@ -457,6 +623,37 @@ impl App {
             }
         }
         let by = r.y + r.h - 64.0;
+        // co-op with Steam friends
+        let cy = by - 50.0;
+        if let Some(s) = &self.sess {
+            let names: Vec<String> = s.players.iter().map(|p| p.name.clone()).collect();
+            let line = format!("Co-op ({}/4): {}", names.len(), names.join(", "));
+            if self.button(Rect::new(x0, cy, 150.0, 34.0), "Invite friends", true, true) {
+                if let Some(s) = &self.sess {
+                    s.invite();
+                }
+            }
+            if self.button(Rect::new(x0 + 160.0, cy, 110.0, 34.0), "Leave co-op", true, false) {
+                self.leave_coop();
+            }
+            text(&self.fonts.mono, &line, x0 + 284.0, cy + 22.0, 13.0, p.text);
+        } else {
+            let have = self.steam.is_some();
+            let br = Rect::new(x0, cy, 250.0, 34.0);
+            if self.button(br, "Play co-op with Steam friends", have, false) {
+                if let Some(st) = &self.steam {
+                    st.create();
+                    self.status = "Opening a Steam lobby".into();
+                }
+            }
+            if self.hot(br) {
+                self.tip = Some(if have {
+                    "Opens a lobby and the Steam invite window. Friends who accept join your base; you pick the map and press Start.".into()
+                } else {
+                    "Steam is not running. Start Steam, then restart Pixel Horde to play co-op.".into()
+                });
+            }
+        }
         let can = !self.real || self.city.trim().len() > 1;
         if self.button(
             Rect::new(r.x + r.w - 228.0, by, 200.0, 44.0),
@@ -550,7 +747,12 @@ impl App {
         }
     }
 
-    fn begin(&mut self, d: Desc, seed: u64) {
+    fn begin(&mut self, mut d: Desc, seed: u64) {
+        if let Some(s) = self.sess.as_mut() {
+            if s.is_host() {
+                d = s.start_game(&d, self.fac, self.diff, seed);
+            }
+        }
         let note = d.note.clone();
         let name = d.name.clone();
         let g = Game::new(d, self.fac, DIFFS[self.diff].1, seed);
@@ -685,8 +887,46 @@ impl App {
         if sc.dark != self.dark {
             sc.retheme(&g, th);
         }
-        // fixed 20 Hz simulation
-        if !self.paused && !g.over {
+        // fixed 20 Hz simulation; in co-op, in lockstep with the host
+        if let Some(s) = self.sess.as_mut() {
+            let me = s.me;
+            let mut said = Vec::new();
+            let mut n = 0;
+            if s.is_host() {
+                if !s.paused && !g.over {
+                    self.acc += dt;
+                    while self.acc >= DT && n < 3 {
+                        let f = s.step().unwrap_or_default();
+                        said.extend(net::run_tick(&mut g, &f, me));
+                        s.after_tick(&g);
+                        self.acc -= DT;
+                        n += 1;
+                    }
+                    if n == 3 {
+                        self.acc = 0.0;
+                    }
+                }
+            } else {
+                // a client runs on the host's frames, faster while catching up
+                self.acc += dt;
+                while n < 12 && !g.over && (self.acc >= DT || s.backlog() > 2) {
+                    let Some(f) = s.step() else {
+                        self.acc = self.acc.min(DT);
+                        break;
+                    };
+                    said.extend(net::run_tick(&mut g, &f, me));
+                    s.after_tick(&g);
+                    self.acc = (self.acc - DT).max(0.0);
+                    n += 1;
+                }
+            }
+            if let Some(m) = said.last() {
+                self.msg = (m.to_string(), 1.5);
+            }
+            if n > 0 {
+                sc.update_units(&g);
+            }
+        } else if !self.paused && !g.over {
             self.acc += dt;
             let mut n = 0;
             while self.acc >= DT && n < 3 {
@@ -735,6 +975,18 @@ impl App {
             &mut labels,
         );
         let mw = self.pick(&g, self.mouse());
+        // the other co-op players' cursors
+        if let Some(s) = self.sess.as_mut() {
+            s.cursor(mw, dt);
+            let mk = (2.2 / self.cam.scale()).max(1.0);
+            for (i, pl) in s.players.iter().enumerate() {
+                if let (Some(c), true) = (pl.cursor, i != s.me) {
+                    let col = PLAYER_COLS[i % 4];
+                    render::draw_pin(c, 2.5 * mk, col, WHITE);
+                    labels.items.push((render::p3(c, 7.0 * mk), pl.name.clone(), col, 13.0));
+                }
+            }
+        }
         gl_use_material(&sc.flat);
         let cursor_label = self.preview(&g, &sc.flat, mw);
         gl_use_default_material();
@@ -791,48 +1043,6 @@ impl App {
         self.ui_rects.iter().any(|r| r.contains(m))
     }
 
-    /// Placements a build drag would make, as (x, y) of each footprint.
-    fn plan(&self, g: &Game, t: S, a: Vec2, b: Vec2) -> Vec<(i32, i32)> {
-        let d = def(t);
-        if t == S::Wall {
-            let snap = |p: Vec2| ((p.x / 3.0).floor() as i32, (p.y / 3.0).floor() as i32);
-            let (x0, y0) = snap(a);
-            let (x1, y1) = snap(b);
-            let n = (x1 - x0).abs().max((y1 - y0).abs()).min(400);
-            let mut v = Vec::new();
-            for k in 0..=n {
-                let f = if n == 0 { 0.0 } else { k as f32 / n as f32 };
-                let gx = (x0 as f32 + (x1 - x0) as f32 * f).round() as i32;
-                let gy = (y0 as f32 + (y1 - y0) as f32 * f).round() as i32;
-                if v.last() != Some(&(gx * 3, gy * 3)) {
-                    v.push((gx * 3, gy * 3));
-                }
-            }
-            return v;
-        }
-        let ox = |p: Vec2| {
-            (
-                (p.x - d.w as f32 / 2.0).round() as i32,
-                (p.y - d.h as f32 / 2.0).round() as i32,
-            )
-        };
-        let (x0, y0) = ox(a);
-        let (x1, y1) = ox(b);
-        let (sx, sy) = (d.w + 1, d.h + 1);
-        let nx = ((x1 - x0).abs() / sx).min(30);
-        let ny = ((y1 - y0).abs() / sy).min(30);
-        let (dx, dy) = ((x1 - x0).signum(), (y1 - y0).signum());
-        let mut v = Vec::new();
-        for j in 0..=ny {
-            for i in 0..=nx {
-                v.push((x0 + i * sx * dx, y0 + j * sy * dy));
-            }
-        }
-        let _ = g;
-        v
-    }
-
-    /// Draws the ghost of whatever the current tool would do. Returns the label for the cursor.
     /// Ground marks are drawn with `flat`; ghosts of buildings are real 3D boxes.
     fn preview(&self, g: &Game, flat: &Material, mw: Vec2) -> Option<(String, Color)> {
         let ghost = |x: f32, y: f32, w: f32, h: f32, z: f32, ok: bool| {
@@ -883,7 +1093,7 @@ impl App {
                     Some((_, w)) => (w, mw),
                     None => (mw, mw),
                 };
-                let spots = self.plan(g, t, a, b);
+                let spots = net::plan(t, a, b);
                 let mut total = 0.0;
                 let mut extra = 0.0;
                 let mut n_ok = 0;
@@ -1076,14 +1286,14 @@ impl App {
         }
         if self.button(
             Rect::new(bx + 160.0, 6.0, 74.0, 28.0),
-            if self.paused { "Resume" } else { "Pause" },
+            if self.paused_now() { "Resume" } else { "Pause" },
             true,
-            self.paused,
+            self.paused_now(),
         ) {
-            self.paused = !self.paused;
+            self.toggle_pause();
         }
         if self.button(Rect::new(bx + 240.0, 6.0, 80.0, 28.0), "Menu", true, false) {
-            self.screen = Screen::Menu;
+            self.leave_game();
             return;
         }
         text(
@@ -1303,7 +1513,7 @@ impl App {
                 if hotu {
                     self.tip = Some(format!("{}: {}", d.up_name, d.upgrade));
                     if en && is_mouse_button_pressed(MouseButton::Left) {
-                        g.start_research(a);
+                        self.act(g, Cmd::Research(a));
                     }
                 }
             } else {
@@ -1374,7 +1584,11 @@ impl App {
                 Color::new(1.0, 1.0, 1.0, t.min(1.0)),
             );
         }
-        if self.paused {
+        if let Some(s) = &self.sess {
+            let names: Vec<String> = s.players.iter().map(|p| p.name.clone()).collect();
+            text(&self.fonts.mono, &format!("Co-op: {}", names.join(", ")), 12.0, 58.0, 12.0, p.dim);
+        }
+        if self.paused_now() {
             let s = "PAUSED";
             let tw = text_w(&self.fonts.head, s, 30.0);
             text(&self.fonts.head, s, (sw - tw) / 2.0, sh / 2.0, 30.0, WHITE);
@@ -1410,7 +1624,7 @@ impl App {
                 true,
                 true,
             ) {
-                self.screen = Screen::Menu;
+                self.leave_game();
             }
         }
     }
@@ -1436,16 +1650,14 @@ impl App {
                 match ch {
                     't' => self.toggle_top(),
                     'k' => self.dark = !self.dark,
-                    'p' | ' ' => self.paused = !self.paused,
+                    'p' | ' ' => self.toggle_pause(),
                     'h' => self.cam.t = g.world.hq,
                     'f' => {
                         self.cam.t = vec2(W as f32, H as f32) / 2.0;
                         self.cam.set_scale((screen_height() / H as f32).min(screen_width() / W as f32));
                     }
                     'x' => {
-                        if g.sell_at(mw) {
-                            self.msg = ("Sold for half price".into(), 1.2);
-                        }
+                        self.act(g, Cmd::Sell(mw));
                     }
                     _ => {}
                 }
@@ -1456,7 +1668,7 @@ impl App {
             self.selected = None;
             self.press = None;
         }
-        if is_key_pressed(KeyCode::F9) {
+        if is_key_pressed(KeyCode::F9) && self.sess.is_none() {
             g.stress();
         }
         // camera: WASD pans along the view, Z/C turn, PageUp/PageDown tilt
@@ -1517,9 +1729,7 @@ impl App {
                 self.tool = Tool::None;
                 self.press = None;
             } else if let Some(gi) = self.selected {
-                if !g.order(gi, mw) {
-                    self.msg = ("Can't send troops there".into(), 1.5);
-                }
+                self.act(g, Cmd::Order(gi as u32, mw));
             }
         }
         if is_mouse_button_pressed(MouseButton::Left) && !ui {
@@ -1553,38 +1763,19 @@ impl App {
                     let d = def(t);
                     if d.turret && w0.distance(mw) < 2.0 {
                         if let Some((b, p)) = g.roof_at(mw) {
-                            if !g.place_roof(t, b, p) {
-                                self.msg = ("Can't put a turret on that roof".into(), 1.5);
-                            }
+                            self.act(g, Cmd::Roof { t, b: b as u32, p });
                             return;
                         }
                     }
-                    let spots = self.plan(g, t, w0, mw);
-                    let mut placed = 0;
-                    for (x, y) in spots {
-                        if g.place(t, x, y) {
-                            placed += 1;
-                        }
-                    }
-                    if placed == 0 {
-                        self.msg = ("Can't build there".into(), 1.5);
-                    }
+                    self.act(g, Cmd::Build { t, a: w0, b: mw });
                 }
                 Tool::Unit(u) => {
-                    if !g.deploy(u, mw) {
-                        self.msg = ("Can't deploy there".into(), 1.5);
-                    }
+                    self.act(g, Cmd::Deploy(u, mw));
                 }
                 Tool::Ability(a) => {
-                    let from = if a == A::Air && g.research.air {
-                        w0
-                    } else {
-                        mw
-                    };
-                    if g.use_ability(a, from, mw) {
+                    let from = if a == A::Air && g.research.air { w0 } else { mw };
+                    if self.act(g, Cmd::Ability(a, from, mw)) != Some(net::BAD_TARGET) {
                         self.tool = Tool::None;
-                    } else {
-                        self.msg = ("Can't target that".into(), 1.5);
                     }
                 }
             }
@@ -1636,5 +1827,63 @@ fn wrap_lines(f: &Font, s: &str, w: f32, size: f32) -> Vec<String> {
 fn wrap(f: &Font, s: &str, x: f32, y: f32, w: f32, size: f32, c: Color) {
     for (i, l) in wrap_lines(f, s, w, size).iter().enumerate() {
         text(f, l, x, y + i as f32 * (size + 4.0), size, c);
+    }
+}
+
+/// `PH_HOST=port` or `PH_JOIN=addr:port` start a co-op session over plain TCP (testing, LAN).
+fn test_session() -> Option<net::Session> {
+    if let Some(port) = std::env::var("PH_HOST").ok().and_then(|p| p.parse().ok()) {
+        let l = net::tcp::host(port).ok()?;
+        return Some(net::Session::new_host(Box::new(l), "Host".into()));
+    }
+    let addr = std::env::var("PH_JOIN").ok()?;
+    for _ in 0..50 {
+        if let Ok(l) = net::tcp::join(&addr) {
+            return Some(net::Session::new_client(Box::new(l), "Guest".into()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    None
+}
+
+impl App {
+    /// Headless co-op test (`PH_NETTEST`): the host starts as soon as a guest is in, both sides
+    /// issue a few commands, and every 100 ticks each prints its checksum. Returns true when done.
+    pub fn net_test(&mut self, until: u64) -> bool {
+        let Some(s) = self.sess.as_ref() else { return true };
+        let host = s.is_host();
+        if host && !s.in_game && s.players.len() >= 2 && self.screen == Screen::Menu {
+            self.fac = 0;
+            self.start();
+            return false;
+        }
+        if self.screen != Screen::Play {
+            return false;
+        }
+        let exec = s.exec;
+        let Some(g) = self.game.as_ref() else { return false };
+        let hq = g.world.hq;
+        let plan: &[(u64, bool, Cmd)] = &[
+            (20, true, Cmd::Build { t: S::Gun, a: hq + vec2(24.0, 0.0), b: hq + vec2(24.0, 0.0) }),
+            (25, false, Cmd::Build { t: S::Wall, a: hq + vec2(-40.0, 30.0), b: hq + vec2(-10.0, 30.0) }),
+            (30, false, Cmd::Deploy(U::Rifle, hq + vec2(0.0, -40.0))),
+            (40, true, Cmd::Ability(A::Rescue, hq + vec2(120.0, 60.0), hq + vec2(120.0, 60.0))),
+            (60, false, Cmd::Build { t: S::Gun, a: hq + vec2(-24.0, 0.0), b: hq + vec2(-24.0, 0.0) }),
+        ];
+        let step = self.test_step as usize;
+        if let Some((at, by_host, c)) = plan.get(step) {
+            if exec >= *at {
+                if *by_host == host {
+                    self.sess.as_mut().unwrap().issue(*c);
+                }
+                self.test_step += 1;
+            }
+        }
+        let s = self.sess.as_ref().unwrap();
+        if exec % 100 == 0 && exec > self.test_log {
+            self.test_log = exec;
+            eprintln!("{} tick {} checksum {:016x} structs {} hostiles {}{}", if host { "host" } else { "guest" }, exec, g.checksum(), g.structs.iter().filter(|s| !s.dead).count(), g.hostiles(), if s.desync { " DESYNC" } else { "" });
+        }
+        exec >= until
     }
 }

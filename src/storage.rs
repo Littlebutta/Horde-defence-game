@@ -70,19 +70,19 @@ fn slug(s: &str) -> String {
     o.trim_matches('-').chars().take(60).collect()
 }
 
-struct Wr(Vec<u8>);
+pub struct Wr(pub Vec<u8>);
 impl Wr {
-    fn u32(&mut self, v: u32) {
+    pub fn u32(&mut self, v: u32) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
-    fn f32(&mut self, v: f32) {
+    pub fn f32(&mut self, v: f32) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
-    fn str(&mut self, s: &str) {
+    pub fn str(&mut self, s: &str) {
         self.u32(s.len() as u32);
         self.0.extend_from_slice(s.as_bytes());
     }
-    fn pts(&mut self, p: &[Vec2]) {
+    pub fn pts(&mut self, p: &[Vec2]) {
         self.u32(p.len() as u32);
         for q in p {
             self.f32(q.x);
@@ -90,24 +90,24 @@ impl Wr {
         }
     }
 }
-struct Rd<'a>(&'a [u8], usize);
+pub struct Rd<'a>(pub &'a [u8], pub usize);
 impl Rd<'_> {
-    fn take(&mut self, n: usize) -> Option<&[u8]> {
+    pub fn take(&mut self, n: usize) -> Option<&[u8]> {
         let s = self.0.get(self.1..self.1 + n)?;
         self.1 += n;
         Some(s)
     }
-    fn u32(&mut self) -> Option<u32> {
+    pub fn u32(&mut self) -> Option<u32> {
         Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
-    fn f32(&mut self) -> Option<f32> {
+    pub fn f32(&mut self) -> Option<f32> {
         Some(f32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
-    fn str(&mut self) -> Option<String> {
+    pub fn str(&mut self) -> Option<String> {
         let n = self.u32()? as usize;
         String::from_utf8(self.take(n)?.to_vec()).ok()
     }
-    fn pts(&mut self) -> Option<Vec<Vec2>> {
+    pub fn pts(&mut self) -> Option<Vec<Vec2>> {
         let n = self.u32()? as usize;
         if n > 50_000_000 {
             return None;
@@ -118,7 +118,7 @@ impl Rd<'_> {
         }
         Some(v)
     }
-    fn list<T>(&mut self, mut f: impl FnMut(&mut Self) -> Option<T>) -> Option<Vec<T>> {
+    pub fn list<T>(&mut self, mut f: impl FnMut(&mut Self) -> Option<T>) -> Option<Vec<T>> {
         let n = self.u32()? as usize;
         let mut v = Vec::with_capacity(n.min(1_000_000));
         for _ in 0..n {
@@ -128,7 +128,7 @@ impl Rd<'_> {
     }
 }
 
-fn encode(query: &str, d: &Desc) -> Vec<u8> {
+pub fn encode(query: &str, d: &Desc) -> Vec<u8> {
     let mut w = Wr(MAGIC.to_vec());
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     w.u32((now >> 32) as u32);
@@ -184,7 +184,7 @@ fn header(b: &[u8]) -> Option<(u64, String, String, Rd<'_>)> {
     Some((when, query, name, r))
 }
 
-fn decode(b: &[u8]) -> Option<Desc> {
+pub fn decode(b: &[u8]) -> Option<Desc> {
     let (_, _, name, mut r) = header(b)?;
     let note = r.str()?;
     let mpc = r.f32()?;
