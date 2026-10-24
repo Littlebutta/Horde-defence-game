@@ -2145,6 +2145,12 @@ impl Game {
         }
     }
 
+    /// Replaces the city's civilians with `n` new ones (the campaign sizes them to the city).
+    pub fn set_civilians(&mut self, n: usize) {
+        self.civs.clear();
+        self.init_civilians(n);
+    }
+
     fn init_civilians(&mut self, n: usize) {
         // most people are holed up in groups (worth sending a rescue squad for), the rest wander alone
         let mut left = n;
