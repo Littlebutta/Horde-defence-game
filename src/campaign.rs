@@ -765,9 +765,9 @@ impl Pack {
 
 /// `PH_FETCH=<dir>`: downloads campaign cities from OpenStreetMap into `<dir>` as compressed maps
 /// for the `cities` release. Run by the GitHub workflow, not by players. `PH_FETCH_ONLY` names
-/// cities, `PH_FETCH_PART=k/n` takes every n-th city from the k-th (so n jobs split the pool) and
-/// `PH_FETCH_HAVE` lists files already in the release, which are skipped. Returns false if any city
-/// failed.
+/// cities, `PH_FETCH_HAVE` lists files already in the release, which are skipped, and
+/// `PH_FETCH_PART=k/n` takes every n-th of the rest from the k-th, so n jobs split the work.
+/// Returns false if any city failed.
 pub fn fetch_all(out: &Path) -> bool {
     let _ = std::fs::create_dir_all(out);
     let env = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
@@ -778,17 +778,17 @@ pub fn fetch_all(out: &Path) -> bool {
         Some((k.trim().parse::<usize>().ok()?, n.trim().parse::<usize>().ok()?.max(1)))
     });
     let mut ok = true;
-    for (i, c) in POOL.iter().enumerate() {
+    // the cities still to fetch, then this job's share of them, so the jobs split the work evenly
+    let todo: Vec<&City> = POOL
+        .iter()
+        .filter(|c| match &only {
+            Some(o) => o.split(',').any(|x| x.trim().eq_ignore_ascii_case(c.name)),
+            None => !have.split_whitespace().any(|h| h == format!("{}.z", file_name(c))),
+        })
+        .collect();
+    for (i, c) in todo.into_iter().enumerate() {
         if part.is_some_and(|(k, n)| i % n != k % n) {
             continue;
-        }
-        match &only {
-            Some(o) if !o.split(',').any(|x| x.trim().eq_ignore_ascii_case(c.name)) => continue,
-            None if have.split_whitespace().any(|h| h == format!("{}.z", file_name(c))) => {
-                eprintln!("== {} is already in the pack", c.name);
-                continue;
-            }
-            _ => {}
         }
         let mut done = false;
         for attempt in 1..=3 {

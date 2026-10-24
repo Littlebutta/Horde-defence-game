@@ -60,6 +60,8 @@ jobs:
       - name: Download the cities
         id: fetch
         continue-on-error: true
+        # stops in time for the maps that did download to be published
+        timeout-minutes: 150
         env:
           PH_FETCH: cities
           PH_FETCH_ONLY: ${{ github.event.inputs.only }}
