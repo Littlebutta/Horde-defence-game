@@ -1,0 +1,24 @@
+[package]
+name = "pixel-horde"
+version = "0.4.0"
+edition = "2021"
+description = "Horde defence where every enemy is a single pixel"
+
+[[bin]]
+name = "PixelHorde"
+path = "src/main.rs"
+
+[dependencies]
+macroquad = "0.4"
+rayon = "1"
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
+earcutr = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 2

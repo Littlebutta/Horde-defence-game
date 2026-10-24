@@ -1,0 +1,174 @@
+//! Flow fields (bucketed Dijkstra / Dial's algorithm), computed on a background thread so
+//! path updates never stall a frame.
+//!
+//! * `Mode::Hq`: the field every horde follows to the HQ. City buildings and player structures are
+//!   passable at a high cost, so the horde routes around when it can and chews through when it can't.
+//! * `Mode::Open`: open ground only, from many sources, cut off at a maximum cost (what a unit "sees").
+//!
+//! Diagonal steps between two blocked cells are refused, so a wall line with touching corners seals a street.
+
+use crate::world::*;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+
+pub const INF: u32 = u32::MAX;
+pub const U16: u16 = u16::MAX;
+pub const DX: [i32; 8] = [1, -1, 0, 0, 1, 1, -1, -1];
+pub const DY: [i32; 8] = [0, 0, 1, -1, 1, -1, 1, -1];
+const CS: [u32; 8] = [10, 10, 10, 10, 14, 14, 14, 14];
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Mode {
+    Hq,
+    Open,
+}
+
+pub fn dial(obj: &[i32], src: &[u32], mode: Mode, max: u32) -> Vec<u32> {
+    let mut d = vec![INF; N];
+    const B: usize = 2048;
+    let mut bk: Vec<Vec<u32>> = (0..B).map(|_| Vec::new()).collect();
+    let mut pending = 0usize;
+    for &c in src {
+        let c = c as usize;
+        if c < N && d[c] != 0 {
+            d[c] = 0;
+            bk[0].push(c as u32);
+            pending += 1;
+        }
+    }
+    let mut cur: u32 = 0;
+    while pending > 0 && cur <= max {
+        let bi = cur as usize % B;
+        while let Some(c) = bk[bi].pop() {
+            pending -= 1;
+            let c = c as usize;
+            if d[c] != cur {
+                continue;
+            }
+            let cx = (c % W) as i32;
+            let cy = (c / W) as i32;
+            for k in 0..8 {
+                let nx = cx + DX[k];
+                let ny = cy + DY[k];
+                if nx < 0 || ny < 0 || nx >= W as i32 || ny >= H as i32 {
+                    continue;
+                }
+                let nc = ny as usize * W + nx as usize;
+                let o = obj[nc];
+                if o == SOLID {
+                    continue;
+                }
+                let mut extra = 0;
+                if o != FREE {
+                    if mode != Mode::Hq {
+                        continue;
+                    }
+                    extra = if o >= 0 { 400 } else { 1500 };
+                }
+                if k >= 4
+                    && (obj[cy as usize * W + nx as usize] != FREE
+                        || obj[ny as usize * W + cx as usize] != FREE)
+                {
+                    continue;
+                }
+                let nd = cur + CS[k] + extra;
+                if nd < d[nc] {
+                    d[nc] = nd;
+                    bk[nd as usize % B].push(nc as u32);
+                    pending += 1;
+                }
+            }
+        }
+        cur += 1;
+    }
+    d
+}
+
+pub enum Job {
+    Hq {
+        obj: Arc<Vec<i32>>,
+        src: Vec<u32>,
+    },
+    Hunt {
+        obj: Arc<Vec<i32>>,
+        src: Vec<u32>,
+        max: u32,
+    },
+    Target {
+        id: u64,
+        obj: Arc<Vec<i32>>,
+        src: u32,
+    },
+    /// open-ground field from several cells (pads, portals, revenge targets, civilians to collect)
+    Multi {
+        id: u64,
+        obj: Arc<Vec<i32>>,
+        src: Vec<u32>,
+        max: u32,
+    },
+}
+pub enum Done {
+    Hq {
+        obj: Arc<Vec<i32>>,
+        d: Arc<Vec<u32>>,
+    },
+    Hunt(Arc<Vec<u16>>),
+    Target {
+        id: u64,
+        d: Arc<Vec<u32>>,
+    },
+    Multi {
+        id: u64,
+        d: Arc<Vec<u32>>,
+    },
+}
+
+pub struct FieldWorker {
+    tx: Sender<Job>,
+    pub rx: Receiver<Done>,
+    pub busy: usize,
+}
+
+impl FieldWorker {
+    pub fn new() -> Self {
+        let (tx, jrx) = channel::<Job>();
+        let (dtx, rx) = channel::<Done>();
+        std::thread::spawn(move || {
+            while let Ok(job) = jrx.recv() {
+                let out = match job {
+                    Job::Hq { obj, src } => {
+                        let d = dial(&obj, &src, Mode::Hq, INF - 1);
+                        Done::Hq {
+                            obj,
+                            d: Arc::new(d),
+                        }
+                    }
+                    Job::Hunt { obj, src, max } => {
+                        let d = dial(&obj, &src, Mode::Open, max);
+                        Done::Hunt(Arc::new(
+                            d.iter()
+                                .map(|&v| if v > max { U16 } else { v as u16 })
+                                .collect(),
+                        ))
+                    }
+                    Job::Target { id, obj, src } => Done::Target {
+                        id,
+                        d: Arc::new(dial(&obj, &[src], Mode::Open, INF - 1)),
+                    },
+                    Job::Multi { id, obj, src, max } => Done::Multi {
+                        id,
+                        d: Arc::new(dial(&obj, &src, Mode::Open, max)),
+                    },
+                };
+                if dtx.send(out).is_err() {
+                    break;
+                }
+            }
+        });
+        FieldWorker { tx, rx, busy: 0 }
+    }
+    pub fn submit(&mut self, j: Job) {
+        self.busy += 1;
+        let _ = self.tx.send(j);
+    }
+}

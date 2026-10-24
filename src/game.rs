@@ -1,0 +1,2851 @@
+//! Everything that runs on the main thread each tick: structures, turrets, economy, civilians,
+//! rescue squads, defenders, abilities, research and the faction directors.
+
+use crate::defs::*;
+use crate::fields::{Done, FieldWorker, Job, DX, DY, INF};
+use crate::swarm::{Behaviour, RevIn, StepIn, Swarm, DMG_SCALE, F_FLY};
+use crate::world::*;
+use macroquad::prelude::{vec2, Vec2};
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::Arc;
+
+pub const DT: f32 = 0.05;
+/// Civilians one extraction flight carries, and how long a pad needs before the next flight.
+pub const PAD_SEATS: u32 = 16;
+pub const PAD_COOLDOWN: f32 = 30.0;
+
+pub struct Structure {
+    pub t: S,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub hp: f32,
+    pub max: f32,
+    pub cd: f32,
+    pub roof: i32,
+    pub dead: bool,
+    pub pending: bool,
+    pub last_fire: f32,
+    pub aim: f32,
+}
+impl Structure {
+    pub fn center(&self) -> Vec2 {
+        vec2(
+            self.x as f32 + self.w as f32 / 2.0,
+            self.y as f32 + self.h as f32 / 2.0,
+        )
+    }
+}
+
+#[derive(Clone)]
+pub struct Member {
+    pub p: Vec2,
+    pub hp: f32,
+    pub cd: f32,
+    pub alive: bool,
+    pub home: bool,
+    /// rescue troops: civilians this soldier is escorting
+    pub carry: u8,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum GState {
+    Wait,
+    Move,
+    Hold,
+    Garrison,
+}
+pub struct Group {
+    pub kind: U,
+    pub m: Vec<Member>,
+    pub state: GState,
+    pub tf: Option<Arc<Vec<u32>>>,
+    pub b: i32,
+    pub target: Vec2,
+    pub dead: bool,
+    pub job: u64,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum QState {
+    Wait,
+    Out,
+    Gather,
+    Return,
+}
+pub struct Squad {
+    pub state: QState,
+    pub target: Vec2,
+    pub tf: Option<Arc<Vec<u32>>>,
+    pub m: Vec<Member>,
+    pub t: f32,
+    pub done: bool,
+    pub wiped: bool,
+    pub job: u64,
+    /// field towards the civilians nobody has reached yet
+    pub gather: Option<Arc<Vec<u32>>>,
+    pub gjob: u64,
+    pub gt: f32,
+    pub found: u32,
+}
+
+pub const C_ROAM: u8 = 0;
+pub const C_ESCORT: u8 = 1;
+pub const C_CAPTURED: u8 = 5;
+pub const C_DEAD: u8 = 9;
+pub const C_TO_PAD: u8 = 11;
+pub const C_AT_PAD: u8 = 12;
+pub const C_GONE: u8 = 13;
+
+pub struct Civ {
+    pub p: Vec2,
+    pub st: u8,
+    pub sq: usize,
+    /// escorting soldier (rescues) or waiting slot (pads)
+    pub esc: usize,
+    pub pad: usize,
+    pub hd: f32,
+    pub flee_t: f32,
+}
+
+/// An alien hive: spawns bugs, blocks building nearby, grows and infects city buildings.
+pub struct Hive {
+    pub p: Vec2,
+    pub r: f32,
+    pub hp: f32,
+    pub max: f32,
+    pub spawn_t: f32,
+    pub grow_t: f32,
+    pub infected: Vec<usize>,
+    pub dead: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum RevKey {
+    Struct(usize),
+    Group(usize),
+    Squad(usize),
+}
+/// Something that killed a zombie and is now being swarmed.
+pub struct Rev {
+    pub key: RevKey,
+    pub pos: Vec2,
+    pub alive: bool,
+    pub field: Option<Arc<Vec<u32>>>,
+    pub job: u64,
+    pub refresh: f32,
+    pub hot: f32,
+}
+
+pub enum Strike {
+    Air {
+        from: Vec2,
+        dir: Vec2,
+        pos: f32,
+        len: f32,
+        bombs: Vec<(Vec2, f32, bool)>,
+        line: (Vec2, Vec2),
+    },
+    Icbm {
+        from: Vec2,
+        to: Vec2,
+        t: f32,
+        dur: f32,
+        nuke: bool,
+    },
+}
+pub struct Gunship {
+    pub center: Vec2,
+    pub p: Vec2,
+    pub t: f32,
+    pub ang: f32,
+    pub cd: f32,
+    pub phase: u8, // 0 going out, 1 circling, 2 going home
+}
+pub enum HeliKind {
+    Deliver(usize),
+    Extract,
+}
+pub struct Heli {
+    pub kind: HeliKind,
+    pub from: Vec2,
+    pub to: Vec2,
+    pub t: f32,
+    pub dur: f32,
+}
+pub struct Tracer {
+    pub a: Vec2,
+    pub b: Vec2,
+    pub t: f32,
+    pub kind: u8,
+}
+pub struct Boom {
+    pub p: Vec2,
+    pub r: f32,
+    pub t: f32,
+    pub life: f32,
+    pub kind: u8,
+}
+pub struct Portal {
+    pub p: Vec2,
+    pub t: f32,
+    pub taken: u32,
+}
+struct SpawnQ {
+    at: (f32, f32),
+    left: usize,
+    rate: f32,
+    fl: u8,
+    aux: f32,
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct Research {
+    pub rescue: bool,
+    pub air: bool,
+    pub nuke: bool,
+    pub busy: Option<(A, f32)>,
+}
+
+pub struct Game {
+    pub world: World,
+    pub fac: usize,
+    pub mult: f32,
+    pub swarm: Swarm,
+    pub obj: Arc<Vec<i32>>,
+    pub hq_dist: Arc<Vec<u32>>,
+    pub hunt: Option<Arc<Vec<u16>>>,
+    fw_hq: FieldWorker,
+    fw_hunt: FieldWorker,
+    fw_aux: FieldWorker,
+    pub revs: Vec<Rev>,
+    lock: Vec<u16>,
+    lock_cells: Vec<usize>,
+    low: Vec<bool>,
+    pub hives: Vec<Hive>,
+    hive_t: f32,
+    pub pad_field: Option<Arc<Vec<u32>>>,
+    pad_job: u64,
+    pad_dirty: bool,
+    pub portal_field: Option<Arc<Vec<u32>>>,
+    portal_job: u64,
+    portal_ft: f32,
+    pub obj_dirty: bool,
+    obj_timer: f32,
+    hunt_timer: f32,
+    job_seq: u64,
+    pub structs: Vec<Structure>,
+    pub occ: Vec<i32>,
+    pub hq_idx: usize,
+    pub base_zone: Vec<u8>,
+    pub groups: Vec<Group>,
+    pub squads: Vec<Squad>,
+    pub civs: Vec<Civ>,
+    pub strikes: Vec<Strike>,
+    pub gunships: Vec<Gunship>,
+    pub helis: Vec<Heli>,
+    pub tracers: Vec<Tracer>,
+    pub booms: Vec<Boom>,
+    pub portals: Vec<Portal>,
+    spawnq: Vec<SpawnQ>,
+    conv: Vec<Vec2>,
+    pub scrap: f32,
+    pub ammo: f32,
+    pub score: f32,
+    pub kills: u64,
+    pub rescued: u32,
+    pub waiting: u32,
+    pub extracted: u32,
+    pub civ_lost: u32,
+    pub time: f32,
+    pub cds: [f32; 4],
+    pub research: Research,
+    pub rush: bool,
+    pub rush_t: f32,
+    pub rush_left: f32,
+    pub rushes: u32,
+    pub rush_forever: bool,
+    pub out_t: f32,
+    outbreaks: u32,
+    pub drop_t: f32,
+    pub portal_t: f32,
+    portals_opened: u32,
+    pub over: bool,
+    pub income_mult: f32,
+    pub banner: (String, f32),
+    pub dirty_buildings: Vec<usize>,
+    pub zone_dirty: bool,
+    pub struct_dirty: bool,
+    pub sim_ms: f32,
+    pub rng: Rng,
+    pub tilt: f32,
+    sd: Vec<AtomicU32>,
+    bd: Vec<AtomicU32>,
+}
+
+fn ability_index(a: A) -> usize {
+    match a {
+        A::Rescue => 0,
+        A::Air => 1,
+        A::Gunship => 2,
+        A::Icbm => 3,
+    }
+}
+
+impl Game {
+    pub fn new(desc: Desc, fac: usize, mult: f32, seed: u64) -> Game {
+        let world = World::build(desc);
+        let base_zone = world.zone.clone();
+        let nb = world.buildings.len();
+        let mut g = Game {
+            world,
+            fac,
+            mult,
+            swarm: Swarm::new(),
+            obj: Arc::new(vec![FREE; N]),
+            hq_dist: Arc::new(vec![INF; N]),
+            hunt: None,
+            fw_hq: FieldWorker::new(),
+            fw_hunt: FieldWorker::new(),
+            fw_aux: FieldWorker::new(),
+            revs: Vec::new(),
+            lock: vec![0; CW * CH],
+            lock_cells: Vec::new(),
+            low: Vec::new(),
+            hives: Vec::new(),
+            hive_t: 75.0,
+            pad_field: None,
+            pad_job: 0,
+            pad_dirty: true,
+            portal_field: None,
+            portal_job: 0,
+            portal_ft: 0.0,
+            obj_dirty: true,
+            obj_timer: 0.0,
+            hunt_timer: 0.0,
+            job_seq: 1,
+            structs: Vec::new(),
+            occ: vec![-1; N],
+            hq_idx: 0,
+            base_zone,
+            groups: Vec::new(),
+            squads: Vec::new(),
+            civs: Vec::new(),
+            strikes: Vec::new(),
+            gunships: Vec::new(),
+            helis: Vec::new(),
+            tracers: Vec::new(),
+            booms: Vec::new(),
+            portals: Vec::new(),
+            spawnq: Vec::new(),
+            conv: Vec::new(),
+            scrap: 700.0,
+            ammo: 400.0,
+            score: 0.0,
+            kills: 0,
+            rescued: 0,
+            waiting: 0,
+            extracted: 0,
+            civ_lost: 0,
+            time: 0.0,
+            cds: [0.0; 4],
+            research: Research::default(),
+            rush: false,
+            rush_t: 150.0,
+            rush_left: 0.0,
+            rushes: 0,
+            rush_forever: false,
+            out_t: 70.0,
+            outbreaks: 0,
+            drop_t: 2.0,
+            portal_t: 20.0,
+            portals_opened: 0,
+            over: false,
+            income_mult: 1.0,
+            banner: (String::new(), 0.0),
+            dirty_buildings: Vec::new(),
+            zone_dirty: true,
+            struct_dirty: true,
+            sim_ms: 0.0,
+            rng: Rng::new(seed),
+            tilt: 0.85,
+            sd: Vec::new(),
+            bd: (0..nb).map(|_| AtomicU32::new(0)).collect(),
+        };
+        let hq = g.world.hq;
+        g.hq_idx = g.add_struct(S::Hq, hq.x as i32 - 7, hq.y as i32 - 7, -1);
+        // starter base
+        let (x0, y0) = (hq.x as i32, hq.y as i32);
+        for (t, x, y) in [
+            (S::Extractor, x0 - 26, y0 - 3),
+            (S::Plant, x0 + 19, y0 - 3),
+            (S::Gun, x0 - 2, y0 - 18),
+            (S::Gun, x0 - 2, y0 + 13),
+            (S::Pad, x0 - 5, y0 + 30),
+        ] {
+            if g.can_place(t, x, y) {
+                g.add_struct(t, x, y, -1);
+            }
+        }
+        g.build_perimeter_wall();
+        // blocking first field so the opening spawns have somewhere to go
+        let obj = Arc::new(g.build_obj());
+        let src = g.hq_src();
+        let d = crate::fields::dial(&obj, &src, crate::fields::Mode::Hq, INF - 1);
+        g.obj = obj;
+        g.hq_dist = Arc::new(d);
+        g.obj_dirty = false;
+        let ncivs = (9000.0 * (g.world.buildings.len() as f32).sqrt() / 70.0).clamp(3000.0, 14000.0)
+            as usize;
+        g.init_civilians(ncivs);
+        if fac == 0 {
+            for _ in 0..6 {
+                if let Some(p) = g.random_cell(3000) {
+                    g.queue(p, (6.0 * mult).max(3.0), 1.0);
+                }
+            }
+        }
+        g
+    }
+
+    pub fn faction(&self) -> &'static Faction {
+        &FACTIONS[self.fac]
+    }
+    pub fn show(&mut self, s: impl Into<String>, t: f32) {
+        self.banner = (s.into(), t);
+    }
+
+    // ----------------------------------------------------------------------------- grids
+
+    fn hq_src(&self) -> Vec<u32> {
+        let s = &self.structs[self.hq_idx];
+        let mut v = Vec::new();
+        for y in s.y..s.y + s.h {
+            for x in s.x..s.x + s.w {
+                v.push((y as usize * W + x as usize) as u32);
+            }
+        }
+        v
+    }
+
+    pub fn build_obj(&self) -> Vec<i32> {
+        let w = &self.world;
+        let mut o: Vec<i32> = (0..N)
+            .map(|i| {
+                let t = w.terrain[i];
+                if t == T_WATER || t == T_LAND {
+                    SOLID
+                } else if w.bid[i] >= 0 {
+                    -(w.bid[i] + 2)
+                } else {
+                    FREE
+                }
+            })
+            .collect();
+        for (i, s) in self.structs.iter().enumerate() {
+            if s.dead || s.roof >= 0 || s.pending {
+                continue;
+            }
+            for y in s.y..s.y + s.h {
+                for x in s.x..s.x + s.w {
+                    o[y as usize * W + x as usize] = i as i32;
+                }
+            }
+        }
+        o
+    }
+
+    fn pump_fields(&mut self) {
+        while let Ok(d) = self.fw_hq.rx.try_recv() {
+            self.fw_hq.busy -= 1;
+            match d {
+                Done::Hq { obj, d } => {
+                    self.obj = obj;
+                    self.hq_dist = d;
+                    self.pad_dirty = true;
+                }
+                Done::Target { id, d } => {
+                    for g in &mut self.groups {
+                        if g.job == id {
+                            g.tf = Some(d.clone());
+                            g.state = GState::Move;
+                        }
+                    }
+                    for q in &mut self.squads {
+                        if q.job == id {
+                            q.tf = Some(d.clone());
+                            q.state = QState::Out;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        while let Ok(d) = self.fw_aux.rx.try_recv() {
+            self.fw_aux.busy -= 1;
+            if let Done::Multi { id, d } = d {
+                if id == self.pad_job {
+                    self.pad_field = Some(d);
+                } else if id == self.portal_job {
+                    self.portal_field = Some(d);
+                } else if let Some(r) = self.revs.iter_mut().find(|r| r.job == id) {
+                    r.field = Some(d);
+                } else if let Some(q) = self.squads.iter_mut().find(|q| q.gjob == id) {
+                    q.gather = Some(d);
+                }
+            }
+        }
+        // extraction pads: where rescued civilians walk once they are inside the base
+        if self.pad_dirty && self.fw_aux.busy < 3 {
+            self.pad_dirty = false;
+            let src = self.ring_cells(S::Pad);
+            if src.is_empty() {
+                self.pad_field = None;
+            } else {
+                self.pad_job = self.next_job();
+                self.fw_aux.submit(Job::Multi {
+                    id: self.pad_job,
+                    obj: self.obj.clone(),
+                    src,
+                    max: 9000,
+                });
+            }
+        }
+        // orc portals: where captured civilians are dragged
+        self.portal_ft -= DT;
+        if self.fac == 2 && self.portal_ft <= 0.0 && self.fw_aux.busy < 3 {
+            self.portal_ft = 3.0;
+            let mut src = Vec::new();
+            for p in &self.portals {
+                if let Some(c) = self.nearest_walkable(p.p, 12) {
+                    src.push(c as u32);
+                }
+            }
+            if src.is_empty() {
+                self.portal_field = None;
+            } else {
+                self.portal_job = self.next_job();
+                self.fw_aux.submit(Job::Multi {
+                    id: self.portal_job,
+                    obj: self.obj.clone(),
+                    src,
+                    max: 30000,
+                });
+            }
+        }
+        while let Ok(d) = self.fw_hunt.rx.try_recv() {
+            self.fw_hunt.busy -= 1;
+            if let Done::Hunt(h) = d {
+                self.hunt = Some(h);
+            }
+        }
+        self.obj_timer -= DT;
+        if self.obj_dirty && self.obj_timer <= 0.0 && self.fw_hq.busy == 0 {
+            self.obj_dirty = false;
+            self.obj_timer = 0.3;
+            let obj = Arc::new(self.build_obj());
+            let src = self.hq_src();
+            self.fw_hq.submit(Job::Hq { obj, src });
+        }
+        self.hunt_timer -= DT;
+        if self.hunt_timer <= 0.0 && self.fw_hunt.busy == 0 {
+            self.hunt_timer = 2.0;
+            let f = self.faction();
+            let mut src: Vec<u32> = Vec::new();
+            // hordes go after turrets that have been shooting them; a rooftop turret makes them attack the building
+            for s in &self.structs {
+                if s.dead || s.pending || !def(s.t).turret || self.time - s.last_fire > 3.0 {
+                    continue;
+                }
+                if s.roof >= 0 {
+                    let b = &self.world.buildings[s.roof as usize];
+                    for y in b.y0.max(0.0) as usize..=(b.y1 as usize).min(H - 1) {
+                        for x in b.x0.max(0.0) as usize..=(b.x1 as usize).min(W - 1) {
+                            if self.world.bid[y * W + x] == s.roof {
+                                src.push((y * W + x) as u32);
+                            }
+                        }
+                    }
+                } else {
+                    for y in s.y..s.y + s.h {
+                        for x in s.x..s.x + s.w {
+                            src.push((y as usize * W + x as usize) as u32);
+                        }
+                    }
+                }
+            }
+            if f.stats.mode != Behaviour::Alien {
+                for c in &self.civs {
+                    if c.st < 9 {
+                        src.push((c.p.y as usize * W + c.p.x as usize) as u32);
+                    }
+                }
+                for s in &self.structs {
+                    if s.dead || s.pending || s.roof >= 0 {
+                        continue;
+                    }
+                    for y in s.y..s.y + s.h {
+                        for x in s.x..s.x + s.w {
+                            src.push((y as usize * W + x as usize) as u32);
+                        }
+                    }
+                }
+                for q in &self.squads {
+                    for m in &q.m {
+                        if m.alive && !m.home {
+                            src.push((m.p.y as usize * W + m.p.x as usize) as u32);
+                        }
+                    }
+                }
+                for g in &self.groups {
+                    if g.dead || g.state == GState::Garrison {
+                        continue;
+                    }
+                    for m in &g.m {
+                        if m.alive {
+                            src.push((m.p.y as usize * W + m.p.x as usize) as u32);
+                        }
+                    }
+                }
+            }
+            if src.is_empty() {
+                self.hunt = None;
+            } else {
+                self.fw_hunt.submit(Job::Hunt {
+                    obj: self.obj.clone(),
+                    src,
+                    max: f.sight,
+                });
+            }
+        }
+    }
+
+    fn next_job(&mut self) -> u64 {
+        let id = self.job_seq;
+        self.job_seq += 1;
+        id
+    }
+
+    /// Open cells just outside every live structure of one type.
+    fn ring_cells(&self, t: S) -> Vec<u32> {
+        let mut v = Vec::new();
+        for s in &self.structs {
+            if s.dead || s.pending || s.t != t {
+                continue;
+            }
+            for y in s.y - 1..=s.y + s.h {
+                for x in s.x - 1..=s.x + s.w {
+                    if x < 0 || y < 0 || x >= W as i32 || y >= H as i32 {
+                        continue;
+                    }
+                    let c = y as usize * W + x as usize;
+                    if self.obj[c] == FREE {
+                        v.push(c as u32);
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    fn target_job(&mut self, tc: usize) -> u64 {
+        let id = self.next_job();
+        self.fw_hq.submit(Job::Target {
+            id,
+            obj: self.obj.clone(),
+            src: tc as u32,
+        });
+        id
+    }
+
+    // ----------------------------------------------------------------------------- structures
+
+    pub fn count(&self, t: S) -> usize {
+        self.structs.iter().filter(|s| !s.dead && s.t == t).count()
+    }
+    pub fn has(&self, t: S) -> bool {
+        self.structs
+            .iter()
+            .any(|s| !s.dead && !s.pending && s.t == t)
+    }
+
+    /// Price of a structure at a spot: extractors get dearer the more you own, turrets get dearer
+    /// the further they are from the HQ.
+    pub fn cost_at(&self, t: S, at: Vec2) -> f32 {
+        let d = def(t);
+        let mut c = d.cost;
+        if t == S::Extractor {
+            c *= 1.25f32.powi(self.count(S::Extractor) as i32);
+        }
+        if d.turret {
+            let dist = at.distance(self.world.hq);
+            c *= 1.0 + (dist - 100.0).max(0.0) / 350.0;
+        }
+        c.round()
+    }
+
+    pub fn can_place(&self, t: S, x: i32, y: i32) -> bool {
+        let d = def(t);
+        if x < 1 || y < 1 || x + d.w >= W as i32 || y + d.h >= H as i32 {
+            return false;
+        }
+        for yy in y..y + d.h {
+            for xx in x..x + d.w {
+                let i = yy as usize * W + xx as usize;
+                if self.occ[i] >= 0 || self.world.terrain[i] == T_WATER || self.world.bid[i] >= 0 {
+                    return false;
+                }
+            }
+        }
+        let c = vec2(x as f32 + d.w as f32 / 2.0, y as f32 + d.h as f32 / 2.0);
+        if self.world.irradiated_at(c) || self.hive_blocks(c) {
+            return false;
+        }
+        if d.zone && !self.world.in_zone(c) {
+            return false;
+        }
+        true
+    }
+
+    /// The building whose drawn roof is under the cursor (roofs are drawn shifted up by their height).
+    pub fn roof_at(&self, w: Vec2) -> Option<(usize, Vec2)> {
+        let mut best = None;
+        let mut by = f32::MIN;
+        let max_h = if self.tilt > 0.0 { 90.0 } else { 0.0 };
+        let mut k = 0.0;
+        while k <= max_h {
+            let p = vec2(w.x - 0.35 * k * self.tilt, w.y + k * self.tilt);
+            k += 0.5;
+            if p.x < 0.0 || p.y < 0.0 || p.x >= W as f32 || p.y >= H as f32 {
+                continue;
+            }
+            let b = self.world.bid[p.y as usize * W + p.x as usize];
+            if b < 0 {
+                continue;
+            }
+            let bb = &self.world.buildings[b as usize];
+            if self.tilt > 0.0 && (bb.h - (k - 0.5)).abs() > 0.6 {
+                continue;
+            }
+            if p.y > by {
+                by = p.y;
+                best = Some((b as usize, p));
+            }
+        }
+        best
+    }
+    pub fn roof_slots(&self, b: usize) -> usize {
+        ((self.world.buildings[b].cells / 70) as usize).clamp(1, 6)
+    }
+    pub fn can_place_roof(&self, b: usize, p: Vec2) -> bool {
+        let bb = &self.world.buildings[b];
+        if !bb.alive || self.world.irradiated_at(p) || self.hive_blocks(p) {
+            return false;
+        }
+        let mut n = 0;
+        for s in &self.structs {
+            if !s.dead && s.roof == b as i32 {
+                n += 1;
+                if s.center().distance(p) < 5.0 {
+                    return false;
+                }
+            }
+        }
+        n < self.roof_slots(b)
+    }
+
+    pub fn add_struct(&mut self, t: S, x: i32, y: i32, roof: i32) -> usize {
+        let d = def(t);
+        let idx = self.structs.len();
+        let mut s = Structure {
+            t,
+            x,
+            y,
+            w: d.w,
+            h: d.h,
+            hp: d.hp,
+            max: d.hp,
+            cd: 0.0,
+            roof,
+            dead: false,
+            pending: false,
+            last_fire: -100.0,
+            aim: -1.2,
+        };
+        if roof < 0 {
+            for yy in y..y + d.h {
+                for xx in x..x + d.w {
+                    self.occ[yy as usize * W + xx as usize] = idx as i32;
+                }
+            }
+        }
+        let c = s.center();
+        if d.turret && !self.world.in_zone(c) {
+            s.pending = true;
+            let dist = c.distance(self.world.hq);
+            self.helis.push(Heli {
+                kind: HeliKind::Deliver(idx),
+                from: self.world.hq,
+                to: c,
+                t: 0.0,
+                dur: 1.5 + dist / 45.0,
+            });
+        }
+        if t == S::Outpost {
+            self.world.add_outpost(c);
+            self.zone_dirty = true;
+        }
+        if roof < 0 && !s.pending {
+            self.obj_dirty = true;
+            self.struct_dirty = true;
+        }
+        if t == S::Pad {
+            self.pad_dirty = true;
+        }
+        self.structs.push(s);
+        self.sd.push(AtomicU32::new(0));
+        self.low.push(t == S::Wall);
+        idx
+    }
+
+    /// Buys and places a structure on the ground. Returns false if it can't go there or you can't afford it.
+    pub fn place(&mut self, t: S, x: i32, y: i32) -> bool {
+        let d = def(t);
+        let c = vec2(x as f32 + d.w as f32 / 2.0, y as f32 + d.h as f32 / 2.0);
+        let cost = self.cost_at(t, c);
+        if self.scrap < cost || !self.can_place(t, x, y) {
+            return false;
+        }
+        self.scrap -= cost;
+        self.add_struct(t, x, y, -1);
+        true
+    }
+    /// Buys and places a turret on a rooftop.
+    pub fn place_roof(&mut self, t: S, b: usize, p: Vec2) -> bool {
+        let d = def(t);
+        let cost = self.cost_at(t, p);
+        if !d.turret || self.scrap < cost || !self.can_place_roof(b, p) {
+            return false;
+        }
+        self.scrap -= cost;
+        self.add_struct(
+            t,
+            (p.x - d.w as f32 / 2.0) as i32,
+            (p.y - d.h as f32 / 2.0) as i32,
+            b as i32,
+        );
+        true
+    }
+    /// Sells the structure under a point for half its base price.
+    pub fn sell_at(&mut self, p: Vec2) -> bool {
+        let hit = self.structs.iter().enumerate().rev().find(|(_, s)| {
+            if s.dead || s.t == S::Hq {
+                return false;
+            }
+            let off = if s.roof >= 0 { self.roof_off(s.roof as usize) } else { Vec2::ZERO };
+            let q = p - off;
+            q.x >= s.x as f32 && q.y >= s.y as f32 && q.x < (s.x + s.w) as f32 && q.y < (s.y + s.h) as f32
+        });
+        let Some((i, s)) = hit else { return false };
+        self.scrap += def(s.t).cost * 0.5;
+        self.kill_struct(i);
+        true
+    }
+
+    pub fn hostiles(&self) -> usize {
+        self.swarm.len()
+    }
+
+    pub fn kill_struct(&mut self, i: usize) {
+        if self.structs[i].dead {
+            return;
+        }
+        self.structs[i].dead = true;
+        let s = &self.structs[i];
+        if s.roof < 0 {
+            for yy in s.y..s.y + s.h {
+                for xx in s.x..s.x + s.w {
+                    let c = yy as usize * W + xx as usize;
+                    if self.occ[c] == i as i32 {
+                        self.occ[c] = -1;
+                    }
+                }
+            }
+            self.obj_dirty = true;
+            self.struct_dirty = true;
+        }
+        let t = s.t;
+        if t == S::Outpost {
+            self.rebuild_zone();
+        }
+        if t == S::Pad {
+            self.pad_dirty = true;
+        }
+        if t == S::Hq {
+            self.over = true;
+        }
+    }
+
+    fn rebuild_zone(&mut self) {
+        self.world.zone = self.base_zone.clone();
+        let outposts: Vec<Vec2> = self
+            .structs
+            .iter()
+            .filter(|s| !s.dead && s.t == S::Outpost)
+            .map(|s| s.center())
+            .collect();
+        for c in outposts {
+            self.world.add_outpost(c);
+        }
+        self.zone_dirty = true;
+    }
+
+    /// Walls along the edge of the airport wherever the horde could walk in, leaving the roads open.
+    fn build_perimeter_wall(&mut self) {
+        let mut edge = vec![false; N];
+        let w = &self.world;
+        let walk = |c: usize| World::walkable_terrain(w.terrain[c]) && w.bid[c] < 0;
+        for y in 3..H - 3 {
+            for x in 3..W - 3 {
+                let c = y * W + x;
+                if w.zone[c] != 1 || !walk(c) || w.terrain[c] == T_ROAD {
+                    continue;
+                }
+                // the fence runs along the whole edge of the base zone
+                let mut outside = false;
+                'o: for oy in -1i32..=1 {
+                    for ox in -1i32..=1 {
+                        let nc = (y as i32 + oy) as usize * W + (x as i32 + ox) as usize;
+                        if w.zone[nc] != 1 {
+                            outside = true;
+                            break 'o;
+                        }
+                    }
+                }
+                edge[c] = true && outside;
+            }
+        }
+        let mut placed = vec![false; (W / 3) * (H / 3)];
+        for y in 0..H {
+            for x in 0..W {
+                if !edge[y * W + x] {
+                    continue;
+                }
+                let (gx, gy) = (x / 3, y / 3);
+                if placed[gy * (W / 3) + gx] {
+                    continue;
+                }
+                placed[gy * (W / 3) + gx] = true;
+                let (wx, wy) = (gx as i32 * 3, gy as i32 * 3);
+                let mut road = false;
+                for yy in wy - 1..wy + 4 {
+                    for xx in wx - 1..wx + 4 {
+                        if self.world.terrain[yy as usize * W + xx as usize] == T_ROAD {
+                            road = true;
+                        }
+                    }
+                }
+                if !road && self.can_place(S::Wall, wx, wy) {
+                    self.add_struct(S::Wall, wx, wy, -1);
+                }
+            }
+        }
+    }
+
+    pub fn damage_buildings(&mut self, at: Vec2, r: f32, per_cell: f32) {
+        if per_cell <= 0.0 {
+            return;
+        }
+        let mut hit: std::collections::HashMap<i32, f32> = std::collections::HashMap::new();
+        let bid = &self.world.bid;
+        fill_disc(at, r, |c| {
+            let b = bid[c];
+            if b >= 0 {
+                *hit.entry(b).or_insert(0.0) += per_cell;
+            }
+        });
+        for (b, d) in hit {
+            let bb = &mut self.world.buildings[b as usize];
+            if !bb.alive {
+                continue;
+            }
+            bb.hp -= d;
+            if bb.hp <= 0.0 {
+                self.destroy_building(b as usize);
+            }
+        }
+    }
+
+    pub fn destroy_building(&mut self, b: usize) {
+        let bb = &mut self.world.buildings[b];
+        if !bb.alive {
+            return;
+        }
+        bb.alive = false;
+        let (x0, y0, x1, y1) = (
+            bb.x0.max(0.0) as usize,
+            bb.y0.max(0.0) as usize,
+            (bb.x1 as usize).min(W - 1),
+            (bb.y1 as usize).min(H - 1),
+        );
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let c = y * W + x;
+                if self.world.bid[c] == b as i32 {
+                    self.world.bid[c] = -1;
+                    self.world.terrain[c] = T_RUBBLE;
+                }
+            }
+        }
+        let on_roof: Vec<usize> = self
+            .structs
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.dead && s.roof == b as i32)
+            .map(|(i, _)| i)
+            .collect();
+        for i in on_roof {
+            self.kill_struct(i);
+        }
+        self.dirty_buildings.push(b);
+        self.obj_dirty = true;
+    }
+
+    // ----------------------------------------------------------------------------- spawning
+
+    pub fn random_cell(&mut self, min_hq: u32) -> Option<(f32, f32)> {
+        for _ in 0..600 {
+            let x = self.rng.below(W);
+            let y = self.rng.below(H);
+            let c = y * W + x;
+            if self.obj[c] != FREE
+                || self.hq_dist[c] == INF
+                || self.hq_dist[c] < min_hq
+                || self.world.zone[c] == 1
+            {
+                continue;
+            }
+            return Some((x as f32 + 0.5, y as f32 + 0.5));
+        }
+        None
+    }
+    fn queue(&mut self, at: (f32, f32), count: f32, secs: f32) {
+        self.queue_ex(at, count, secs, 0, 0.0);
+    }
+    fn queue_ex(&mut self, at: (f32, f32), count: f32, secs: f32, fl: u8, aux: f32) {
+        if count >= 1.0 {
+            self.spawnq.push(SpawnQ {
+                at,
+                left: count.round() as usize,
+                rate: (count / secs).max(1.0),
+                fl,
+                aux,
+            });
+        }
+    }
+    pub fn stress(&mut self) {
+        for _ in 0..8 {
+            if let Some(p) = self.random_cell(1500) {
+                self.queue(p, 125_000.0, 6.0);
+            }
+        }
+        self.show("1,000,000 hostiles inbound", 4.0);
+    }
+
+    fn director(&mut self) {
+        let m = self.mult;
+        match self.fac {
+            0 => {
+                self.out_t -= DT;
+                if self.out_t <= 0.0 {
+                    self.outbreaks += 1;
+                    let n = (40.0 * 1.5f32.powi(self.outbreaks as i32) * m).round();
+                    for _ in 0..2 {
+                        if let Some(p) = self.random_cell(1500) {
+                            self.queue(p, n / 2.0, 3.0);
+                        }
+                    }
+                    self.show(format!("New outbreak: {} infected", n as u64), 4.0);
+                    self.out_t = 70.0;
+                }
+                if !self.rush_forever {
+                    if self.rush {
+                        self.rush_left -= DT;
+                        if self.rush_left <= 0.0 {
+                            self.rush = false;
+                            self.rush_t = 150.0;
+                        }
+                    } else {
+                        self.rush_t -= DT;
+                        if self.rush_t <= 0.0 {
+                            self.rush = true;
+                            self.rush_left = 40.0;
+                            self.rushes += 1;
+                            if self.rushes >= 4 {
+                                self.rush_forever = true;
+                                self.show("The dead swarm your HQ for good", 4.0);
+                            } else {
+                                self.show("Horde rush: every zombie is coming for the HQ", 4.0);
+                            }
+                        }
+                    }
+                } else {
+                    self.rush = true;
+                }
+            }
+            1 => {
+                self.drop_t -= DT;
+                if self.drop_t <= 0.0 {
+                    let n = ((10.0 + self.time * 0.2) * m).round();
+                    if let Some(p) = self.random_cell(1800) {
+                        // some drops are light flying bugs that cross rooftops and walls
+                        if self.time > 40.0 && self.rng.f() < 0.22 {
+                            self.queue_ex(p, (n * 0.6).max(3.0), 1.0, F_FLY, 0.0);
+                        } else {
+                            self.queue(p, n, 1.0);
+                        }
+                        self.booms.push(Boom {
+                            p: vec2(p.0, p.1),
+                            r: 10.0,
+                            t: 0.8,
+                            life: 0.8,
+                            kind: 2,
+                        });
+                    }
+                    self.drop_t = 3.0;
+                }
+                self.hive_t -= DT;
+                if self.hive_t <= 0.0 {
+                    self.hive_t = 110.0;
+                    if self.hives.iter().filter(|h| !h.dead).count() < 6 {
+                        if let Some(p) = self.random_cell(2500) {
+                            let p = vec2(p.0, p.1);
+                            self.hives.push(Hive {
+                                p,
+                                r: 30.0,
+                                hp: 2500.0,
+                                max: 2500.0,
+                                spawn_t: 4.0,
+                                grow_t: 14.0,
+                                infected: Vec::new(),
+                                dead: false,
+                            });
+                            self.booms.push(Boom {
+                                p,
+                                r: 30.0,
+                                t: 1.2,
+                                life: 1.2,
+                                kind: 2,
+                            });
+                            self.show(
+                                "A hive has taken root. Only abilities and troops can kill it",
+                                4.0,
+                            );
+                        }
+                    }
+                }
+                self.hives_tick();
+            }
+            _ => {
+                self.portal_t -= DT;
+                if self.portal_t <= 0.0 {
+                    let k = self.portals_opened;
+                    self.portals_opened += 1;
+                    let np = 1 + (k / 2).min(2);
+                    let size = (1500.0 * 1.45f32.powi(k as i32) * m).round();
+                    for _ in 0..np {
+                        if let Some(p) = self.random_cell(2500) {
+                            self.portals.push(Portal {
+                                p: vec2(p.0, p.1),
+                                t: 60.0,
+                                taken: 0,
+                            });
+                            self.queue(p, size / np as f32, 15.0);
+                        }
+                    }
+                    self.show(
+                        format!(
+                            "{} portal{} open: {} orcs",
+                            np,
+                            if np > 1 { "s" } else { "" },
+                            size as u64
+                        ),
+                        4.0,
+                    );
+                    self.portal_t = 70.0;
+                }
+                for p in &mut self.portals {
+                    p.t -= DT;
+                }
+                self.portals.retain(|p| p.t > 0.0);
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------------------- tick
+
+    pub fn tick(&mut self) {
+        if self.over {
+            return;
+        }
+        let t0 = std::time::Instant::now();
+        self.pump_fields();
+        let stats = self.faction().stats;
+        // spawns
+        let mut q = std::mem::take(&mut self.spawnq);
+        for s in &mut q {
+            let k = s.left.min((s.rate * DT).ceil() as usize);
+            s.left -= k;
+            let seed = self.rng.next_u64();
+            let hp = if s.fl & F_FLY != 0 {
+                stats.hp * 0.6
+            } else {
+                stats.hp
+            };
+            self.swarm
+                .spawn(s.at, k, &self.obj, &self.hq_dist, hp, seed, s.fl, s.aux);
+        }
+        q.retain(|s| s.left > 0);
+        self.spawnq.extend(q);
+        for p in std::mem::take(&mut self.conv) {
+            let seed = self.rng.next_u64();
+            self.swarm.spawn(
+                (p.x, p.y),
+                1,
+                &self.obj,
+                &self.hq_dist,
+                stats.hp,
+                seed,
+                0,
+                0.0,
+            );
+        }
+        // the parallel step
+        for a in &self.sd {
+            a.store(0, Relaxed);
+        }
+        if self.bd.len() != self.world.buildings.len() {
+            self.bd = (0..self.world.buildings.len())
+                .map(|_| AtomicU32::new(0))
+                .collect();
+        }
+        for a in &self.bd {
+            a.store(0, Relaxed);
+        }
+        let obj = self.obj.clone();
+        let hqd = self.hq_dist.clone();
+        let hunt = self.hunt.clone();
+        let revs: Vec<RevIn> = self
+            .revs
+            .iter()
+            .map(|r| RevIn {
+                alive: r.alive,
+                pos: r.pos,
+                field: r.field.as_deref().map(|v| v.as_slice()),
+            })
+            .collect();
+        let (killed, deaths) = self.swarm.step(&StepIn {
+            dt: DT,
+            obj: &obj,
+            hq: &hqd,
+            hq_pos: self.world.hq,
+            hunt: hunt.as_deref().map(|v| v.as_slice()),
+            rush: self.rush,
+            stats,
+            sd: &self.sd,
+            bd: &self.bd,
+            low: &self.low,
+            lock: &self.lock,
+            rev: &revs,
+        });
+        drop(revs);
+        self.update_revs(&deaths);
+        self.kills += killed as u64;
+        self.score += killed as f32;
+        self.scrap += killed as f32 * self.faction().reward;
+        for i in 0..self.sd.len() {
+            let v = self.sd[i].load(Relaxed);
+            if v > 0 && !self.structs[i].dead {
+                self.structs[i].hp -= v as f32 / DMG_SCALE;
+                if self.structs[i].hp <= 0.0 {
+                    self.kill_struct(i);
+                }
+            }
+        }
+        for i in 0..self.bd.len() {
+            let v = self.bd[i].load(Relaxed);
+            if v > 0 && self.world.buildings[i].alive {
+                self.world.buildings[i].hp -= v as f32 / DMG_SCALE;
+                if self.world.buildings[i].hp <= 0.0 {
+                    self.destroy_building(i);
+                }
+            }
+        }
+        self.civilians();
+        self.squads_tick();
+        self.groups_tick();
+        self.economy();
+        self.turrets();
+        self.abilities();
+        self.director();
+        for v in self.world.irradiated.iter_mut() {
+            if *v > 0.0 {
+                *v = (*v - DT).max(0.0);
+                if *v == 0.0 {
+                    self.zone_dirty = true;
+                }
+            }
+        }
+        for t in &mut self.tracers {
+            t.t -= DT;
+        }
+        self.tracers.retain(|t| t.t > 0.0);
+        for b in &mut self.booms {
+            b.t -= DT;
+        }
+        self.booms.retain(|b| b.t > 0.0);
+        self.banner.1 -= DT;
+        self.time += DT;
+        self.sim_ms = self.sim_ms * 0.9 + t0.elapsed().as_secs_f32() * 1000.0 * 0.1;
+    }
+
+    fn economy(&mut self) {
+        // a crowded base slows everything down
+        self.income_mult = if self.waiting > 40 {
+            (40.0 / self.waiting as f32).max(0.3)
+        } else {
+            1.0
+        };
+        let im = self.income_mult;
+        for i in 0..self.structs.len() {
+            let s = &self.structs[i];
+            if s.dead || s.pending {
+                continue;
+            }
+            match s.t {
+                S::Extractor => self.scrap += 2.5 * DT * im,
+                S::Plant => {
+                    if self.scrap >= 3.0 * DT {
+                        self.scrap -= 3.0 * DT;
+                        self.ammo += 12.0 * DT * im;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some((a, t)) = self.research.busy {
+            let t = t - DT;
+            if t <= 0.0 {
+                match a {
+                    A::Rescue => self.research.rescue = true,
+                    A::Air => self.research.air = true,
+                    A::Icbm => self.research.nuke = true,
+                    _ => {}
+                }
+                self.research.busy = None;
+                self.show(format!("Research complete: {}", adef(a).up_name), 3.0);
+            } else {
+                self.research.busy = Some((a, t));
+            }
+        }
+    }
+
+    pub fn find_target(&self, c: Vec2, r: f32) -> Option<Vec2> {
+        let gx0 = ((c.x - r) / CG as f32).floor().max(0.0) as usize;
+        let gx1 = (((c.x + r) / CG as f32).floor() as usize).min(CW - 1);
+        let gy0 = ((c.y - r) / CG as f32).floor().max(0.0) as usize;
+        let gy1 = (((c.y + r) / CG as f32).floor() as usize).min(CH - 1);
+        let mut best = usize::MAX;
+        let mut bd = r * r;
+        for gy in gy0..=gy1 {
+            for gx in gx0..=gx1 {
+                if self.swarm.coarse_at(gy * CW + gx) == 0 {
+                    continue;
+                }
+                let p = vec2((gx * CG) as f32 + 4.0, (gy * CG) as f32 + 4.0) - c;
+                let d = p.length_squared();
+                if d < bd {
+                    bd = d;
+                    best = gy * CW + gx;
+                }
+            }
+        }
+        if best == usize::MAX {
+            return None;
+        }
+        let (bx, by) = ((best % CW) * CG, (best / CW) * CG);
+        let (mut mx, mut mv) = (usize::MAX, 0);
+        for y in by..by + CG {
+            for x in bx..bx + CG {
+                let v = self.swarm.at(y * W + x);
+                if v > mv {
+                    mv = v;
+                    mx = y * W + x;
+                }
+            }
+        }
+        if mx == usize::MAX {
+            None
+        } else {
+            Some(vec2((mx % W) as f32 + 0.5, (mx / W) as f32 + 0.5))
+        }
+    }
+
+    /// Damage to the horde (and city buildings) in a radius. `src` is the attacker zombies will swarm;
+    /// `hive` is damage dealt to alien hives, which only abilities and troops can hurt.
+    pub fn blast(&mut self, at: Vec2, r: f32, dmg: f32, bdmg: f32, src: u16, hive: f32) {
+        self.swarm.add_damage(at.x, at.y, r, dmg, src);
+        self.damage_buildings(at, r, bdmg);
+        if hive > 0.0 {
+            self.damage_hives(at, r, hive);
+        }
+    }
+
+    pub fn damage_hives(&mut self, at: Vec2, r: f32, d: f32) {
+        for h in &mut self.hives {
+            if !h.dead && h.p.distance(at) < r + 6.0 + h.r * 0.08 {
+                h.hp -= d;
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------------------- zombie revenge
+
+    /// The revenge id for an attacker (0 when the faction doesn't care).
+    pub fn rev_src(&mut self, key: RevKey) -> u16 {
+        if self.fac != 0 {
+            return 0;
+        }
+        if let Some(i) = self.revs.iter().position(|r| r.key == key && r.alive) {
+            return i as u16 + 1;
+        }
+        if self.revs.len() >= 60000 {
+            return 0;
+        }
+        self.revs.push(Rev {
+            key,
+            pos: Vec2::ZERO,
+            alive: true,
+            field: None,
+            job: 0,
+            refresh: 0.0,
+            hot: 0.0,
+        });
+        self.revs.len() as u16
+    }
+
+    fn rev_cells(&self, key: RevKey) -> Option<(Vec2, Vec<u32>)> {
+        let mut v = Vec::new();
+        match key {
+            RevKey::Struct(i) => {
+                let s = &self.structs[i];
+                if s.dead {
+                    return None;
+                }
+                if s.roof >= 0 {
+                    let b = &self.world.buildings[s.roof as usize];
+                    for y in b.y0.max(0.0) as usize..=(b.y1 as usize).min(H - 1) {
+                        for x in b.x0.max(0.0) as usize..=(b.x1 as usize).min(W - 1) {
+                            if self.world.bid[y * W + x] == s.roof {
+                                v.push((y * W + x) as u32);
+                            }
+                        }
+                    }
+                } else {
+                    for y in s.y..s.y + s.h {
+                        for x in s.x..s.x + s.w {
+                            v.push((y as usize * W + x as usize) as u32);
+                        }
+                    }
+                }
+                Some((s.center(), v))
+            }
+            RevKey::Group(gi) => {
+                let g = &self.groups[gi];
+                if g.dead {
+                    return None;
+                }
+                if g.state == GState::Garrison {
+                    let b = g.b as usize;
+                    return Some((
+                        self.world.buildings[b].c,
+                        vec![
+                            (self.world.buildings[b].c.y as usize * W
+                                + self.world.buildings[b].c.x as usize)
+                                as u32,
+                        ],
+                    ));
+                }
+                let mut c = Vec2::ZERO;
+                for m in g.m.iter().filter(|m| m.alive) {
+                    v.push((m.p.y as usize * W + m.p.x as usize) as u32);
+                    c += m.p;
+                }
+                if v.is_empty() {
+                    return None;
+                }
+                Some((c / v.len() as f32, v))
+            }
+            RevKey::Squad(si) => {
+                let q = &self.squads[si];
+                let mut c = Vec2::ZERO;
+                for m in q.m.iter().filter(|m| m.alive && !m.home) {
+                    v.push((m.p.y as usize * W + m.p.x as usize) as u32);
+                    c += m.p;
+                }
+                if v.is_empty() {
+                    return None;
+                }
+                Some((c / v.len() as f32, v))
+            }
+        }
+    }
+
+    fn update_revs(&mut self, deaths: &[crate::swarm::Death]) {
+        for &c in &self.lock_cells {
+            self.lock[c] = 0;
+        }
+        self.lock_cells.clear();
+        for i in 0..self.revs.len() {
+            if !self.revs[i].alive {
+                continue;
+            }
+            let key = self.revs[i].key;
+            match self.rev_cells(key) {
+                None => {
+                    self.revs[i].alive = false;
+                    self.revs[i].field = None;
+                }
+                Some((pos, cells)) => {
+                    let r = &mut self.revs[i];
+                    r.pos = pos;
+                    r.hot -= DT;
+                    r.refresh -= DT;
+                    if r.hot > 0.0 && r.refresh <= 0.0 && self.fw_aux.busy < 4 {
+                        r.refresh = if matches!(key, RevKey::Struct(_)) {
+                            8.0
+                        } else {
+                            1.5
+                        };
+                        let id = self.job_seq;
+                        self.job_seq += 1;
+                        r.job = id;
+                        self.fw_aux.submit(Job::Multi {
+                            id,
+                            obj: self.obj.clone(),
+                            src: cells,
+                            max: 3500,
+                        });
+                    }
+                }
+            }
+        }
+        // zombies near a fresh kill lock on to the killer
+        const R: i32 = 6; // coarse cells (about 48 map cells)
+        for d in deaths {
+            let k = d.src as usize;
+            if k == 0 || k > self.revs.len() || !self.revs[k - 1].alive {
+                continue;
+            }
+            self.revs[k - 1].hot = 30.0;
+            let (gx, gy) = ((d.p.x as usize / CG) as i32, (d.p.y as usize / CG) as i32);
+            for oy in -R..=R {
+                for ox in -R..=R {
+                    if ox * ox + oy * oy > R * R {
+                        continue;
+                    }
+                    let (x, y) = (gx + ox, gy + oy);
+                    if x < 0 || y < 0 || x >= CW as i32 || y >= CH as i32 {
+                        continue;
+                    }
+                    let c = y as usize * CW + x as usize;
+                    if self.lock[c] == 0 {
+                        self.lock[c] = d.src;
+                        self.lock_cells.push(c);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn roof_off(&self, b: usize) -> Vec2 {
+        let hh = self.world.buildings[b].h * self.tilt;
+        vec2(hh * 0.35, -hh)
+    }
+
+    fn turrets(&mut self) {
+        for i in 0..self.structs.len() {
+            let (t, center, roof) = {
+                let s = &self.structs[i];
+                if s.dead || s.pending || !def(s.t).turret {
+                    continue;
+                }
+                (s.t, s.center(), s.roof)
+            };
+            let d = def(t);
+            self.structs[i].cd -= DT;
+            if self.structs[i].cd > 0.0 || self.ammo < d.ammo {
+                continue;
+            }
+            let range = d.range * if roof >= 0 { 1.6 } else { 1.0 };
+            if let Some(tg) = self.find_target(center, range) {
+                let src = self.rev_src(RevKey::Struct(i));
+                self.blast(tg, d.rad, d.dmg, d.bdmg, src, 0.0);
+                self.ammo -= d.ammo;
+                self.structs[i].cd = d.rate;
+                self.structs[i].last_fire = self.time;
+                self.structs[i].aim = (tg.y - center.y).atan2(tg.x - center.x);
+                let off = if roof >= 0 {
+                    self.roof_off(roof as usize)
+                } else {
+                    Vec2::ZERO
+                };
+                let muzzle = center + off + vec2(d.ht * self.tilt * 0.35, -d.ht * self.tilt);
+                self.tracers.push(Tracer {
+                    a: muzzle,
+                    b: tg,
+                    t: 0.09,
+                    kind: if t == S::Cannon { 1 } else { 0 },
+                });
+                if t == S::Cannon {
+                    self.booms.push(Boom {
+                        p: tg,
+                        r: d.rad,
+                        t: 0.25,
+                        life: 0.25,
+                        kind: 0,
+                    });
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------------------- abilities
+
+    pub fn ability_locked(&self, a: A) -> bool {
+        a == A::Icbm && !self.has(S::Silo)
+    }
+    pub fn can_use(&self, a: A) -> bool {
+        let d = adef(a);
+        !self.ability_locked(a)
+            && self.cooldown(a) <= 0.0
+            && self.scrap >= d.cost
+            && self.ammo >= d.ammo
+    }
+    /// Each silo has its own ICBM cooldown; the ability is ready when any silo is.
+    pub fn cooldown(&self, a: A) -> f32 {
+        if a == A::Icbm {
+            return self
+                .structs
+                .iter()
+                .filter(|s| !s.dead && !s.pending && s.t == S::Silo)
+                .map(|s| s.cd)
+                .fold(f32::MAX, f32::min)
+                .min(1e6)
+                .max(0.0)
+                * if self.has(S::Silo) { 1.0 } else { 0.0 };
+        }
+        self.cds[ability_index(a)]
+    }
+    pub fn silos_ready(&self) -> (usize, usize) {
+        let s: Vec<&Structure> = self
+            .structs
+            .iter()
+            .filter(|s| !s.dead && !s.pending && s.t == S::Silo)
+            .collect();
+        (s.iter().filter(|s| s.cd <= 0.0).count(), s.len())
+    }
+    pub fn upgraded(&self, a: A) -> bool {
+        match a {
+            A::Rescue => self.research.rescue,
+            A::Air => self.research.air,
+            A::Icbm => self.research.nuke,
+            A::Gunship => true,
+        }
+    }
+    pub fn can_research(&self, a: A) -> bool {
+        a != A::Gunship
+            && !self.upgraded(a)
+            && self.research.busy.is_none()
+            && self.has(S::Lab)
+            && self.scrap >= adef(a).up_cost
+    }
+    pub fn start_research(&mut self, a: A) {
+        if self.can_research(a) {
+            self.scrap -= adef(a).up_cost;
+            self.research.busy = Some((a, 30.0));
+            self.show(format!("Researching {} (30 s)", adef(a).up_name), 2.5);
+        }
+    }
+    fn pay(&mut self, a: A) {
+        let d = adef(a);
+        self.scrap -= d.cost;
+        self.ammo -= d.ammo;
+        if a != A::Icbm {
+            self.cds[ability_index(a)] = d.cd;
+        }
+    }
+
+    pub fn use_ability(&mut self, a: A, from: Vec2, to: Vec2) -> bool {
+        if !self.can_use(a) {
+            return false;
+        }
+        match a {
+            A::Rescue => {
+                if !self.send_squad(to) {
+                    return false;
+                }
+            }
+            A::Air => {
+                let upgraded = self.research.air;
+                let (start, end) = if upgraded && from.distance(to) > 8.0 {
+                    (from, to)
+                } else {
+                    let ang = self.rng.f() * std::f32::consts::TAU;
+                    let d = vec2(ang.cos(), ang.sin());
+                    (to - d * 24.0, to + d * 24.0)
+                };
+                let dir = (end - start).normalize_or_zero();
+                let back = W.max(H) as f32 * 0.6;
+                let entry = start - dir * back;
+                let n = if upgraded { 12 } else { 5 };
+                let mut bombs = Vec::new();
+                let seg = end - start;
+                for i in 0..n {
+                    let f = if n > 1 {
+                        i as f32 / (n - 1) as f32
+                    } else {
+                        0.5
+                    };
+                    let jitter = if upgraded {
+                        vec2(-dir.y, dir.x) * (self.rng.f() - 0.5) * 10.0
+                    } else {
+                        Vec2::ZERO
+                    };
+                    let p = start + seg * f + jitter;
+                    bombs.push((p, back + seg.length() * f, false));
+                }
+                self.strikes.push(Strike::Air {
+                    from: entry,
+                    dir,
+                    pos: 0.0,
+                    len: back * 2.0 + seg.length(),
+                    bombs,
+                    line: (start, end),
+                });
+            }
+            A::Gunship => {
+                self.gunships.push(Gunship {
+                    center: to,
+                    p: self.world.hq,
+                    t: 20.0,
+                    ang: 0.0,
+                    cd: 0.0,
+                    phase: 0,
+                });
+            }
+            A::Icbm => {
+                let silo = self
+                    .structs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| !s.dead && !s.pending && s.t == S::Silo && s.cd <= 0.0)
+                    .min_by(|a, b| {
+                        a.1.center()
+                            .distance(to)
+                            .partial_cmp(&b.1.center().distance(to))
+                            .unwrap()
+                    })
+                    .map(|(i, s)| (i, s.center()));
+                let Some((si, from)) = silo else { return false };
+                self.structs[si].cd = adef(A::Icbm).cd;
+                self.strikes.push(Strike::Icbm {
+                    from,
+                    to,
+                    t: 0.0,
+                    dur: 5.0,
+                    nuke: self.research.nuke,
+                });
+                self.show(
+                    if self.research.nuke {
+                        "Nuclear launch detected"
+                    } else {
+                        "ICBM launched"
+                    },
+                    3.0,
+                );
+            }
+        }
+        self.pay(a);
+        true
+    }
+
+    fn abilities(&mut self) {
+        for c in self.cds.iter_mut() {
+            *c = (*c - DT).max(0.0);
+        }
+        for s in self.structs.iter_mut() {
+            if !s.dead && (s.t == S::Silo || s.t == S::Pad) {
+                s.cd = (s.cd - DT).max(0.0);
+            }
+        }
+        let mut strikes = std::mem::take(&mut self.strikes);
+        let mut blasts: Vec<(Vec2, f32, f32, f32, u8, f32)> = Vec::new();
+        let mut irradiate: Vec<(Vec2, f32)> = Vec::new();
+        strikes.retain_mut(|s| match s {
+            Strike::Air {
+                pos, len, bombs, ..
+            } => {
+                *pos += 170.0 * DT;
+                for b in bombs.iter_mut() {
+                    if !b.2 && *pos >= b.1 {
+                        b.2 = true;
+                        blasts.push((b.0, 12.0, 600.0, 300.0, 0, 450.0));
+                    }
+                }
+                *pos < *len
+            }
+            Strike::Icbm {
+                to, t, dur, nuke, ..
+            } => {
+                *t += DT;
+                if *t >= *dur {
+                    let r = if *nuke { 190.0 } else { 120.0 };
+                    blasts.push((*to, r, 1e9, 1e6, 1, 1e9));
+                    if *nuke {
+                        irradiate.push((*to, r));
+                    }
+                    false
+                } else {
+                    true
+                }
+            }
+        });
+        self.strikes = strikes;
+        for (p, r, d, bd, k, hv) in blasts {
+            self.blast(p, r, d, bd, 0, hv);
+            self.booms.push(Boom {
+                p,
+                r,
+                t: if k == 1 { 1.8 } else { 0.6 },
+                life: if k == 1 { 1.8 } else { 0.6 },
+                kind: k,
+            });
+        }
+        for (p, r) in irradiate {
+            let rr = r / CG as f32;
+            let (cx, cy) = (p.x / CG as f32, p.y / CG as f32);
+            for gy in 0..CH {
+                for gx in 0..CW {
+                    let d = vec2(gx as f32 + 0.5 - cx, gy as f32 + 0.5 - cy).length();
+                    if d <= rr {
+                        self.world.irradiated[gy * CW + gx] = 90.0;
+                    }
+                }
+            }
+            self.zone_dirty = true;
+            // anyone of ours caught in it is lost
+            for g in &mut self.groups {
+                for m in &mut g.m {
+                    if m.p.distance(p) < r {
+                        m.alive = false;
+                    }
+                }
+            }
+        }
+        // gunships
+        let mut ships = std::mem::take(&mut self.gunships);
+        for g in ships.iter_mut() {
+            match g.phase {
+                0 => {
+                    let d = g.center + vec2(25.0, 0.0) - g.p;
+                    if d.length() < 3.0 {
+                        g.phase = 1;
+                    } else {
+                        g.p += d.normalize() * (70.0 * DT).min(d.length());
+                    }
+                }
+                1 => {
+                    g.t -= DT;
+                    g.ang += DT * 0.9;
+                    g.p = g.center + vec2(g.ang.cos(), g.ang.sin()) * 25.0;
+                    g.cd -= DT;
+                    if g.cd <= 0.0 {
+                        if let Some(t) = self
+                            .find_target(g.p, 34.0)
+                            .or_else(|| self.hive_in_range(g.p, 34.0))
+                        {
+                            self.swarm.add_damage(t.x, t.y, 1.6, 14.0, 0);
+                            self.damage_hives(t, 1.6, 14.0);
+                            self.tracers.push(Tracer {
+                                a: g.p,
+                                b: t,
+                                t: 0.06,
+                                kind: 2,
+                            });
+                        }
+                        g.cd = 0.1;
+                    }
+                    if g.t <= 0.0 {
+                        g.phase = 2;
+                    }
+                }
+                _ => {
+                    let d = self.world.hq - g.p;
+                    if d.length() < 3.0 {
+                        g.phase = 3;
+                    } else {
+                        g.p += d.normalize() * (70.0 * DT).min(d.length());
+                    }
+                }
+            }
+        }
+        ships.retain(|g| g.phase < 3);
+        self.gunships = ships;
+        // helicopters
+        let mut done = Vec::new();
+        for h in &mut self.helis {
+            h.t += DT;
+            if h.t >= h.dur {
+                if let HeliKind::Deliver(i) = h.kind {
+                    done.push(i);
+                }
+            }
+        }
+        self.helis.retain(|h| h.t < h.dur);
+        for i in done {
+            if !self.structs[i].dead {
+                self.structs[i].pending = false;
+                if self.structs[i].roof < 0 {
+                    self.obj_dirty = true;
+                    self.struct_dirty = true;
+                }
+            }
+        }
+        // extraction flights: each pad flies out the civilians waiting at it, then needs time to turn around
+        for pi in 0..self.structs.len() {
+            let (ok, c) = {
+                let s = &self.structs[pi];
+                (
+                    !s.dead && !s.pending && s.t == S::Pad && s.cd <= 0.0,
+                    s.center(),
+                )
+            };
+            if !ok {
+                continue;
+            }
+            let mut n = 0u32;
+            for cv in self.civs.iter_mut() {
+                if n >= PAD_SEATS {
+                    break;
+                }
+                if cv.st == C_AT_PAD && cv.pad == pi {
+                    cv.st = C_GONE;
+                    n += 1;
+                }
+            }
+            if n == 0 {
+                continue;
+            }
+            self.extracted += n;
+            self.score += 100.0 * n as f32;
+            self.scrap += 20.0 * n as f32;
+            self.ammo += 10.0 * n as f32;
+            let ex = if c.x < W as f32 / 2.0 {
+                -30.0
+            } else {
+                W as f32 + 30.0
+            };
+            self.helis.push(Heli {
+                kind: HeliKind::Extract,
+                from: c,
+                to: vec2(ex, c.y - 80.0),
+                t: 0.0,
+                dur: 5.0,
+            });
+            self.structs[pi].cd = PAD_COOLDOWN;
+            self.show(
+                format!(
+                    "Extraction flight: {} civilian{} out (+{} score)",
+                    n,
+                    if n > 1 { "s" } else { "" },
+                    100 * n
+                ),
+                2.5,
+            );
+        }
+    }
+
+    // ----------------------------------------------------------------------------- people
+
+    fn step_on_field(obj: &[i32], p: &mut Vec2, field: &[u32], speed: f32, r: &mut Rng) {
+        let (cx, cy) = (p.x as i32, p.y as i32);
+        let mut best = -1i32;
+        let mut bv = field[cy as usize * W + cx as usize] as f32;
+        for k in 0..8 {
+            let (nx, ny) = (cx + DX[k], cy + DY[k]);
+            if nx < 0 || ny < 0 || nx >= W as i32 || ny >= H as i32 {
+                continue;
+            }
+            let nc = ny as usize * W + nx as usize;
+            if obj[nc] != FREE || field[nc] == INF {
+                continue;
+            }
+            if k >= 4
+                && (obj[cy as usize * W + nx as usize] != FREE
+                    || obj[ny as usize * W + cx as usize] != FREE)
+            {
+                continue;
+            }
+            let v = field[nc] as f32 + r.f() * 3.0;
+            if v < bv {
+                bv = v;
+                best = k as i32;
+            }
+        }
+        if best < 0 {
+            return;
+        }
+        let t = vec2(
+            (cx + DX[best as usize]) as f32 + 0.5,
+            (cy + DY[best as usize]) as f32 + 0.5,
+        );
+        let d = t - *p;
+        let st = speed * DT;
+        if d.length() > st {
+            *p += d.normalize() * st;
+        } else {
+            *p = t;
+        }
+    }
+
+    fn init_civilians(&mut self, n: usize) {
+        // most people are holed up in groups (worth sending a rescue squad for), the rest wander alone
+        let mut left = n;
+        while left > 0 {
+            let Some(p) = self.random_cell(0) else { break };
+            let k = if self.rng.f() < 0.3 {
+                1
+            } else {
+                (8 + self.rng.below(30)).min(left)
+            };
+            for _ in 0..k {
+                let mut q = vec2(p.0, p.1);
+                for _ in 0..8 {
+                    let t = q + vec2(self.rng.f() - 0.5, self.rng.f() - 0.5) * 14.0;
+                    if t.x > 0.0
+                        && t.y > 0.0
+                        && t.x < W as f32
+                        && t.y < H as f32
+                        && self.obj[t.y as usize * W + t.x as usize] == FREE
+                    {
+                        q = t;
+                        break;
+                    }
+                }
+                let hd = self.rng.f() * std::f32::consts::TAU;
+                self.civs.push(Civ {
+                    p: q,
+                    st: C_ROAM,
+                    sq: 0,
+                    esc: 0,
+                    pad: 0,
+                    hd,
+                    flee_t: 0.0,
+                });
+            }
+            left -= k;
+        }
+    }
+
+    /// One step towards a nearby point over open ground (no field needed for short hops).
+    fn step_toward(obj: &[i32], p: &mut Vec2, to: Vec2, speed: f32) {
+        let (cx, cy) = (p.x as i32, p.y as i32);
+        let d = to - *p;
+        if d.length() < 0.6 {
+            return;
+        }
+        let mut best = -1i32;
+        let mut bv = d.length();
+        for k in 0..8 {
+            let (nx, ny) = (cx + DX[k], cy + DY[k]);
+            if nx < 0 || ny < 0 || nx >= W as i32 || ny >= H as i32 {
+                continue;
+            }
+            if obj[ny as usize * W + nx as usize] != FREE {
+                continue;
+            }
+            if k >= 4
+                && (obj[cy as usize * W + nx as usize] != FREE
+                    || obj[ny as usize * W + cx as usize] != FREE)
+            {
+                continue;
+            }
+            let v = (vec2(nx as f32 + 0.5, ny as f32 + 0.5) - to).length();
+            if v < bv {
+                bv = v;
+                best = k as i32;
+            }
+        }
+        let t = if best < 0 {
+            // already in the best cell: slide inside it
+            let t = *p + d.normalize_or_zero() * (speed * DT).min(d.length());
+            if obj[t.y as usize * W + t.x as usize] != FREE {
+                return;
+            }
+            t
+        } else {
+            vec2(
+                (cx + DX[best as usize]) as f32 + 0.5,
+                (cy + DY[best as usize]) as f32 + 0.5,
+            )
+        };
+        let dd = t - *p;
+        let st = speed * DT;
+        if dd.length() > st {
+            *p += dd.normalize() * st;
+        } else {
+            *p = t;
+        }
+    }
+
+    fn civilians(&mut self) {
+        let obj = self.obj.clone();
+        let hqd = self.hq_dist.clone();
+        let padf = self.pad_field.clone();
+        let portf = self.portal_field.clone();
+        let mut waiting = 0;
+        let mut dragged: Vec<Vec2> = Vec::new();
+        for i in 0..self.civs.len() {
+            let st = self.civs[i].st;
+            if st >= C_DEAD && st != C_TO_PAD && st != C_AT_PAD {
+                continue;
+            }
+            let p = self.civs[i].p;
+            let (cx, cy) = (p.x as usize, p.y as usize);
+            let c = cy * W + cx;
+            if st == C_TO_PAD || st == C_AT_PAD {
+                waiting += 1;
+                if st == C_AT_PAD {
+                    let pi = self.civs[i].pad;
+                    if self.structs.get(pi).map_or(true, |s| s.dead) {
+                        self.civs[i].st = C_TO_PAD;
+                    }
+                    continue;
+                }
+                if let Some(f) = &padf {
+                    let mut pp = p;
+                    Self::step_on_field(&obj, &mut pp, f, 9.0, &mut self.rng);
+                    self.civs[i].p = pp;
+                    let v = f[pp.y as usize * W + pp.x as usize];
+                    if v <= 30 {
+                        let pad = self
+                            .structs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, s)| !s.dead && !s.pending && s.t == S::Pad)
+                            .min_by(|a, b| {
+                                a.1.center()
+                                    .distance(pp)
+                                    .partial_cmp(&b.1.center().distance(pp))
+                                    .unwrap()
+                            })
+                            .map(|(k, _)| k);
+                        if let Some(k) = pad {
+                            self.civs[i].st = C_AT_PAD;
+                            self.civs[i].pad = k;
+                        }
+                    }
+                }
+                continue;
+            }
+            if st == C_CAPTURED {
+                // dragged towards a portal; troops close by free them
+                let mut freed = false;
+                'g: for g in &self.groups {
+                    if g.dead || g.state == GState::Garrison {
+                        continue;
+                    }
+                    for m in &g.m {
+                        if m.alive && m.p.distance(p) < 5.0 {
+                            freed = true;
+                            break 'g;
+                        }
+                    }
+                }
+                if freed {
+                    self.civs[i].st = C_ROAM;
+                    self.show("Troops freed a captured civilian", 2.0);
+                    continue;
+                }
+                match &portf {
+                    Some(f) if !self.portals.is_empty() => {
+                        let mut pp = p;
+                        Self::step_on_field(&obj, &mut pp, f, 7.5, &mut self.rng);
+                        self.civs[i].p = pp;
+                        if f[pp.y as usize * W + pp.x as usize] <= 20 {
+                            self.civs[i].st = C_GONE;
+                            self.civ_lost += 1;
+                            dragged.push(pp);
+                        }
+                    }
+                    _ => {
+                        if self.portals.is_empty() {
+                            self.civs[i].st = C_DEAD;
+                            self.civ_lost += 1;
+                        }
+                    }
+                }
+                continue;
+            }
+            let mut hit = self.swarm.at(c) > 0;
+            if !hit && self.rng.f() < 0.35 {
+                hit = (cx > 0 && self.swarm.at(c - 1) > 0)
+                    || (cx < W - 1 && self.swarm.at(c + 1) > 0)
+                    || (cy > 0 && self.swarm.at(c - W) > 0)
+                    || (cy < H - 1 && self.swarm.at(c + W) > 0);
+            }
+            if hit {
+                if self.fac == 2 && !self.portals.is_empty() && self.rng.f() < 0.35 {
+                    self.civs[i].st = C_CAPTURED;
+                    continue;
+                }
+                self.civs[i].st = C_DEAD;
+                self.civ_lost += 1;
+                if self.fac == 0 {
+                    // every bite turns one civilian into two zombies
+                    self.conv.push(p);
+                    self.conv.push(p);
+                }
+                continue;
+            }
+            if st == C_ESCORT {
+                let (sqi, mi) = (self.civs[i].sq, self.civs[i].esc);
+                let (state, m) = {
+                    let q = &self.squads[sqi];
+                    (q.state, q.m[mi].clone())
+                };
+                if !m.alive {
+                    self.civs[i].st = C_ROAM;
+                    continue;
+                }
+                let mut pp = p;
+                let dist = m.p.distance(pp);
+                let sp = if dist > 5.0 { 15.0 } else { 9.0 };
+                if (state == QState::Return || m.home) && (dist > 12.0 || m.home) {
+                    Self::step_on_field(&obj, &mut pp, &hqd, sp, &mut self.rng);
+                } else if dist > 2.0 {
+                    let off = vec2(((i * 7) % 5) as f32 - 2.0, ((i * 3) % 5) as f32 - 2.0) * 0.6;
+                    Self::step_toward(&obj, &mut pp, m.p + off, sp);
+                }
+                self.civs[i].p = pp;
+                if self.world.in_zone(pp) {
+                    self.civs[i].st = C_TO_PAD;
+                    self.rescued += 1;
+                    self.score += 10.0;
+                }
+                continue;
+            }
+            // scatter away from hostiles in a random direction, otherwise stroll along the street
+            let (gx, gy) = ((p.x as usize / CG) as i32, (p.y as usize / CG) as i32);
+            let (mut fx, mut fy, mut seen) = (0.0, 0.0, 0u32);
+            for oy in -2..=2 {
+                for ox in -2..=2 {
+                    let (x, y) = (gx + ox, gy + oy);
+                    if x < 0 || y < 0 || x >= CW as i32 || y >= CH as i32 {
+                        continue;
+                    }
+                    let v = self.swarm.coarse_at(y as usize * CW + x as usize);
+                    if v > 0 {
+                        seen += v;
+                        fx -= ox as f32 * v as f32;
+                        fy -= oy as f32 * v as f32;
+                    }
+                }
+            }
+            let civ = &mut self.civs[i];
+            let mut sp = 1.5;
+            civ.flee_t -= DT;
+            if seen > 0 {
+                sp = 8.5;
+                if civ.flee_t <= 0.0 {
+                    let away = if fx == 0.0 && fy == 0.0 {
+                        self.rng.f() * std::f32::consts::TAU
+                    } else {
+                        (fy as f32).atan2(fx as f32)
+                    };
+                    civ.hd = away + (self.rng.f() - 0.5) * 2.6;
+                    civ.flee_t = 0.8 + self.rng.f() * 1.4;
+                }
+            } else if self.rng.f() < 0.04 {
+                civ.hd += (self.rng.f() - 0.5) * 2.5;
+            }
+            let np = civ.p + vec2(civ.hd.cos(), civ.hd.sin()) * sp * DT;
+            if np.x > 0.0
+                && np.y > 0.0
+                && np.x < W as f32
+                && np.y < H as f32
+                && obj[np.y as usize * W + np.x as usize] == FREE
+            {
+                civ.p = np;
+            } else {
+                civ.hd = self.rng.f() * std::f32::consts::TAU;
+            }
+        }
+        self.waiting = waiting;
+        // every civilian dragged through a portal brings enraged orcs back out of it
+        for p in dragged {
+            let Some(k) = (0..self.portals.len()).min_by(|&a, &b| {
+                self.portals[a]
+                    .p
+                    .distance(p)
+                    .partial_cmp(&self.portals[b].p.distance(p))
+                    .unwrap()
+            }) else {
+                continue;
+            };
+            self.portals[k].taken += 1;
+            self.portals[k].t = (self.portals[k].t + 8.0).min(90.0);
+            let n = (60.0 * self.mult * (1.0 + self.portals[k].taken as f32 * 0.1).min(2.5)).round();
+            let at = (self.portals[k].p.x, self.portals[k].p.y);
+            self.queue_ex(at, n, 3.0, 0, 1.0);
+            self.show(
+                format!(
+                    "A civilian was dragged through a portal: {} enraged orcs pour out",
+                    n as u64
+                ),
+                3.0,
+            );
+        }
+    }
+
+    fn nearest_walkable(&self, p: Vec2, max_r: i32) -> Option<usize> {
+        let (x0, y0) = (p.x as i32, p.y as i32);
+        for r in 0..=max_r {
+            for oy in -r..=r {
+                for ox in -r..=r {
+                    if ox.abs().max(oy.abs()) != r {
+                        continue;
+                    }
+                    let (x, y) = (x0 + ox, y0 + oy);
+                    if x < 0 || y < 0 || x >= W as i32 || y >= H as i32 {
+                        continue;
+                    }
+                    let c = y as usize * W + x as usize;
+                    if self.obj[c] == FREE && self.hq_dist[c] != INF {
+                        return Some(c);
+                    }
+                }
+            }
+        }
+        None
+    }
+    fn cell_pos(c: usize) -> Vec2 {
+        vec2((c % W) as f32 + 0.5, (c / W) as f32 + 0.5)
+    }
+
+    pub fn send_squad(&mut self, at: Vec2) -> bool {
+        let Some(tc) = self.nearest_walkable(at, 20) else {
+            return false;
+        };
+        let n = if self.research.rescue { 18 } else { 10 };
+        let hq = &self.structs[self.hq_idx];
+        let base = vec2(hq.center().x, (hq.y + hq.h + 2) as f32);
+        let mut m = Vec::new();
+        for _ in 0..n {
+            m.push(Member {
+                p: base + vec2((self.rng.f() - 0.5) * 10.0, self.rng.f() * 3.0),
+                hp: 1.0,
+                cd: self.rng.f() * 0.3,
+                alive: true,
+                home: false,
+                carry: 0,
+            });
+        }
+        let job = self.target_job(tc);
+        self.squads.push(Squad {
+            state: QState::Wait,
+            target: Self::cell_pos(tc),
+            tf: None,
+            m,
+            t: 0.0,
+            done: false,
+            wiped: false,
+            job,
+            gather: None,
+            gjob: 0,
+            gt: 0.0,
+            found: 0,
+        });
+        true
+    }
+
+    fn squads_tick(&mut self) {
+        let obj = self.obj.clone();
+        let hqd = self.hq_dist.clone();
+        let (max_pick, pick_r) = if self.research.rescue {
+            (120usize, 90.0)
+        } else {
+            (50usize, 60.0)
+        };
+        for si in 0..self.squads.len() {
+            if self.squads[si].done {
+                continue;
+            }
+            let n = self.squads[si].m.len();
+            let cap = max_pick.div_ceil(n.max(1)) as u8;
+            let mut live = 0;
+            let mut near = false;
+            let mut all_full = true;
+            let state = self.squads[si].state;
+            let tf = self.squads[si].tf.clone();
+            let gather = self.squads[si].gather.clone();
+            let target = self.squads[si].target;
+            let mut shots = Vec::new();
+            let mut claimed = 0;
+            for mi in 0..n {
+                let mut m = self.squads[si].m[mi].clone();
+                if !m.alive || m.home {
+                    continue;
+                }
+                live += 1;
+                let c = m.p.y as usize * W + m.p.x as usize;
+                if self.swarm.at(c) > 0 && self.rng.f() < 0.12 {
+                    m.alive = false;
+                    live -= 1;
+                    self.squads[si].m[mi] = m;
+                    continue;
+                }
+                match state {
+                    QState::Out => {
+                        if let Some(tf) = &tf {
+                            Self::step_on_field(&obj, &mut m.p, tf, 18.0, &mut self.rng);
+                            if tf[m.p.y as usize * W + m.p.x as usize] < 60 {
+                                near = true;
+                            }
+                        }
+                    }
+                    QState::Gather => {
+                        // a soldier with room left and a civilian it can reach keeps going
+                        let reach = gather
+                            .as_ref()
+                            .map_or(true, |g| g[m.p.y as usize * W + m.p.x as usize] != INF);
+                        if m.carry < cap && reach {
+                            all_full = false;
+                            if let Some(g) = &gather {
+                                Self::step_on_field(&obj, &mut m.p, g, 16.0, &mut self.rng);
+                            }
+                            // walk up to each civilian in turn and take them along
+                            for ci in 0..self.civs.len() {
+                                let cv = &mut self.civs[ci];
+                                if cv.st == C_ROAM
+                                    && cv.p.distance(m.p) < 2.5
+                                    && cv.p.distance(target) < pick_r + 15.0
+                                {
+                                    cv.st = C_ESCORT;
+                                    cv.sq = si;
+                                    cv.esc = mi;
+                                    m.carry += 1;
+                                    claimed += 1;
+                                    if m.carry >= cap {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    QState::Return => {
+                        Self::step_on_field(&obj, &mut m.p, &hqd, 12.0, &mut self.rng);
+                        if self.world.in_zone(m.p) {
+                            m.home = true;
+                        }
+                    }
+                    QState::Wait => {}
+                }
+                m.cd -= DT;
+                if m.cd <= 0.0 {
+                    if let Some(t) = self.find_target(m.p, 14.0) {
+                        shots.push((m.p, t));
+                    }
+                    m.cd = 0.35;
+                }
+                self.squads[si].m[mi] = m;
+            }
+            let src = self.rev_src(RevKey::Squad(si));
+            for (a, b) in shots {
+                self.swarm.add_damage(b.x, b.y, 1.2, 10.0, src);
+                self.damage_hives(b, 1.2, 10.0);
+                self.tracers.push(Tracer {
+                    a,
+                    b,
+                    t: 0.07,
+                    kind: 3,
+                });
+            }
+            if live == 0 {
+                let q = &mut self.squads[si];
+                if q.state != QState::Return {
+                    q.wiped = true;
+                }
+                q.done = true;
+                continue;
+            }
+            self.squads[si].found += claimed;
+            match self.squads[si].state {
+                QState::Out if near => {
+                    self.squads[si].state = QState::Gather;
+                    self.squads[si].t = 25.0;
+                    self.squads[si].gt = 0.0;
+                }
+                QState::Gather => {
+                    let q = &mut self.squads[si];
+                    q.t -= DT;
+                    q.gt -= DT;
+                    let refresh = q.gt <= 0.0;
+                    if refresh {
+                        q.gt = 1.5;
+                    }
+                    let timeout = q.t <= 0.0;
+                    let mut left: Vec<u32> = Vec::new();
+                    if refresh && !all_full && !timeout {
+                        for cv in &self.civs {
+                            if cv.st == C_ROAM && cv.p.distance(target) < pick_r {
+                                left.push((cv.p.y as usize * W + cv.p.x as usize) as u32);
+                            }
+                        }
+                        if left.is_empty() {
+                            self.squads[si].t = 0.0;
+                        } else if self.fw_aux.busy < 4 {
+                            let id = self.next_job();
+                            self.squads[si].gjob = id;
+                            let max = (pick_r * 70.0) as u32;
+                            self.fw_aux.submit(Job::Multi {
+                                id,
+                                obj: obj.clone(),
+                                src: left,
+                                max,
+                            });
+                        }
+                    }
+                    let q = &mut self.squads[si];
+                    if all_full || q.t <= 0.0 {
+                        q.state = QState::Return;
+                        q.gather = None;
+                        let f = q.found;
+                        self.banner = (
+                            if f > 0 {
+                                format!(
+                                    "Rescue squad escorting {} civilian{} home",
+                                    f,
+                                    if f > 1 { "s" } else { "" }
+                                )
+                            } else {
+                                "Rescue squad found nobody".into()
+                            },
+                            2.5,
+                        );
+                    }
+                }
+                _ => {}
+            }
+            if live > 0 && self.squads[si].m.iter().all(|m| !m.alive || m.home) {
+                self.squads[si].done = true;
+            }
+        }
+    }
+
+    pub fn deploy(&mut self, kind: U, at: Vec2) -> bool {
+        let d = udef(kind);
+        if self.scrap < d.cost || self.world.irradiated_at(at) {
+            return false;
+        }
+        let roof = if kind == U::Rifle {
+            self.roof_at(at)
+        } else {
+            None
+        };
+        let Some(tc) = self.order_cell(roof, at) else {
+            return false;
+        };
+        self.scrap -= d.cost;
+        let hq = &self.structs[self.hq_idx];
+        let base = vec2(hq.center().x, (hq.y + hq.h + 3) as f32);
+        let mut m = Vec::new();
+        for _ in 0..d.n {
+            m.push(Member {
+                p: base + vec2((self.rng.f() - 0.5) * 8.0, self.rng.f() * 3.0),
+                hp: d.hp,
+                cd: self.rng.f() * d.rate,
+                alive: true,
+                home: false,
+                carry: 0,
+            });
+        }
+        let job = self.target_job(tc);
+        self.groups.push(Group {
+            kind,
+            m,
+            state: GState::Wait,
+            tf: None,
+            b: roof.map(|r| r.0 as i32).unwrap_or(-1),
+            target: Self::cell_pos(tc),
+            dead: false,
+            job,
+        });
+        true
+    }
+    fn order_cell(&self, roof: Option<(usize, Vec2)>, at: Vec2) -> Option<usize> {
+        match roof {
+            Some((b, _)) => {
+                let bb = &self.world.buildings[b];
+                let r = ((bb.x1 - bb.x0).max(bb.y1 - bb.y0) / 2.0) as i32 + 14;
+                self.nearest_walkable(bb.c, r)
+            }
+            None => self.nearest_walkable(at, 12),
+        }
+    }
+    /// Re-orders an existing group to a new spot (or into a building, for rifle squads).
+    pub fn order(&mut self, gi: usize, at: Vec2) -> bool {
+        if self.world.irradiated_at(at) || self.groups[gi].dead {
+            return false;
+        }
+        let kind = self.groups[gi].kind;
+        let roof = if kind == U::Rifle {
+            self.roof_at(at)
+        } else {
+            None
+        };
+        let Some(tc) = self.order_cell(roof, at) else {
+            return false;
+        };
+        // garrisoned troops step back out onto the street first
+        if self.groups[gi].state == GState::Garrison {
+            let b = self.groups[gi].b as usize;
+            let c = self.world.buildings[b].c;
+            if let Some(out) = self.nearest_walkable(c, 30) {
+                for m in &mut self.groups[gi].m {
+                    m.p = Self::cell_pos(out);
+                }
+            }
+        }
+        let job = self.target_job(tc);
+        let g = &mut self.groups[gi];
+        g.job = job;
+        g.state = GState::Wait;
+        g.tf = None;
+        g.b = roof.map(|r| r.0 as i32).unwrap_or(-1);
+        g.target = Self::cell_pos(tc);
+        true
+    }
+    pub fn group_at(&self, p: Vec2) -> Option<usize> {
+        let mut best = None;
+        let mut bd = 6.0;
+        for (i, g) in self.groups.iter().enumerate() {
+            if g.dead {
+                continue;
+            }
+            if g.state == GState::Garrison {
+                let b = g.b as usize;
+                let c = self.world.buildings[b].c + self.roof_off(b);
+                if c.distance(p) < bd {
+                    bd = c.distance(p);
+                    best = Some(i);
+                }
+                continue;
+            }
+            for m in &g.m {
+                if m.alive && m.p.distance(p) < bd {
+                    bd = m.p.distance(p);
+                    best = Some(i);
+                }
+            }
+        }
+        best
+    }
+
+    fn groups_tick(&mut self) {
+        let obj = self.obj.clone();
+        let atk = self.faction().stats.atk;
+        for gi in 0..self.groups.len() {
+            if self.groups[gi].dead {
+                continue;
+            }
+            let kind = self.groups[gi].kind;
+            let d = udef(kind);
+            let gar = self.groups[gi].state == GState::Garrison;
+            let b = self.groups[gi].b;
+            if gar && !self.world.buildings[b as usize].alive {
+                for m in &mut self.groups[gi].m {
+                    m.alive = false;
+                }
+            }
+            let state = self.groups[gi].state;
+            let tf = self.groups[gi].tf.clone();
+            let (mut live, mut arrived) = (0, 0);
+            let mut shots = Vec::new();
+            for mi in 0..self.groups[gi].m.len() {
+                let mut m = self.groups[gi].m[mi].clone();
+                if !m.alive {
+                    continue;
+                }
+                if !gar {
+                    let c = m.p.y as usize * W + m.p.x as usize;
+                    let v = self.swarm.at(c)
+                        + self.swarm.at(c + 1)
+                        + self.swarm.at(c.saturating_sub(1));
+                    if v > 0 {
+                        m.hp -= (v.min(30)) as f32 * atk * DT;
+                        if m.hp <= 0.0 {
+                            m.alive = false;
+                            self.groups[gi].m[mi] = m;
+                            continue;
+                        }
+                    }
+                    if state == GState::Move {
+                        if let Some(tf) = &tf {
+                            Self::step_on_field(&obj, &mut m.p, tf, d.spd, &mut self.rng);
+                            if tf[m.p.y as usize * W + m.p.x as usize] <= 40 {
+                                arrived += 1;
+                            }
+                        }
+                    }
+                }
+                live += 1;
+                m.cd -= DT;
+                if m.cd <= 0.0 && self.ammo >= d.ammo {
+                    let (origin, muzzle, range) = if gar {
+                        let bb = &self.world.buildings[b as usize];
+                        (bb.c, bb.c + self.roof_off(b as usize), d.range * 1.6)
+                    } else {
+                        (m.p, m.p, d.range)
+                    };
+                    if let Some(t) = self
+                        .find_target(origin, range)
+                        .or_else(|| self.hive_in_range(origin, range))
+                    {
+                        shots.push((muzzle, t));
+                        m.cd = d.rate * (0.85 + 0.3 * self.rng.f());
+                    } else {
+                        m.cd = 0.2;
+                    }
+                }
+                self.groups[gi].m[mi] = m;
+            }
+            let src = if shots.is_empty() {
+                0
+            } else {
+                self.rev_src(RevKey::Group(gi))
+            };
+            for (a, t) in shots {
+                self.blast(t, d.rad, d.dmg, d.bdmg, src, d.dmg);
+                self.ammo -= d.ammo;
+                self.tracers.push(Tracer {
+                    a,
+                    b: t,
+                    t: 0.08,
+                    kind: if kind == U::Tank { 4 } else { 3 },
+                });
+                if kind == U::Tank {
+                    self.booms.push(Boom {
+                        p: t,
+                        r: d.rad,
+                        t: 0.25,
+                        life: 0.25,
+                        kind: 0,
+                    });
+                }
+            }
+            let g = &mut self.groups[gi];
+            if live == 0 {
+                g.dead = true;
+                continue;
+            }
+            if g.state == GState::Move && arrived >= (live as f32 * 0.6).ceil() as usize {
+                g.state = if g.b >= 0 && self.world.buildings[g.b as usize].alive {
+                    GState::Garrison
+                } else {
+                    GState::Hold
+                };
+            }
+        }
+    }
+
+    pub fn alive_civs(&self) -> usize {
+        self.civs.iter().filter(|c| c.st < C_DEAD).count()
+    }
+
+    pub fn hive_in_range(&self, p: Vec2, r: f32) -> Option<Vec2> {
+        self.hives
+            .iter()
+            .filter(|h| !h.dead && h.p.distance(p) < r + 5.0)
+            .map(|h| h.p)
+            .next()
+    }
+    pub fn hive_blocks(&self, p: Vec2) -> bool {
+        self.hives.iter().any(|h| !h.dead && h.p.distance(p) < h.r)
+    }
+
+    /// Alien hives: spawn waves (bigger for every infected building), grow, infect, die.
+    fn hives_tick(&mut self) {
+        let m = self.mult;
+        let mut waves = Vec::new();
+        let mut msgs = Vec::new();
+        for hi in 0..self.hives.len() {
+            if self.hives[hi].dead {
+                continue;
+            }
+            let world = &self.world;
+            let h = &mut self.hives[hi];
+            h.infected.retain(|&b| world.buildings[b].alive);
+            if h.hp <= 0.0 {
+                h.dead = true;
+                msgs.push(("Hive destroyed".to_string(), h.p));
+                continue;
+            }
+            h.spawn_t -= DT;
+            if h.spawn_t <= 0.0 {
+                h.spawn_t = 7.0;
+                waves.push((h.p, (8.0 + 10.0 * h.infected.len() as f32) * m));
+            }
+            h.grow_t -= DT;
+            if h.grow_t <= 0.0 {
+                h.grow_t = 14.0;
+                h.r = (h.r + 5.0).min(120.0);
+                h.max += 300.0;
+                h.hp += 300.0;
+                let mut best = None;
+                let mut bd = h.r;
+                for (bi, b) in world.buildings.iter().enumerate() {
+                    if !b.alive || h.infected.contains(&bi) {
+                        continue;
+                    }
+                    let d = b.c.distance(h.p);
+                    if d < bd {
+                        bd = d;
+                        best = Some(bi);
+                    }
+                }
+                if let Some(b) = best {
+                    h.infected.push(b);
+                }
+            }
+        }
+        for (s, p) in msgs {
+            self.score += 2000.0;
+            self.scrap += 300.0;
+            self.booms.push(Boom {
+                p,
+                r: 30.0,
+                t: 1.0,
+                life: 1.0,
+                kind: 2,
+            });
+            self.show(s, 3.0);
+            self.zone_dirty = true;
+        }
+        for (p, n) in waves {
+            self.queue((p.x, p.y), n, 2.0);
+        }
+    }
+}

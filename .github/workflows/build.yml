@@ -1,0 +1,38 @@
+name: Build PixelHorde.exe
+
+# Every push to main builds the Windows game and publishes it as release build-N.
+# The game checks the latest release on start and updates itself, so nobody needs Git.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: cargo build --release
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="build-${{ github.run_number }}"
+          msg="$(git log -1 --pretty=%s)"
+          gh release create "$tag" target/release/PixelHorde.exe \
+            --title "Pixel Horde build ${{ github.run_number }}" \
+            --notes "Download PixelHorde.exe and run it. It updates itself after that. Latest change: $msg" \
+            --latest

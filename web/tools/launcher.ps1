@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Continue'
 $UserAgent = 'PixelHorde/0.3 (+https://github.com/Littlebutta/Horde-defence-game)'
 $Overpass = @('https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter')
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$Game = (Resolve-Path (Join-Path $Root 'game')).Path
+$Game = $Root
 $PullEverySeconds = 60
 $HaveGit = [bool](Get-Command git -ErrorAction SilentlyContinue)
 
