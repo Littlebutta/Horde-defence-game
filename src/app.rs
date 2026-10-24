@@ -76,6 +76,8 @@ pub struct App {
     /// The 3D view is drawn here, with a depth buffer we create ourselves: some Windows drivers
     /// hand the window one that doesn't depth-test, so walls showed through each other.
     rt: Option<RenderTarget>,
+    /// how this GPU gets working depth, found by `pick_depth` on the first game frame
+    depth: Option<render::DepthMode>,
 }
 
 /// Colours of the co-op players' cursors, host first.
@@ -205,6 +207,7 @@ impl App {
             test_step: 0,
             test_log: 0,
             rt: None,
+            depth: None,
         }
     }
 
@@ -1265,11 +1268,16 @@ impl App {
         // camera
         let (sw, sh) = (screen_width(), screen_height());
         let (rw, rh) = (sw.max(1.0) as u32, sh.max(1.0) as u32);
-        if self.rt.as_ref().map(|r| (r.texture.width() as u32, r.texture.height() as u32)) != Some((rw, rh)) {
-            let sample_count = if std::env::var("PH_SHOT").is_ok() && std::env::var("PH_MSAA").is_err() { 1 } else { 4 };
-            let rt = render_target_ex(rw, rh, RenderTargetParams { sample_count, depth: true });
-            rt.texture.set_filter(FilterMode::Nearest);
-            self.rt = Some(rt);
+        let depth = *self.depth.get_or_insert_with(pick_depth);
+        match depth {
+            render::DepthMode::Target(sample_count) => {
+                if self.rt.as_ref().map(|r| (r.texture.width() as u32, r.texture.height() as u32)) != Some((rw, rh)) {
+                    let rt = render_target_ex(rw, rh, RenderTargetParams { sample_count, depth: true });
+                    rt.texture.set_filter(FilterMode::Nearest);
+                    self.rt = Some(rt);
+                }
+            }
+            render::DepthMode::Window => self.rt = None,
         }
         let mut cam = self.cam.camera();
         cam.render_target = self.rt.clone();
@@ -1290,6 +1298,7 @@ impl App {
                 scale: self.cam.scale(),
                 selected: self.selected,
                 time: self.clock,
+                far_first: (depth == render::DepthMode::Window).then(|| cam.position.truncate()),
             },
             &mut labels,
         );
@@ -2166,6 +2175,37 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
 fn alpha(c: Color, a: f32) -> Color {
     Color::new(c.r, c.g, c.b, a)
 }
+/// Finds a way of drawing the 3D view whose depth test works on this GPU (see `render::check_depth`)
+/// and notes the result in data/gpu.txt. `PH_DEPTH=4|1|window` forces one.
+fn pick_depth() -> render::DepthMode {
+    use render::DepthMode::*;
+    let forced = match std::env::var("PH_DEPTH").ok().as_deref() {
+        Some("window") => Some(Window),
+        Some(n) => n.parse().ok().map(Target),
+        None => None,
+    };
+    if let Some(m) = forced {
+        return m;
+    }
+    let tries: &[i32] = if std::env::var("PH_SHOT").is_ok() && std::env::var("PH_MSAA").is_err() { &[1] } else { &[4, 1] };
+    let mut log = String::new();
+    let mut pick = Window;
+    for &n in tries {
+        let (r, px) = render::check_depth(n);
+        log.push_str(&format!("render target, {} samples: {:?} {:?}\n", n, r, px));
+        if r == render::DepthCheck::Ok {
+            pick = Target(n);
+            break;
+        }
+    }
+    log.push_str(&format!("using {:?}\n", pick));
+    let _ = std::fs::write(storage::data_dir().join("gpu.txt"), &log);
+    if std::env::var("PH_SHOT").is_ok() {
+        eprint!("{}", log);
+    }
+    pick
+}
+
 /// Seconds as m:ss.
 fn mmss(t: f32) -> String {
     let s = t.max(0.0).ceil() as u32;

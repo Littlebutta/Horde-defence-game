@@ -791,6 +791,8 @@ pub struct ViewInfo {
     pub scale: f32,
     pub selected: Option<usize>,
     pub time: f32,
+    /// with no working depth buffer: the camera's ground position, to draw tiles far to near
+    pub far_first: Option<Vec2>,
 }
 
 fn bar(mb: &mut MB, p: Vec2, h: f32, w: f32, f: f32, col: Color) {
@@ -1088,12 +1090,13 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
     // ---- everything with height, depth tested
     gl_use_default_material();
     let near = |c: Vec2| c.distance(v.center) < v.radius + TILE as f32;
-    for (k, tl) in sc.tiles.iter().enumerate() {
-        let c = vec2(((k % TW) * TILE + TILE / 2) as f32, ((k / TW) * TILE + TILE / 2) as f32);
-        if !near(c) {
-            continue;
-        }
-        for m in &tl.solid {
+    let tile_c = |k: usize| vec2(((k % TW) * TILE + TILE / 2) as f32, ((k / TW) * TILE + TILE / 2) as f32);
+    let mut order: Vec<usize> = (0..sc.tiles.len()).filter(|k| near(tile_c(*k))).collect();
+    if let Some(eye) = v.far_first {
+        order.sort_by(|a, b| tile_c(*b).distance_squared(eye).total_cmp(&tile_c(*a).distance_squared(eye)));
+    }
+    for k in order {
+        for m in &sc.tiles[k].solid {
             draw_mesh(m);
         }
     }
@@ -1169,4 +1172,70 @@ pub fn ghost(x: f32, y: f32, w: f32, h: f32, z: f32, ok: bool) {
     for m in mb.finish() {
         draw_mesh(&m);
     }
+}
+
+// ------------------------------------------------------------------------------------------ GPU check
+
+/// How the 3D view gets a working depth buffer on this GPU.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum DepthMode {
+    /// our own render target with depth, at this many MSAA samples
+    Target(i32),
+    /// the window's own framebuffer, buildings drawn far to near so they mostly cover correctly
+    Window,
+}
+
+/// What a little test scene came out as: Ok, NoDepth (far drawn over near) or Hidden (anything
+/// depth-tested vanished), plus the centre pixel for the log.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum DepthCheck {
+    Ok,
+    NoDepth,
+    Hidden,
+    Other,
+}
+
+/// Draws the game's draw order in miniature into a render target and reads it back: a street
+/// painted with the ground material, then a near green box and a far red box over it. A working
+/// depth buffer shows green. Some Windows drivers showed red (no depth test) or the street (every
+/// depth-tested thing hidden), so the game tries each way of drawing until one shows green.
+pub fn check_depth(samples: i32) -> (DepthCheck, [u8; 4]) {
+    let rt = render_target_ex(32, 32, RenderTargetParams { sample_count: samples, depth: true });
+    let flat = flat_material();
+    let cam = Camera3D {
+        position: vec3(0.0, 0.0, -100.0),
+        target: vec3(0.0, 0.0, 0.0),
+        up: vec3(0.0, -1.0, 0.0),
+        fovy: 0.6,
+        z_near: 5.0,
+        z_far: 400.0,
+        render_target: Some(rt.clone()),
+        ..Default::default()
+    };
+    let quad = |z: f32, c: Color| Mesh {
+        vertices: [(-40.0, -40.0), (40.0, -40.0), (40.0, 40.0), (-40.0, 40.0)].iter().map(|(x, y)| Vertex::new(*x, *y, z, 0.0, 0.0, c)).collect(),
+        indices: vec![0, 1, 2, 0, 2, 3],
+        texture: None,
+    };
+    set_camera(&cam);
+    clear_background(BLACK);
+    gl_use_material(&flat);
+    draw_mesh(&quad(0.0, BLUE));
+    gl_use_default_material();
+    draw_mesh(&quad(-30.0, GREEN));
+    draw_mesh(&quad(-10.0, RED));
+    set_default_camera();
+    unsafe {
+        get_internal_gl().flush();
+    }
+    let img = rt.texture.get_texture_data();
+    let k = (16 * 32 + 16) * 4;
+    let px = [img.bytes[k], img.bytes[k + 1], img.bytes[k + 2], img.bytes[k + 3]];
+    let r = match (px[0] > 128, px[1] > 128, px[2] > 128) {
+        (false, true, false) => DepthCheck::Ok,
+        (true, false, false) => DepthCheck::NoDepth,
+        (false, false, true) => DepthCheck::Hidden,
+        _ => DepthCheck::Other,
+    };
+    (r, px)
 }
