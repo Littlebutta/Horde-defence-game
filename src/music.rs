@@ -57,7 +57,16 @@ pub struct Play {
     pub pan: f32,
     /// playback speed: below 1 is deeper and longer
     pub speed: f32,
+    /// nonzero: a later `stop` with the same key fades this copy out (a flame burst ending)
+    pub key: u64,
 }
+
+enum Cmd {
+    Play(Play),
+    Stop(u64),
+}
+/// seconds a stopped effect takes to fade out
+const STOP_FADE: f32 = 0.15;
 
 pub struct Music {
     /// volumes 0..=100, read by the audio thread
@@ -65,7 +74,7 @@ pub struct Music {
     sfx_vol: Arc<AtomicU32>,
     /// the battle ambience plays while this is set (a game is on screen)
     amb: Arc<AtomicBool>,
-    tx: Option<mpsc::Sender<Play>>,
+    tx: Option<mpsc::Sender<Cmd>>,
 }
 
 impl Music {
@@ -98,7 +107,13 @@ impl Music {
     }
     pub fn play(&self, p: Play) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(p);
+            let _ = tx.send(Cmd::Play(p));
+        }
+    }
+    /// Fades out the effects started with this key.
+    pub fn stop(&self, key: u64) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Cmd::Stop(key));
         }
     }
 }
@@ -236,6 +251,9 @@ struct Voice {
     gl: f32,
     gr: f32,
     playing: Arc<AtomicUsize>,
+    /// set when the effect is stopped; it then fades out over STOP_FADE
+    stopped: Arc<AtomicBool>,
+    fade: f32,
 }
 impl Drop for Voice {
     fn drop(&mut self) {
@@ -247,8 +265,14 @@ impl Iterator for Voice {
     fn next(&mut self) -> Option<f32> {
         let v = *self.data.get(self.i)?;
         let g = if self.i % 2 == 0 { self.gl } else { self.gr };
+        if self.stopped.load(Ordering::Relaxed) {
+            self.fade -= 1.0 / (STOP_FADE * self.rate as f32 * 2.0);
+            if self.fade <= 0.0 {
+                return None;
+            }
+        }
         self.i += 1;
-        Some(v * g)
+        Some(v * g * self.fade)
     }
 }
 impl Source for Voice {
@@ -266,7 +290,7 @@ impl Source for Voice {
     }
 }
 
-fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx: mpsc::Receiver<Play>) {
+fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx: mpsc::Receiver<Cmd>) {
     // no audio device: no sound, the game carries on
     let Ok((_stream, handle)) = OutputStream::try_default() else { return };
     let mut rng = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
@@ -274,6 +298,7 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx
     let mut ambience = Playlist::new(&AMBIENCE, AMB_FADE);
     let clips: Vec<Option<Clip>> = SFX.iter().map(|b| decode(b)).collect();
     let mut last_play = [Instant::now() - Duration::from_secs(1); SNDS];
+    let mut keyed: Vec<(u64, Arc<AtomicBool>)> = Vec::new();
     let mut t = Instant::now();
     loop {
         let dt = t.elapsed().as_secs_f32().min(0.5);
@@ -288,7 +313,20 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx
         ambience.update(&handle, &mut rng, amb.load(Ordering::Relaxed) && sv > 0.0, sv * AMB_GAIN, dt);
         // effects queued since the last step; wait for the next one for up to 50 ms
         let deadline = t + Duration::from_millis(50);
-        while let Ok(p) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        while let Ok(cmd) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            let p = match cmd {
+                Cmd::Play(p) => p,
+                Cmd::Stop(key) => {
+                    for (k, s) in &keyed {
+                        if *k == key {
+                            s.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    continue;
+                }
+            };
+            // forget keys whose voice has finished
+            keyed.retain(|(_, s)| Arc::strong_count(s) > 1);
             let k = p.snd as usize;
             let Some(c) = &clips[k] else { continue };
             let now = Instant::now();
@@ -299,7 +337,13 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx
             last_play[k] = now;
             c.playing.fetch_add(1, Ordering::Relaxed);
             let pan = p.pan.clamp(-1.0, 1.0);
+            let stopped = Arc::new(AtomicBool::new(false));
+            if p.key != 0 {
+                keyed.push((p.key, stopped.clone()));
+            }
             let v = Voice {
+                stopped,
+                fade: 1.0,
                 data: c.data.clone(),
                 i: 0,
                 rate: c.rate,
@@ -321,6 +365,21 @@ mod tests {
             let len = length(t);
             assert!(len > 20.0, "{len}");
         }
+    }
+    #[test]
+    fn stopped_voice_fades_out() {
+        let c = decode(SFX[Snd::Flame as usize]).unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        c.playing.fetch_add(1, Ordering::Relaxed);
+        let mut v = Voice { data: c.data.clone(), i: 0, rate: c.rate, gl: 1.0, gr: 1.0, playing: c.playing.clone(), stopped: stopped.clone(), fade: 1.0 };
+        for _ in 0..1000 {
+            v.next().unwrap();
+        }
+        stopped.store(true, Ordering::Relaxed);
+        let rest = v.count();
+        let fade = (STOP_FADE * c.rate as f32 * 2.0) as usize;
+        assert!(rest <= fade + 1 && rest + 1000 < c.data.len(), "{rest}");
+        assert_eq!(c.playing.load(Ordering::Relaxed), 0);
     }
     #[test]
     fn effects_decode() {

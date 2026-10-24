@@ -655,28 +655,36 @@ impl App {
         if cues.is_empty() || self.sfx_vol == 0 {
             return;
         }
-        // half the view's width in map cells, and quieter as the camera pulls back
+        // half the view's width in map cells. Effects fade out quickly past the edge of the view,
+        // and as the camera pulls back: full up close, silent from about 1100 cells out.
         let r = (screen_width() / 2.0 / self.cam.scale()).max(10.0);
-        let zoom = (500.0 / self.cam.dist).clamp(0.35, 1.0);
+        let zoom = ((1100.0 - self.cam.dist) / 800.0).clamp(0.0, 1.0);
+        let zoom = zoom * zoom;
         for (s, p) in cues {
             let off = p - self.cam.t;
-            let near = (1.0 - (off.length() - r).max(0.0) / (2.0 * r)).clamp(0.0, 1.0);
+            let near = (1.0 - (off.length() - r).max(0.0) / (0.6 * r)).clamp(0.0, 1.0);
+            // a flame burst is keyed by its bunker so its end can cut the sound
+            let key = (((p.x * 4.0) as i64 as u64) << 32 | ((p.y * 4.0) as i64 as u32 as u64)) | 1;
+            if s == Sfx::FlameStop {
+                self.music.stop(key);
+                continue;
+            }
             let pan = (off.dot(self.cam.right()) / r).clamp(-1.0, 1.0);
             let jitter = rand::gen_range(0.93, 1.07);
             let (snd, gain, speed) = match s {
                 Sfx::Cannon => (music::Snd::Cannon, 0.55, jitter),
-                Sfx::Flame => (music::Snd::Flame, 0.6, jitter),
+                Sfx::Flame => (music::Snd::Flame, 0.3, jitter),
                 Sfx::Railgun => (music::Snd::Railgun, 0.8, jitter),
                 Sfx::ArtilleryShot => (music::Snd::ArtilleryShot, 0.8, jitter),
                 Sfx::ArtilleryHit => (music::Snd::ArtilleryHit, 0.8, jitter),
                 Sfx::Bomb => (music::Snd::ArtilleryHit, 0.9, 0.85 * jitter),
                 Sfx::Nuke => (music::Snd::ArtilleryHit, 1.0, 0.5),
-                // the end of a flame spray: nothing to play (ending the Flame sound is up to playback)
                 Sfx::FlameStop => continue,
             };
             // a nuke is heard anywhere on the map
-            let gain = if s == Sfx::Nuke { gain * near.max(0.7) } else { gain * near * zoom };
-            self.music.play(music::Play { snd, gain, pan, speed });
+            let gain = if s == Sfx::Nuke { gain * near.max(0.7) } else { gain * near * near * zoom };
+            let key = if s == Sfx::Flame { key } else { 0 };
+            self.music.play(music::Play { snd, gain, pan, speed, key });
         }
     }
     fn set_sfx(&mut self, v: u32) {
