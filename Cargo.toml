@@ -29,3 +29,7 @@ codegen-units = 1
 
 [profile.dev]
 opt-level = 2
+
+# miniquad with a 24-bit depth buffer for render targets (see vendor/miniquad, "patched for Pixel Horde")
+[patch.crates-io]
+miniquad = { path = "vendor/miniquad" }

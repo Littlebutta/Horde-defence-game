@@ -62,6 +62,9 @@ pub struct App {
     sess: Option<net::Session>,
     test_step: u32,
     test_log: u64,
+    /// The 3D view is drawn here, with a depth buffer we create ourselves: some Windows drivers
+    /// hand the window one that doesn't depth-test, so walls showed through each other.
+    rt: Option<RenderTarget>,
 }
 
 /// Colours of the co-op players' cursors, host first.
@@ -99,8 +102,8 @@ impl Orbit {
             target: render::p3(self.t, 0.0),
             up: vec3(0.0, 0.0, -1.0),
             fovy: FOVY,
-            z_near: (self.dist * 0.02).max(0.5),
-            z_far: self.dist * 8.0 + 4000.0,
+            z_near: (self.dist * 0.04).max(0.5),
+            z_far: self.dist * 3.0 + 3000.0,
             ..Default::default()
         }
     }
@@ -185,6 +188,7 @@ impl App {
             sess: test_session(),
             test_step: 0,
             test_log: 0,
+            rt: None,
         }
     }
 
@@ -953,9 +957,17 @@ impl App {
 
         // camera
         let (sw, sh) = (screen_width(), screen_height());
-        clear_background(th.bg);
-        let cam = self.cam.camera();
+        let (rw, rh) = (sw.max(1.0) as u32, sh.max(1.0) as u32);
+        if self.rt.as_ref().map(|r| (r.texture.width() as u32, r.texture.height() as u32)) != Some((rw, rh)) {
+            let sample_count = if std::env::var("PH_SHOT").is_ok() && std::env::var("PH_MSAA").is_err() { 1 } else { 4 };
+            let rt = render_target_ex(rw, rh, RenderTargetParams { sample_count, depth: true });
+            rt.texture.set_filter(FilterMode::Nearest);
+            self.rt = Some(rt);
+        }
+        let mut cam = self.cam.camera();
+        cam.render_target = self.rt.clone();
         set_camera(&cam);
+        clear_background(th.bg);
         let radius = [vec2(0.0, 0.0), vec2(sw, 0.0), vec2(0.0, sh), vec2(sw, sh)]
             .iter()
             .map(|c| self.ground_at(*c).distance(self.cam.t))
@@ -991,6 +1003,9 @@ impl App {
         let cursor_label = self.preview(&g, &sc.flat, mw);
         gl_use_default_material();
         set_default_camera();
+        if let Some(rt) = &self.rt {
+            draw_texture_ex(&rt.texture, 0.0, 0.0, WHITE, DrawTextureParams { dest_size: Some(vec2(sw, sh)), flip_y: true, ..Default::default() });
+        }
         let m = cam.matrix();
         for (p, s, c, size) in &labels.items {
             let Some(q) = to_screen(&m, *p) else { continue };
