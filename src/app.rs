@@ -1071,7 +1071,8 @@ impl App {
         }
         self.cam = Orbit { t: g.world.hq, dist: 0.0, yaw: 0.0, pitch: 0.95 };
         self.cam.set_scale((screen_height() / 260.0).max(1.5));
-        self.scene = Some(Scene::new(&g, self.theme()));
+        let painter = *self.depth.get_or_insert_with(pick_depth) == render::DepthMode::Painter;
+        self.scene = Some(Scene::new(&g, self.theme(), painter));
         self.game = Some(g);
         self.tool = Tool::None;
         self.selected = None;
@@ -1307,7 +1308,7 @@ impl App {
                     self.rt = Some(rt);
                 }
             }
-            render::DepthMode::Window => self.rt = None,
+            render::DepthMode::Painter => self.rt = None,
         }
         let mut cam = self.cam.camera();
         cam.render_target = self.rt.clone();
@@ -1328,7 +1329,7 @@ impl App {
                 scale: self.cam.scale(),
                 selected: self.selected,
                 time: self.clock,
-                far_first: (depth == render::DepthMode::Window).then(|| cam.position.truncate()),
+                eye: cam.position.truncate(),
             },
             &mut labels,
         );
@@ -1346,7 +1347,7 @@ impl App {
             }
         }
         gl_use_material(&sc.flat);
-        let cursor_label = self.preview(&g, &sc.flat, mw);
+        let cursor_label = self.preview(&g, &sc, mw);
         gl_use_default_material();
         set_default_camera();
         if let Some(rt) = &self.rt {
@@ -1405,9 +1406,10 @@ impl App {
     }
 
     /// Ground marks are drawn with `flat`; ghosts of buildings are real 3D boxes.
-    fn preview(&self, g: &Game, flat: &Material, mw: Vec2) -> Option<(String, Color)> {
+    fn preview(&self, g: &Game, sc: &Scene, mw: Vec2) -> Option<(String, Color)> {
+        let flat = &sc.flat;
         let ghost = |x: f32, y: f32, w: f32, h: f32, z: f32, ok: bool| {
-            gl_use_default_material();
+            sc.use_solid();
             render::ghost(x, y, w, h, z, ok);
             gl_use_material(flat);
         };
@@ -2212,7 +2214,7 @@ fn alpha(c: Color, a: f32) -> Color {
 fn pick_depth() -> render::DepthMode {
     use render::DepthMode::*;
     let forced = match std::env::var("PH_DEPTH").ok().as_deref() {
-        Some("window") => Some(Window),
+        Some("window" | "painter") => Some(Painter),
         Some(n) => n.parse().ok().map(Target),
         None => None,
     };
@@ -2220,8 +2222,8 @@ fn pick_depth() -> render::DepthMode {
         return m;
     }
     let tries: &[i32] = if std::env::var("PH_SHOT").is_ok() && std::env::var("PH_MSAA").is_err() { &[1] } else { &[4, 1] };
-    let mut log = String::new();
-    let mut pick = Window;
+    let mut log = gl_info();
+    let mut pick = Painter;
     for &n in tries {
         let (r, px) = render::check_depth(n);
         log.push_str(&format!("render target, {} samples: {:?} {:?}\n", n, r, px));
@@ -2236,6 +2238,21 @@ fn pick_depth() -> render::DepthMode {
         eprint!("{}", log);
     }
     pick
+}
+
+/// The GPU and driver, for data/gpu.txt.
+fn gl_info() -> String {
+    use miniquad::gl::*;
+    let get = |k: u32| unsafe {
+        let p = glGetString(k);
+        if p.is_null() {
+            "?".to_string()
+        } else {
+            std::ffi::CStr::from_ptr(p as _).to_string_lossy().into_owned()
+        }
+    };
+    // GL_RENDERER is 0x1F01
+    format!("{} / {} / OpenGL {}\n", get(GL_VENDOR), get(0x1F01), get(GL_VERSION))
 }
 
 /// Seconds as m:ss.

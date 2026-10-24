@@ -1612,6 +1612,8 @@ impl RenderingBackend for GlContext {
         if let Some(v) = depth {
             bits |= GL_DEPTH_BUFFER_BIT;
             unsafe {
+                // patched for Pixel Horde: a depth clear is skipped while depth writes are masked
+                glDepthMask(1);
                 glClearDepthf(v);
             }
         }

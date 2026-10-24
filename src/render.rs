@@ -82,16 +82,63 @@ pub fn flat_material() -> Material {
     .unwrap()
 }
 
+/// For GPUs whose depth buffer can't be trusted (see `check_depth`): no depth test at all, so the
+/// painter's order decides what covers what. `cull` hides the inside faces of closed shapes, which
+/// is what makes one building look solid without a depth buffer.
+pub fn painter_material(cull: bool) -> Material {
+    let blend = BlendState::new(Equation::Add, BlendFactor::Value(BlendValue::SourceAlpha), BlendFactor::OneMinusValue(BlendValue::SourceAlpha));
+    load_material(
+        ShaderSource::Glsl { vertex: VS, fragment: FS },
+        MaterialParams {
+            pipeline_params: PipelineParams {
+                depth_test: Comparison::Always,
+                depth_write: false,
+                cull_face: if cull { CULL } else { miniquad::CullFace::Nothing },
+                color_blend: Some(blend),
+                alpha_blend: Some(blend),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+/// Which side the painter material drops: every solid face is wound to face outward (see
+/// `MB::wall`); GL calls the inward ones back faces with this camera.
+const CULL: miniquad::CullFace = miniquad::CullFace::Back;
+
 // ------------------------------------------------------------------------------------------ meshes
 
-/// Accumulates triangles into meshes small enough for one draw call each.
+/// Accumulates triangles into meshes small enough for one draw call each. With `split` on, every
+/// object (`obj`) gets meshes of its own, tagged with where it stands, so they can be drawn far to
+/// near.
 #[derive(Default)]
 struct MB {
     out: Vec<Mesh>,
     v: Vec<Vertex>,
     i: Vec<u16>,
+    split: bool,
+    anchor: Vec3,
+    anchors: Vec<Vec3>,
 }
 impl MB {
+    fn split(on: bool) -> MB {
+        MB { split: on, ..Default::default() }
+    }
+    /// Starts a new object at map point `at`; `lift` sorts it nearer than things at the same spot
+    /// (a turret after the roof it stands on).
+    fn obj(&mut self, at: Vec2, lift: f32) {
+        if self.split {
+            self.flush();
+        }
+        self.anchor = vec3(at.x, at.y, lift);
+    }
+    /// A wall from `a` to `b`, `z0` to `z1`, wound to face `nrm` (outward).
+    fn wall(&mut self, a: Vec2, b: Vec2, z0: f32, z1: f32, nrm: Vec2, ca: Color, cb: Color) {
+        // the triangles face the left of a->b; turn them around when outward is to the right
+        let (a, b) = if vec2(-(b - a).y, (b - a).x).dot(nrm) < 0.0 { (b, a) } else { (a, b) };
+        self.quad3(p3(a, z0), p3(b, z0), p3(b, z1), p3(a, z1), ca, cb);
+    }
     fn room(&mut self, n: usize) {
         if self.v.len() + n > 9000 || self.i.len() + n * 3 > 4800 {
             self.flush();
@@ -101,6 +148,7 @@ impl MB {
         clip_to_map(&mut self.v, &mut self.i);
         if !self.v.is_empty() {
             self.out.push(Mesh { vertices: std::mem::take(&mut self.v), indices: std::mem::take(&mut self.i), texture: None });
+            self.anchors.push(self.anchor);
         }
     }
     fn vert3(&mut self, p: Vec3, c: Color) -> u16 {
@@ -132,8 +180,12 @@ impl MB {
         for p in pts {
             self.vert3(p3(*p, h), col);
         }
-        for t in tris {
-            self.i.push(base + t as u16);
+        // wound to face up (-z), like the walls face out
+        for t in tris.chunks_exact(3) {
+            let (a, b, c) = (pts[t[0]], pts[t[1]], pts[t[2]]);
+            let up = (b - a).perp_dot(c - a) < 0.0;
+            let (j, k) = if up { (t[1], t[2]) } else { (t[2], t[1]) };
+            self.i.extend_from_slice(&[base + t[0] as u16, base + j as u16, base + k as u16]);
         }
     }
     fn poly(&mut self, pts: &[Vec2], col: Color) {
@@ -216,13 +268,17 @@ impl MB {
                 nrm = -nrm;
             }
             let c = shade(side, nrm);
-            self.quad3(p3(a, z0), p3(b, z0), p3(b, z1), p3(a, z1), mix(c, BLACK, 0.18), c);
+            self.wall(a, b, z0, z1, nrm, mix(c, BLACK, 0.18), c);
         }
         self.poly_at(pts, z1, top);
     }
     fn finish(mut self) -> Vec<Mesh> {
         self.flush();
         self.out
+    }
+    fn finish_objs(mut self) -> (Vec<Mesh>, Vec<Vec3>) {
+        self.flush();
+        (self.out, self.anchors)
     }
 }
 
@@ -372,12 +428,14 @@ struct BLook {
 
 struct Tile {
     solid: Vec<Mesh>,
+    /// where each `solid` mesh's building stands (painter mode has one building per mesh)
+    anchors: Vec<Vec3>,
     rubble: Vec<Mesh>,
     members: Vec<usize>,
 }
 
-fn bake_tile(g: &Game, th: &Theme, members: &[usize], infected: &std::collections::HashSet<usize>) -> (Vec<Mesh>, Vec<Mesh>) {
-    let mut mb = MB::default();
+fn bake_tile(g: &Game, th: &Theme, members: &[usize], infected: &std::collections::HashSet<usize>, painter: bool) -> (Vec<Mesh>, Vec<Vec3>, Vec<Mesh>) {
+    let mut mb = MB::split(painter);
     let mut rubble = MB::default();
     let hive_col = rgb(150, 70, 190);
     for &bi in members {
@@ -386,6 +444,7 @@ fn bake_tile(g: &Game, th: &Theme, members: &[usize], infected: &std::collection
             rubble.poly(&b.poly, th.rubble);
             continue;
         }
+        mb.obj(b.c, 0.0);
         let inf = infected.contains(&bi);
         let ccw = b.area > 0.0;
         let n = b.poly.len();
@@ -403,7 +462,7 @@ fn bake_tile(g: &Game, th: &Theme, members: &[usize], infected: &std::collection
             }
             let col = shade(side, nrm);
             // a little darker at street level, like ambient occlusion
-            mb.quad3(p3(a, 0.0), p3(c, 0.0), p3(c, b.h), p3(a, b.h), mix(col, BLACK, 0.15), col);
+            mb.wall(a, c, 0.0, b.h, nrm, mix(col, BLACK, 0.15), col);
             // window bands on taller blocks, nudged off the wall so they don't flicker
             if b.h > 7.0 && e.length() > 3.0 {
                 let floors = (b.h / 3.2) as i32;
@@ -412,7 +471,7 @@ fn bake_tile(g: &Game, th: &Theme, members: &[usize], infected: &std::collection
                 for f in 1..floors {
                     let z = f as f32 * 3.2 - 1.6;
                     let (p0, p1) = (a + inset + out, c - inset + out);
-                    mb.quad3(p3(p0, z - 0.45), p3(p1, z - 0.45), p3(p1, z + 0.45), p3(p0, z + 0.45), th.window, th.window);
+                    mb.wall(p0, p1, z - 0.45, z + 0.45, nrm, th.window, th.window);
                 }
             }
         }
@@ -426,7 +485,8 @@ fn bake_tile(g: &Game, th: &Theme, members: &[usize], infected: &std::collection
         }
         mb.poly_at(&b.poly, b.h, col);
     }
-    (mb.finish(), rubble.finish())
+    let (solid, anchors) = mb.finish_objs();
+    (solid, anchors, rubble.finish())
 }
 
 pub struct Scene {
@@ -440,6 +500,10 @@ pub struct Scene {
     zone: Texture2D,
     zbuf: Vec<u8>,
     pub flat: Material,
+    /// painter mode (no depth buffer): solid faces, culled, and everything else, not culled
+    pub painter: bool,
+    solid: Material,
+    bare: Material,
     pub dark: bool,
     btimer: f32,
     ztimer: f32,
@@ -460,7 +524,8 @@ fn infected_set(g: &Game) -> std::collections::HashSet<usize> {
 }
 
 impl Scene {
-    pub fn new(g: &Game, th: &Theme) -> Scene {
+    /// `painter`: the GPU's depth buffer doesn't work, draw solid things far to near instead.
+    pub fn new(g: &Game, th: &Theme, painter: bool) -> Scene {
         let units = Texture2D::from_rgba8(W as u16, H as u16, &vec![0u8; N * 4]);
         units.set_filter(FilterMode::Nearest);
         let glow = Texture2D::from_rgba8(CW as u16, CH as u16, &vec![0u8; CW * CH * 4]);
@@ -477,8 +542,8 @@ impl Scene {
         let tiles = members
             .into_iter()
             .map(|m| {
-                let (solid, rubble) = bake_tile(g, th, &m, &inf);
-                Tile { solid, rubble, members: m }
+                let (solid, anchors, rubble) = bake_tile(g, th, &m, &inf, painter);
+                Tile { solid, anchors, rubble, members: m }
             })
             .collect();
         Scene {
@@ -492,6 +557,9 @@ impl Scene {
             zone,
             zbuf: vec![0; ZW * ZH * 4],
             flat: flat_material(),
+            painter,
+            solid: painter_material(true),
+            bare: painter_material(false),
             dark: th.dark,
             btimer: 0.0,
             ztimer: 0.0,
@@ -500,13 +568,20 @@ impl Scene {
         }
     }
 
+    /// The material for solid 3D things drawn outside `draw_world` (placement ghosts).
+    pub fn use_solid(&self) {
+        if self.painter {
+            gl_use_material(&self.solid);
+        } else {
+            gl_use_default_material();
+        }
+    }
+
     pub fn retheme(&mut self, g: &Game, th: &Theme) {
         self.ground = build_ground(&g.world, th);
         let inf = infected_set(g);
         for t in &mut self.tiles {
-            let (a, b) = bake_tile(g, th, &t.members, &inf);
-            t.solid = a;
-            t.rubble = b;
+            (t.solid, t.anchors, t.rubble) = bake_tile(g, th, &t.members, &inf, self.painter);
         }
         self.dark = th.dark;
         self.need_zone = true;
@@ -629,9 +704,7 @@ impl Scene {
                     }
                 }
                 if dirty {
-                    let (a, b) = bake_tile(g, th, &t.members, &inf);
-                    t.solid = a;
-                    t.rubble = b;
+                    (t.solid, t.anchors, t.rubble) = bake_tile(g, th, &t.members, &inf, self.painter);
                 }
             }
         }
@@ -791,16 +864,17 @@ pub struct ViewInfo {
     pub scale: f32,
     pub selected: Option<usize>,
     pub time: f32,
-    /// with no working depth buffer: the camera's ground position, to draw tiles far to near
-    pub far_first: Option<Vec2>,
+    /// the camera's ground position (painter mode draws far to near from it)
+    pub eye: Vec2,
 }
 
 fn bar(mb: &mut MB, p: Vec2, h: f32, w: f32, f: f32, col: Color) {
     let (x, y) = (p.x - w / 2.0, p.y);
-    mb.quad3(p3(vec2(x, y), h), p3(vec2(x + w, y), h), p3(vec2(x + w, y + 0.9), h), p3(vec2(x, y + 0.9), h), Color::new(0.0, 0.0, 0.0, 0.55), Color::new(0.0, 0.0, 0.0, 0.55));
+    // corners listed to face up, like roofs
+    mb.quad3(p3(vec2(x, y), h), p3(vec2(x, y + 0.9), h), p3(vec2(x + w, y + 0.9), h), p3(vec2(x + w, y), h), Color::new(0.0, 0.0, 0.0, 0.55), Color::new(0.0, 0.0, 0.0, 0.55));
     let fw = w * f.clamp(0.0, 1.0);
     let h2 = h + 0.05;
-    mb.quad3(p3(vec2(x, y), h2), p3(vec2(x + fw, y), h2), p3(vec2(x + fw, y + 0.9), h2), p3(vec2(x, y + 0.9), h2), col, col);
+    mb.quad3(p3(vec2(x, y), h2), p3(vec2(x, y + 0.9), h2), p3(vec2(x + fw, y + 0.9), h2), p3(vec2(x + fw, y), h2), col, col);
 }
 
 fn ring(mb: &mut MB, c: Vec2, r: f32, w: f32, col: Color) {
@@ -945,8 +1019,8 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
 }
 
 /// Player structures and other things with height, rebuilt every frame (there are only hundreds).
-fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels) -> MB {
-    let mut mb = MB::default();
+fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels, painter: bool) -> MB {
+    let mut mb = MB::split(painter);
     let inview = |p: Vec2, m: f32| p.distance(v.center) < v.radius + m;
     let t = v.time;
     for (i, s) in g.structs.iter().enumerate() {
@@ -959,6 +1033,12 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels) -> MB {
         let c = vec2(x + w / 2.0, y + h / 2.0);
         if !inview(c, 20.0) {
             continue;
+        }
+        // on a roof: drawn just after that building
+        if s.roof >= 0 {
+            mb.obj(g.world.buildings[s.roof as usize].c, 1.0);
+        } else {
+            mb.obj(c, 0.0);
         }
         if s.pending {
             // flown in by helicopter: a translucent ghost until it lands
@@ -1041,6 +1121,7 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels) -> MB {
         let col = udef(gr.kind).col;
         let pts: Vec<Vec2> = (0..12).map(|k| b.c + vec2((k as f32 * 0.524).cos(), (k as f32 * 0.524).sin()) * 3.0).collect();
         let sel = v.selected == Some(gi);
+        mb.obj(b.c, 1.0);
         mb.prism(&pts, b.h, b.h + 0.4, if sel { rgb(255, 212, 59) } else { WHITE }, col);
         let pts: Vec<Vec2> = (0..12).map(|k| b.c + vec2((k as f32 * 0.524).cos(), (k as f32 * 0.524).sin()) * 2.3).collect();
         mb.prism(&pts, b.h + 0.4, b.h + 0.5, col, col);
@@ -1051,6 +1132,7 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels) -> MB {
         if h.dead || !inview(h.p, 30.0) {
             continue;
         }
+        mb.obj(h.p, 0.0);
         let pulse = 1.0 + 0.06 * (t * 2.5).sin();
         let size = (5.0 + h.r * 0.06) * pulse;
         for (k, (r, z0, z1)) in [(size, 0.0, size * 0.5), (size * 0.75, size * 0.5, size * 0.9), (size * 0.45, size * 0.9, size * 1.15)].iter().enumerate() {
@@ -1087,21 +1169,43 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
     }
     // shadows of aircraft are drawn with the aircraft below
 
-    // ---- everything with height, depth tested
-    gl_use_default_material();
+    // ---- everything with height
     let near = |c: Vec2| c.distance(v.center) < v.radius + TILE as f32;
     let tile_c = |k: usize| vec2(((k % TW) * TILE + TILE / 2) as f32, ((k / TW) * TILE + TILE / 2) as f32);
-    let mut order: Vec<usize> = (0..sc.tiles.len()).filter(|k| near(tile_c(*k))).collect();
-    if let Some(eye) = v.far_first {
-        order.sort_by(|a, b| tile_c(*b).distance_squared(eye).total_cmp(&tile_c(*a).distance_squared(eye)));
-    }
-    for k in order {
-        for m in &sc.tiles[k].solid {
+    let order = (0..sc.tiles.len()).filter(|k| near(tile_c(*k)));
+    let (dynamic, dyn_at) = solid_dynamic(g, v, labels, sc.painter).finish_objs();
+    if sc.painter {
+        // no depth buffer: every building and structure on its own, far to near, inside faces
+        // culled. Each one is a closed box, so this covers correctly without depth.
+        let fov = v.radius + 40.0;
+        let mut objs: Vec<(f32, &Mesh)> = Vec::new();
+        for k in order {
+            let t = &sc.tiles[k];
+            for (m, a) in t.solid.iter().zip(&t.anchors) {
+                if a.truncate().distance(v.center) < fov {
+                    objs.push((a.truncate().distance(v.eye) - a.z, m));
+                }
+            }
+        }
+        for (m, a) in dynamic.iter().zip(&dyn_at) {
+            objs.push((a.truncate().distance(v.eye) - a.z, m));
+        }
+        objs.sort_by(|a, b| b.0.total_cmp(&a.0));
+        gl_use_material(&sc.solid);
+        for (_, m) in objs {
             draw_mesh(m);
         }
-    }
-    for m in solid_dynamic(g, v, labels).finish() {
-        draw_mesh(&m);
+        gl_use_material(&sc.bare);
+    } else {
+        gl_use_default_material();
+        for k in order {
+            for m in &sc.tiles[k].solid {
+                draw_mesh(m);
+            }
+        }
+        for m in &dynamic {
+            draw_mesh(m);
+        }
     }
     // portal labels
     for p in &g.portals {
@@ -1181,8 +1285,8 @@ pub fn ghost(x: f32, y: f32, w: f32, h: f32, z: f32, ok: bool) {
 pub enum DepthMode {
     /// our own render target with depth, at this many MSAA samples
     Target(i32),
-    /// the window's own framebuffer, buildings drawn far to near so they mostly cover correctly
-    Window,
+    /// no depth buffer at all: the window's framebuffer, solid things sorted and drawn far to near
+    Painter,
 }
 
 /// What a little test scene came out as: Ok, NoDepth (far drawn over near) or Hidden (anything
