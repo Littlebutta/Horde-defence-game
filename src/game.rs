@@ -731,11 +731,12 @@ impl Game {
             .any(|s| !s.dead && !s.pending && s.t == t)
     }
 
-    /// Price of a structure at a spot: turrets get dearer the further they are from the HQ.
+    /// Price of a structure at a spot: outside the base zone, turrets get dearer the further
+    /// they are from the HQ. Inside the zone everything costs its base price.
     pub fn cost_at(&self, t: S, at: Vec2) -> f32 {
         let d = def(t);
         let mut c = d.cost;
-        if d.turret {
+        if d.turret && !self.world.in_zone(at) {
             let dist = at.distance(self.world.hq);
             c *= 1.0 + (dist - 100.0).max(0.0) / 350.0;
         }
