@@ -22,6 +22,9 @@
 //! * zombies go down once and get back up, and swarm whatever killed one of them (locked to that target);
 //! * some alien bugs fly, ignoring city buildings and walls on their way to the HQ;
 //! * orcs build rage when units around them die, which makes them faster (and redder).
+//!
+//! In a chaos game all three armies share the map: each unit carries its army in its flags
+//! (`kind_of`) and moves by that army's stats and quirks.
 
 use crate::fields::{DX, DY, INF, U16};
 use crate::world::*;
@@ -73,12 +76,27 @@ pub const F_REVIVED: u8 = 2;
 pub const F_DOWN: u8 = 4;
 /// An empty slot left by a unit that died or walked into another tile (swept out now and then).
 const F_GONE: u8 = 8;
+/// Bits 4 and 5: which army a unit belongs to (an index into `FACTIONS`). Only read in chaos games.
+pub const KIND_SHIFT: u8 = 4;
+pub const F_KIND: u8 = 3 << KIND_SHIFT;
+
+#[inline]
+pub fn kind_of(fl: u8) -> usize {
+    ((fl & F_KIND) >> KIND_SHIFT) as usize
+}
+pub fn kind_flag(k: usize) -> u8 {
+    ((k as u8) << KIND_SHIFT) & F_KIND
+}
 
 /// Tint codes written per cell for the renderer (highest wins).
 pub const TINT_DOWN: u8 = 1;
 pub const TINT_NORMAL: u8 = 2;
 pub const TINT_FLY: u8 = 3;
 pub const TINT_RAGE: u8 = 4; // 4..=255 = rage level
+/// Chaos games: the army sits in the top two bits (`tint >> 6`) and the code above in the rest,
+/// with rage squeezed into 4..=63.
+pub const TINT_ARMY_SHIFT: u8 = 6;
+pub const TINT_MIXED_RAGE: f32 = 59.0;
 
 #[derive(Clone, Copy)]
 pub struct Unit {
@@ -140,6 +158,8 @@ pub struct StepIn<'a> {
     pub hunt: Option<&'a [u16]>,
     pub rush: bool,
     pub stats: FactionStats,
+    /// chaos game: every army's stats, looked up per unit
+    pub mixed: Option<[FactionStats; 3]>,
     pub sd: &'a [AtomicU32],
     pub bd: &'a [AtomicU32],
     /// per structure: can fliers pass over it (walls)
@@ -275,13 +295,34 @@ impl Acc {
     }
 }
 
+/// How a game's units are tinted: one army, one army of orcs (rage shows), or chaos.
+#[derive(Clone, Copy, PartialEq)]
+enum Tm {
+    Plain,
+    Orc,
+    Mixed,
+}
+
 #[inline]
-fn tint_of(u: &Unit, orc: bool) -> u8 {
+fn tint_of(u: &Unit, tm: Tm) -> u8 {
+    if tm == Tm::Mixed {
+        let k = kind_of(u.fl);
+        let code = if u.fl & F_DOWN != 0 {
+            TINT_DOWN
+        } else if u.fl & F_FLY != 0 {
+            TINT_FLY
+        } else if k == 2 {
+            TINT_RAGE + (u.aux * TINT_MIXED_RAGE) as u8
+        } else {
+            TINT_NORMAL
+        };
+        return ((k as u8) << TINT_ARMY_SHIFT) | code;
+    }
     if u.fl & F_DOWN != 0 {
         TINT_DOWN
     } else if u.fl & F_FLY != 0 {
         TINT_FLY
-    } else if orc {
+    } else if tm == Tm::Orc {
         TINT_RAGE + (u.aux * 251.0) as u8
     } else {
         TINT_NORMAL
@@ -290,7 +331,7 @@ fn tint_of(u: &Unit, orc: bool) -> u8 {
 
 /// Right after a run of units has moved (while it is still in cache): drops the dead and the leavers
 /// (they become holes, leavers also go to `out`) and counts the rest into `acc`. Returns the kills.
-fn settle_units(t: usize, us: &mut [Unit], acc: &mut Acc, out: &mut Vec<Unit>, orc: bool) -> (u32, u32) {
+fn settle_units(t: usize, us: &mut [Unit], acc: &mut Acc, out: &mut Vec<Unit>, tm: Tm) -> (u32, u32) {
     let (x0, y0) = ((t % TW) * TS, (t / TW) * TS);
     let mut killed = 0;
     let mut holes = 0;
@@ -325,7 +366,7 @@ fn settle_units(t: usize, us: &mut [Unit], acc: &mut Acc, out: &mut Vec<Unit>, o
         if u.fl & F_DOWN == 0 {
             acc.dens[i] = acc.dens[i].saturating_add(1);
         }
-        acc.tint[i] = acc.tint[i].max(tint_of(u, orc));
+        acc.tint[i] = acc.tint[i].max(tint_of(u, tm));
     }
     // coarse counts from the cell counts
     for ly in 0..TS {
@@ -358,7 +399,7 @@ impl Grids<'_> {
     }
     /// Counts one unit that walked in. Only call it from the tile the unit stands in.
     #[inline]
-    fn mark(&self, u: &Unit, orc: bool) {
+    fn mark(&self, u: &Unit, tm: Tm) {
         let c = cl(u.y) * W + cl(u.x);
         if u.fl & F_DOWN == 0 {
             let d = &self.dens[c];
@@ -367,7 +408,7 @@ impl Grids<'_> {
             g.store(g.load(Relaxed) + 1, Relaxed);
         }
         let t = &self.tint[c];
-        t.store(t.load(Relaxed).max(tint_of(u, orc)), Relaxed);
+        t.store(t.load(Relaxed).max(tint_of(u, tm)), Relaxed);
     }
 }
 
@@ -378,10 +419,8 @@ const PACKED: usize = 2;
 /// (field value plus crowding, before jitter), or infinity where the step is blocked. In a packed
 /// crowd hundreds of units share a cell, so this is worked out once per cell instead of per unit.
 /// It does the same float sums as `descend`, so units move exactly as they would without it.
-fn cell_costs(k: &Ctx, t: usize, tab: &mut [[f32; 8]; TS * TS]) {
+fn cell_costs(k: &Ctx, t: usize, tab: &mut [[f32; 8]; TS * TS], use_hunt: bool) {
     let inp = k.inp;
-    let zombie = inp.stats.mode == Behaviour::Zombie;
-    let use_hunt = inp.hunt.is_some() && !(zombie && inp.rush);
     let hunt = inp.hunt.unwrap_or(&[]);
     let (x0, y0) = ((t % TW) * TS, (t / TW) * TS);
     for ly in 0..TS {
@@ -413,26 +452,28 @@ const DK: f32 = 6.0;
 
 fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>) {
     let inp = k.inp;
-    let st = inp.stats;
-    let zombie = st.mode == Behaviour::Zombie;
-    let orc = st.mode == Behaviour::Orc;
-    let use_hunt = inp.hunt.is_some() && !(zombie && inp.rush);
-    let wander = zombie && !inp.rush;
+    let mixed = inp.mixed;
+    let st0 = inp.stats;
+    let zombie0 = st0.mode == Behaviour::Zombie;
+    let use_hunt0 = inp.hunt.is_some() && !(zombie0 && inp.rush);
+    let wander0 = zombie0 && !inp.rush;
     let (obj, nb, hq, hunt) = (inp.obj, inp.nb, inp.hq, inp.hunt.unwrap_or(&[]));
     let (prev, dprev, deaths, dmg, dsrc, any_dmg) = (k.prev, k.dprev, k.deaths, k.dmg, k.dsrc, k.any_dmg);
     let dk = DK;
     let dt = inp.dt;
     let mut s = seed;
     let mut tab_buf = None;
-    if us.len() > PACKED * TS * TS && (use_hunt || !wander) {
+    // (in chaos the shared table is the one orcs and bugs use; zombies off the hunt work it out themselves)
+    let tab_hunt = if mixed.is_some() { inp.hunt.is_some() } else { use_hunt0 };
+    if us.len() > PACKED * TS * TS && (tab_hunt || !wander0 || mixed.is_some()) {
         let mut b = Box::new([[0f32; 8]; TS * TS]);
-        cell_costs(k, t, &mut b);
+        cell_costs(k, t, &mut b, tab_hunt);
         tab_buf = Some(b);
     }
     let tab = tab_buf.as_deref();
     // orcs: deaths around each coarse cell of this tile last tick (3x3 coarse cells), worked out once
     let mut rage_near = [0u32; TC * TC];
-    if orc {
+    if st0.mode == Behaviour::Orc || mixed.is_some() {
         let (gx0, gy0) = (((t % TW) * TC) as i32, ((t / TW) * TC) as i32);
         for (i, v) in rage_near.iter_mut().enumerate() {
             let (gx, gy) = (gx0 + (i % TC) as i32, gy0 + (i / TC) as i32);
@@ -451,6 +492,18 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
         if u.fl & F_GONE != 0 {
             continue;
         }
+        let (st, use_hunt, wander) = match &mixed {
+            Some(m) => {
+                let st = m[kind_of(u.fl).min(2)];
+                let z = st.mode == Behaviour::Zombie;
+                (st, inp.hunt.is_some() && !(z && inp.rush), z && !inp.rush)
+            }
+            None => (st0, use_hunt0, wander0),
+        };
+        let zombie = st.mode == Behaviour::Zombie;
+        let orc = st.mode == Behaviour::Orc;
+        // the shared table only fits units that follow the same field it was worked out for
+        let tab = tab.filter(|_| use_hunt == tab_hunt);
         let (x, y) = (u.x, u.y);
         let cx = cl(x) as i32;
         let cy = cl(y) as i32;
@@ -752,7 +805,13 @@ impl Swarm {
             tint: &self.tint,
             coarse: &self.coarse,
         };
-        let orc = inp.stats.mode == Behaviour::Orc;
+        let tm = if inp.mixed.is_some() {
+            Tm::Mixed
+        } else if inp.stats.mode == Behaviour::Orc {
+            Tm::Orc
+        } else {
+            Tm::Plain
+        };
         // passes 1 and 2: step and settle, one task per tile. Busy tiles fan out into runs of CHUNK
         // units, each run stepping and settling on its own core, and then add up their counts.
         let res: Vec<(u32, Vec<Death>)> = self
@@ -781,7 +840,7 @@ impl Swarm {
                 let mut acc = Acc::new();
                 let (killed, h) = if us.len() <= CHUNK {
                     step_units(&k, t, seed(0), us, &mut ev);
-                    settle_units(t, us, &mut acc, out, orc)
+                    settle_units(t, us, &mut acc, out, tm)
                 } else {
                     let parts: Vec<(Acc, Vec<Death>, Vec<Unit>, u32, u32)> = us
                         .par_chunks_mut(CHUNK)
@@ -789,7 +848,7 @@ impl Swarm {
                         .map(|(ci, c)| {
                             let (mut a, mut e, mut o) = (Acc::new(), Vec::new(), Vec::new());
                             step_units(&k, t, seed(ci), c, &mut e);
-                            let (kl, h) = settle_units(t, c, &mut a, &mut o, orc);
+                            let (kl, h) = settle_units(t, c, &mut a, &mut o, tm);
                             (a, e, o, kl, h)
                         })
                         .collect();
@@ -830,7 +889,7 @@ impl Swarm {
                     }
                     for u in &out[ny as usize * TW + nx as usize] {
                         if tile_of(u.x, u.y) == t {
-                            gr.mark(u, orc);
+                            gr.mark(u, tm);
                             us.push(*u);
                             n += 1;
                         }
@@ -852,7 +911,7 @@ impl Swarm {
                     let d = tile_of(u.x, u.y);
                     let (dx, dy) = ((d % TW) as i32 - tx, (d / TW) as i32 - ty);
                     if dx.abs() > 1 || dy.abs() > 1 {
-                        gr.mark(&u, orc);
+                        gr.mark(&u, tm);
                         self.seen[d] |= 1;
                         self.tiles[d].push(u);
                     }

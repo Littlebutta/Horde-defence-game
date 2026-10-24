@@ -3,7 +3,7 @@
 
 use crate::defs::*;
 use crate::fields::{Done, FieldWorker, Job, DX, DY, INF};
-use crate::swarm::{Behaviour, RevIn, StepIn, Swarm, DMG_SCALE, F_FLY};
+use crate::swarm::{kind_flag, kind_of, Behaviour, RevIn, StepIn, Swarm, DMG_SCALE, F_FLY, TINT_ARMY_SHIFT};
 use crate::world::*;
 use macroquad::prelude::{vec2, Vec2};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
@@ -300,6 +300,8 @@ pub struct Game {
     pub world: World,
     pub fac: usize,
     pub mult: f32,
+    /// the army the director is spawning for right now (chaos games have three)
+    army: usize,
     pub swarm: Swarm,
     pub obj: Arc<Vec<i32>>,
     /// which neighbours a unit may step to from each cell (see `fields::neighbour_mask`)
@@ -416,6 +418,7 @@ impl Game {
             world,
             fac,
             mult,
+            army: fac.min(2),
             swarm: Swarm::new(),
             obj: Arc::new(vec![FREE; N]),
             nb: Arc::new(crate::fields::neighbour_mask(&vec![FREE; N])),
@@ -529,7 +532,8 @@ impl Game {
         let ncivs = (9000.0 * (g.world.buildings.len() as f32).sqrt() / 70.0).clamp(3000.0, 14000.0)
             as usize;
         g.init_civilians(ncivs);
-        if fac == 0 {
+        if fac == 0 || fac == CHAOS {
+            g.army = 0;
             for _ in 0..6 {
                 if let Some(p) = g.random_cell(3000) {
                     g.queue(p, (6.0 * mult).max(3.0), 1.0);
@@ -541,6 +545,18 @@ impl Game {
 
     pub fn faction(&self) -> &'static Faction {
         &FACTIONS[self.fac]
+    }
+    /// This army is in the game: the one picked, or all three in chaos.
+    pub fn has_army(&self, k: usize) -> bool {
+        self.fac == k || self.fac == CHAOS
+    }
+    /// The army of whatever stands in cell `c`.
+    fn army_at(&self, c: usize) -> usize {
+        if self.fac == CHAOS {
+            (self.swarm.tint[c].load(Relaxed) >> TINT_ARMY_SHIFT) as usize
+        } else {
+            self.fac
+        }
     }
     pub fn show(&mut self, s: impl Into<String>, t: f32) {
         self.banner = (s.into(), t);
@@ -734,7 +750,7 @@ impl Game {
         }
         // orc portals: where captured civilians are dragged
         self.portal_ft -= DT;
-        if self.fac == 2 && self.portal_ft <= 0.0 && self.fw_aux.busy < 3 {
+        if self.has_army(2) && self.portal_ft <= 0.0 && self.fw_aux.busy < 3 {
             self.portal_ft = 3.0;
             let mut src = Vec::new();
             for p in &self.portals {
@@ -1326,12 +1342,15 @@ impl Game {
         self.queue_ex(at, count, secs, 0, 0.0);
     }
     fn queue_ex(&mut self, at: (f32, f32), count: f32, secs: f32, fl: u8, aux: f32) {
+        self.queue_army(at, count, secs, fl, aux, self.army);
+    }
+    fn queue_army(&mut self, at: (f32, f32), count: f32, secs: f32, fl: u8, aux: f32, army: usize) {
         if count >= 1.0 {
             self.spawnq.push(SpawnQ {
                 at,
                 left: count.round() as usize,
                 rate: (count / secs).max(1.0),
-                fl,
+                fl: fl | kind_flag(army),
                 aux,
             });
         }
@@ -1343,17 +1362,30 @@ impl Game {
     }
     /// Test horde of `n` hostiles from eight random spots (the in-game "Spawn 1M" button).
     pub fn stress_n(&mut self, n: f32) {
-        for _ in 0..8 {
+        for k in 0..8 {
             if let Some(p) = self.random_cell(1500) {
-                self.queue(p, n / 8.0, 6.0);
+                // chaos: every army gets some
+                let army = if self.fac == CHAOS { k % 3 } else { self.army };
+                self.queue_army(p, n / 8.0, 6.0, 0, 0.0, army);
             }
         }
         self.show(format!("{} hostiles inbound", n as u64), 4.0);
     }
 
+    /// Each army's own way of coming at you, all three in chaos (each a little smaller).
     fn director(&mut self) {
-        let m = self.mult;
-        match self.fac {
+        if self.fac == CHAOS {
+            for k in 0..3 {
+                self.army = k;
+                self.direct(k, self.mult * 0.6);
+            }
+        } else {
+            self.army = self.fac;
+            self.direct(self.fac, self.mult);
+        }
+    }
+    fn direct(&mut self, army: usize, m: f32) {
+        match army {
             0 => {
                 self.out_t -= DT;
                 if self.out_t <= 0.0 {
@@ -1539,6 +1571,8 @@ impl Game {
         self.pump_fields();
         lap(&mut self.prof[0]);
         let stats = self.faction().stats;
+        let chaos = self.fac == CHAOS;
+        let army_hp = |fl: u8| if chaos { FACTIONS[kind_of(fl).min(2)].stats.hp } else { stats.hp };
         // spawns
         let mut q = std::mem::take(&mut self.spawnq);
         for s in &mut q {
@@ -1546,9 +1580,9 @@ impl Game {
             s.left -= k;
             let seed = self.rng.next_u64();
             let hp = if s.fl & F_FLY != 0 {
-                stats.hp * 0.6
+                army_hp(s.fl) * 0.6
             } else {
-                stats.hp
+                army_hp(s.fl)
             };
             self.swarm
                 .spawn(s.at, k, &self.obj, &self.hq_dist, hp, seed, s.fl, s.aux);
@@ -1563,9 +1597,9 @@ impl Game {
                 1,
                 &self.obj,
                 &self.hq_dist,
-                stats.hp,
+                army_hp(0),
                 seed,
-                0,
+                kind_flag(0),
                 0.0,
             );
         }
@@ -1603,6 +1637,7 @@ impl Game {
             hunt: hunt.as_deref().map(|v| v.as_slice()),
             rush: self.rush,
             stats,
+            mixed: chaos.then(|| [FACTIONS[0].stats, FACTIONS[1].stats, FACTIONS[2].stats]),
             sd: &self.sd,
             bd: &self.bd,
             low: &self.low,
@@ -1804,7 +1839,7 @@ impl Game {
 
     /// The revenge id for an attacker (0 when the faction doesn't care).
     pub fn rev_src(&mut self, key: RevKey) -> u16 {
-        if self.fac != 0 {
+        if !self.has_army(0) {
             return 0;
         }
         if let Some(i) = self.revs.iter().position(|r| r.key == key && r.alive) {
@@ -3145,13 +3180,14 @@ impl Game {
                     || (cy < H - 1 && self.swarm.at(c + W) > 0);
             }
             if hit {
-                if self.fac == 2 && !self.portals.is_empty() && self.rng.f() < 0.35 {
+                let army = self.army_at(c);
+                if army == 2 && !self.portals.is_empty() && self.rng.f() < 0.35 {
                     self.civs[i].st = C_CAPTURED;
                     continue;
                 }
                 self.civs[i].st = C_DEAD;
                 self.civ_lost += 1;
-                if self.fac == 0 {
+                if army == 0 {
                     // every bite turns one civilian into two zombies
                     self.conv.push(p);
                     self.conv.push(p);
@@ -3257,7 +3293,7 @@ impl Game {
             self.portals[k].taken += 1;
             let n = (60.0 * self.mult * (1.0 + self.portals[k].taken as f32 * 0.1).min(2.5)).round();
             let at = (self.portals[k].p.x, self.portals[k].p.y);
-            self.queue_ex(at, n, 3.0, 0, 1.0);
+            self.queue_army(at, n, 3.0, 0, 1.0, 2);
             self.show(
                 format!(
                     "A civilian was dragged through a portal: {} enraged orcs pour out",
@@ -3882,7 +3918,7 @@ mod tests {
     /// The special towers stay in lockstep too, whatever the thread count.
     #[test]
     fn towers_deterministic() {
-        for fac in 0..3 {
+        for fac in 0..FACTIONS.len() {
             let mk = || Game::new(crate::citygen::generate(11), fac, 1.0, 7);
             let run = || {
                 let mut g = mk();
@@ -3897,5 +3933,26 @@ mod tests {
             assert_eq!(one, many, "faction {}", fac);
             assert!(one.1 > 0);
         }
+    }
+
+    /// Chaos: all three armies spawn, each keeps its own kind, and the game stays deterministic.
+    #[test]
+    fn chaos_has_every_army() {
+        let run = || {
+            let mut g = Game::new(crate::citygen::generate(5), CHAOS, 1.0, 9);
+            g.stress_n(30000.0);
+            for _ in 0..300 {
+                g.tick();
+            }
+            let mut n = [0usize; 3];
+            for u in g.swarm.units() {
+                n[kind_of(u.fl)] += 1;
+            }
+            (g.checksum(), n)
+        };
+        let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(run);
+        let many = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(run);
+        assert_eq!(one, many);
+        assert!(one.1.iter().all(|&k| k > 1000), "{:?}", one.1);
     }
 }

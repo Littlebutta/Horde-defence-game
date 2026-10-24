@@ -75,6 +75,19 @@ enum Screen {
     Hub,
 }
 
+/// Pixel `k` of faction `i`'s little swarm on its menu card: chaos mixes all three colours.
+fn swatch(i: usize, k: usize, c: Color) -> Color {
+    if i == CHAOS {
+        let f = FACTIONS[k % 3].col;
+        Color::from_rgba(f[0], f[1], f[2], 255)
+    } else {
+        c
+    }
+}
+
+/// Height of a faction card on the menu.
+const FAC_ROW: f32 = 56.0;
+
 const DIFFS: [(&str, f32); 4] = [
     ("Easy", 0.6),
     ("Normal", 1.0),
@@ -611,7 +624,8 @@ impl App {
         }
         let y = self.heading("Faction", a.x, a.y);
         a.cut_top(y - a.y, 0.0);
-        let rows = a.cut_top(3.0 * 60.0 + 2.0 * 8.0, 18.0).rows(3, 8.0);
+        let nf = FACTIONS.len();
+        let rows = a.cut_top(nf as f32 * FAC_ROW + (nf - 1) as f32 * 6.0, 18.0).rows(nf, 6.0);
         for (i, f) in FACTIONS.iter().enumerate() {
             let cr = rows[i];
             let active = lob.fac as usize == i;
@@ -619,13 +633,14 @@ impl App {
             rrect(cr, R_CTRL, if active { mix(p.panel2, c, 0.16) } else { alpha(p.panel2, 0.5) });
             rrect_lines(cr, R_CTRL, if active { 2.0 } else { 1.0 }, if active { c } else { p.line });
             for k in 0..16 {
-                let q = vec2(cr.x + 14.0 + (k * 37 % 27) as f32, cr.y + 16.0 + (k * 13 % 29) as f32);
+                let q = vec2(cr.x + 14.0 + (k * 37 % 27) as f32, cr.y + 14.0 + (k * 13 % 29) as f32);
+                let c = swatch(i, k, c);
                 draw_rectangle(q.x, q.y, 3.0, 3.0, if active { c } else { alpha(c, 0.4) });
             }
-            text(&self.fonts.head, f.name, cr.x + 56.0, cr.y + 22.0, 17.0, if active { p.text } else { p.dim });
-            let lines = wrap_lines(&self.fonts.mono, f.blurb, cr.w - 70.0, 11.5);
+            text(&self.fonts.head, f.name, cr.x + 56.0, cr.y + 21.0, 16.0, if active { p.text } else { p.dim });
+            let lines = wrap_lines(&self.fonts.mono, f.blurb, cr.w - 70.0, 11.0);
             for (k, l) in lines.iter().take(2).enumerate() {
-                text(&self.fonts.mono, l, cr.x + 56.0, cr.y + 39.0 + k as f32 * 14.0, 11.5, p.dim);
+                text(&self.fonts.mono, l, cr.x + 56.0, cr.y + 36.0 + k as f32 * 13.0, 11.0, p.dim);
             }
         }
         let y = self.heading("Difficulty", a.x, a.y);
@@ -1041,7 +1056,8 @@ impl App {
         // faction
         let y = self.heading("Faction", a.x, a.y);
         a.cut_top(y - a.y, 0.0);
-        let rows = a.cut_top(3.0 * 60.0 + 2.0 * 8.0, 18.0).rows(3, 8.0);
+        let nf = FACTIONS.len();
+        let rows = a.cut_top(nf as f32 * FAC_ROW + (nf - 1) as f32 * 6.0, 18.0).rows(nf, 6.0);
         for (i, f) in FACTIONS.iter().enumerate() {
             let cr = rows[i];
             let active = self.fac == i;
@@ -1051,13 +1067,13 @@ impl App {
             rrect_lines(cr, R_CTRL, if active { 2.0 } else { 1.0 }, if active { c } else { p.line });
             // a little swarm of the faction's pixels
             for k in 0..16 {
-                let q = vec2(cr.x + 14.0 + (k * 37 % 27) as f32, cr.y + 16.0 + (k * 13 % 29) as f32);
-                draw_rectangle(q.x, q.y, 3.0, 3.0, c);
+                let q = vec2(cr.x + 14.0 + (k * 37 % 27) as f32, cr.y + 14.0 + (k * 13 % 29) as f32);
+                draw_rectangle(q.x, q.y, 3.0, 3.0, swatch(i, k, c));
             }
-            text(&self.fonts.head, f.name, cr.x + 56.0, cr.y + 22.0, 17.0, p.text);
-            let lines = wrap_lines(&self.fonts.mono, f.blurb, cr.w - 70.0, 11.5);
+            text(&self.fonts.head, f.name, cr.x + 56.0, cr.y + 21.0, 16.0, p.text);
+            let lines = wrap_lines(&self.fonts.mono, f.blurb, cr.w - 70.0, 11.0);
             for (k, l) in lines.iter().take(2).enumerate() {
-                text(&self.fonts.mono, l, cr.x + 56.0, cr.y + 39.0 + k as f32 * 14.0, 11.5, p.dim);
+                text(&self.fonts.mono, l, cr.x + 56.0, cr.y + 36.0 + k as f32 * 13.0, 11.0, p.dim);
             }
             if hot && !self.blocked && is_mouse_button_pressed(MouseButton::Left) {
                 self.fac = i;

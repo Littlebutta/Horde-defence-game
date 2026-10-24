@@ -11,7 +11,7 @@
 
 use crate::defs::*;
 use crate::game::*;
-use crate::swarm::{TINT_DOWN, TINT_FLY, TINT_RAGE};
+use crate::swarm::{TINT_ARMY_SHIFT, TINT_DOWN, TINT_FLY, TINT_MIXED_RAGE, TINT_RAGE};
 use crate::world::*;
 use macroquad::miniquad::{BlendFactor, BlendState, BlendValue, Comparison, Equation, PipelineParams};
 use macroquad::models::{Mesh, Vertex};
@@ -698,8 +698,7 @@ impl Scene {
     /// Refresh the horde texture and glow from this tick's density grid.
     pub fn update_units(&mut self, g: &Game) {
         let f = g.faction();
-        let col = f.col;
-        let deep = f.deep;
+        let chaos = g.fac == CHAOS;
         let dens = &g.swarm.dens;
         let tint = &g.swarm.tint;
         let dark = self.dark;
@@ -707,7 +706,16 @@ impl Scene {
             for x in 0..W {
                 let c = y * W + x;
                 let d = dens[c].load(Relaxed);
-                let t = tint[c].load(Relaxed);
+                let mut t = tint[c].load(Relaxed);
+                // chaos: each army in its own colours
+                let (f, rage) = if chaos {
+                    let k = ((t >> TINT_ARMY_SHIFT) as usize).min(2);
+                    t &= (1 << TINT_ARMY_SHIFT) - 1;
+                    (&FACTIONS[k], TINT_MIXED_RAGE)
+                } else {
+                    (f, 251.0)
+                };
+                let (col, deep) = (f.col, f.deep);
                 let o = x * 4;
                 if d == 0 && t != TINT_DOWN {
                     row[o + 3] = 0;
@@ -725,7 +733,7 @@ impl Scene {
                     gg += (255.0 - gg) * 0.6;
                     b += (255.0 - b) * 0.6;
                 } else if t >= TINT_RAGE {
-                    let k = (t - TINT_RAGE) as f32 / 251.0;
+                    let k = (t - TINT_RAGE) as f32 / rage;
                     r += (255.0 - r) * k;
                     gg *= 1.0 - 0.85 * k;
                     b *= 1.0 - 0.9 * k;
@@ -752,6 +760,13 @@ impl Scene {
         for i in 0..CW * CH {
             let n = g.swarm.coarse_at(i) as f32;
             let a = if n <= 0.0 { 0.0 } else { (n.sqrt() / 7.0).min(0.7) };
+            // chaos: the glow takes the colour of the army in the middle of the patch
+            let col = if chaos {
+                let c = ((i / CW) * CG + CG / 2) * W + (i % CW) * CG + CG / 2;
+                FACTIONS[((tint[c].load(Relaxed) >> TINT_ARMY_SHIFT) as usize).min(2)].col
+            } else {
+                g.faction().col
+            };
             self.gbuf[i * 4] = col[0];
             self.gbuf[i * 4 + 1] = col[1];
             self.gbuf[i * 4 + 2] = col[2];

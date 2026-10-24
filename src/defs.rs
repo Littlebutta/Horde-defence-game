@@ -384,11 +384,16 @@ pub struct Faction {
     pub reward: f32,
     pub blurb: &'static str,
 }
-pub const FACTIONS: [Faction; 3] = [
+pub const FACTIONS: [Faction; 4] = [
     Faction { name: "Zombies", stats: FactionStats { mode: Behaviour::Zombie, spd: 9.0, hp: 12.0, atk: 4.0, jit: 8.0 }, sight: 600, col: [92, 220, 110], deep: [20, 120, 40], reward: 0.04, blurb: "Small outbreaks that spread by eating civilians. Attack anything in sight, then rush your HQ." },
     Faction { name: "Alien bugs", stats: FactionStats { mode: Behaviour::Alien, spd: 24.0, hp: 6.0, atk: 3.0, jit: 14.0 }, sight: 700, col: [222, 120, 255], deep: [120, 30, 170], reward: 0.03, blurb: "Small drops all over the city. Straight for the HQ, killing anyone in the way." },
     Faction { name: "Orcs", stats: FactionStats { mode: Behaviour::Orc, spd: 8.0, hp: 50.0, atk: 14.0, jit: 5.0 }, sight: 900, col: [255, 140, 50], deep: [170, 50, 0], reward: 0.2, blurb: "A few portals pour out huge waves that destroy everything they see." },
+    // the three armies at once: these stats only stand in where the game needs one army's numbers
+    // (aiming ahead, troops in a fight); every unit moves by its own army's
+    Faction { name: "Chaos", stats: FactionStats { mode: Behaviour::Alien, spd: 14.0, hp: 20.0, atk: 7.0, jit: 9.0 }, sight: 900, col: [235, 235, 245], deep: [110, 110, 120], reward: 0.08, blurb: "All three at once: outbreaks, bug drops and orc portals, each army in its own colour." },
 ];
+/// The faction index of a chaos game.
+pub const CHAOS: usize = 3;
 
 /// Map colours. Dark is the default; both follow Google Maps' palettes.
 pub struct Theme {
