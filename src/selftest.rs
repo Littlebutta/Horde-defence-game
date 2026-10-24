@@ -38,7 +38,7 @@ pub fn abilities(g: &mut Game) {
         g.tick();
     }
     let civ = |g: &game::Game| {
-        (0..14u8)
+        (0..16u8)
             .map(|s| g.civs.iter().filter(|c| c.st == s).count())
             .collect::<Vec<_>>()
     };
@@ -60,12 +60,9 @@ pub fn abilities(g: &mut Game) {
         g.waiting,
         g.extracted
     );
-    if let Some(c) = g.civs.iter().find(|c| c.st == 11) {
-        let f = g
-            .pad_field
-            .as_ref()
-            .map(|f| f[c.p.y as usize * world::W + c.p.x as usize]);
-        eprintln!("to-pad civ at {:?} field {:?} hq {:?}", c.p, f, h);
+    if let Some(c) = g.civs.iter().find(|c| c.st == game::C_TO_PAD) {
+        let f = g.hq_dist[c.p.y as usize * world::W + c.p.x as usize];
+        eprintln!("to-hq civ at {:?} field {} hq {:?}", c.p, f, h);
     }
     let t = h + vec2(300.0, 200.0);
     eprintln!(

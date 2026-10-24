@@ -1114,7 +1114,7 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
     let t = v.time;
     // civilians
     for c in &g.civs {
-        if (c.st >= C_DEAD && c.st != C_TO_PAD && c.st != C_AT_PAD && c.st != C_TO_IDLE) || !inview(c.p, 2.0) {
+        if !civ_here(c.st) || !inview(c.p, 2.0) {
             continue;
         }
         let r = match c.st {

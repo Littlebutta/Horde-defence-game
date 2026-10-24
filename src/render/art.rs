@@ -227,6 +227,10 @@ pub fn structure(mb: &mut MB, g: &Game, i: usize, s: &Structure, base: f32, t: f
         S::Hq => {
             let top = hq(mb, d, c, w, h, base, t);
             labels.items.push((p3(c, top + 3.0), "HQ".into(), WHITE, 14.0));
+            let n = g.civs.iter().filter(|cv| cv.st == C_AT_HQ && cv.p.distance(c) < 24.0).count();
+            if n > 0 {
+                labels.items.push((p3(c, top + 9.0), format!("{} awaiting evac", n), WHITE, 12.0));
+            }
             top
         }
         S::ScrapDepot => scrap_depot(mb, d, c, w, h, base, t),

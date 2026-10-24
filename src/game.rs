@@ -102,11 +102,25 @@ pub const C_ROAM: u8 = 0;
 pub const C_ESCORT: u8 = 1;
 pub const C_CAPTURED: u8 = 5;
 pub const C_DEAD: u8 = 9;
+/// inside the base, walking to the HQ to wait for a flight
 pub const C_TO_PAD: u8 = 11;
 pub const C_AT_PAD: u8 = 12;
 pub const C_GONE: u8 = 13;
-/// waiting civilians walking over to a pad that is free to fly them out sooner
+/// called from the HQ to an evac point that has a flight ready for them
 pub const C_TO_IDLE: u8 = 14;
+/// waiting at the HQ until an evac point has a free seat
+pub const C_AT_HQ: u8 = 15;
+/// Wandering civilians this close to an HQ (in HQ-field cost, about 10 per cell, so roughly
+/// 75 cells past the edge of a fresh base zone) run for it.
+const HQ_SEEK: u32 = 1500;
+/// Scrap and ammo paid per civilian flown out, to make up for the income they cost while waiting.
+pub const EVAC_SCRAP: f32 = 30.0;
+pub const EVAC_AMMO: f32 = 10.0;
+
+/// Civilians still on the map (not dead, flown out or taken).
+pub fn civ_here(st: u8) -> bool {
+    st < C_DEAD || matches!(st, C_TO_PAD | C_AT_PAD | C_TO_IDLE | C_AT_HQ)
+}
 
 pub struct Civ {
     pub p: Vec2,
@@ -301,8 +315,9 @@ pub struct Game {
     low: Vec<bool>,
     pub hives: Vec<Hive>,
     hive_t: f32,
-    pub pad_field: Option<Arc<Vec<u32>>>,
-    pad_job: u64,
+    /// one field per evac point (structure index), towards that pad
+    pub pad_fields: Vec<(usize, Arc<Vec<u32>>)>,
+    pad_jobs: Vec<(u64, usize)>,
     pad_dirty: bool,
     pub portal_field: Option<Arc<Vec<u32>>>,
     portal_job: u64,
@@ -415,8 +430,8 @@ impl Game {
             low: Vec::new(),
             hives: Vec::new(),
             hive_t: 75.0,
-            pad_field: None,
-            pad_job: 0,
+            pad_fields: Vec::new(),
+            pad_jobs: Vec::new(),
             pad_dirty: true,
             portal_field: None,
             portal_job: 0,
@@ -684,8 +699,10 @@ impl Game {
         }
         while let Some(d) = self.fw_aux.poll() {
             if let Done::Multi { id, d } = d {
-                if id == self.pad_job {
-                    self.pad_field = Some(d);
+                if let Some(k) = self.pad_jobs.iter().position(|j| j.0 == id) {
+                    let (_, pi) = self.pad_jobs.remove(k);
+                    self.pad_fields.retain(|f| f.0 != pi);
+                    self.pad_fields.push((pi, d));
                 } else if id == self.portal_job {
                     self.portal_field = Some(d);
                 } else if let Some(r) = self.revs.iter_mut().find(|r| r.job == id) {
@@ -695,20 +712,24 @@ impl Game {
                 }
             }
         }
-        // extraction pads: where rescued civilians walk once they are inside the base
+        // evac points: a field to each, for civilians called over from the HQ
         if self.pad_dirty && self.fw_aux.busy < 3 {
             self.pad_dirty = false;
-            let src = self.ring_cells(S::Pad);
-            if src.is_empty() {
-                self.pad_field = None;
-            } else {
-                self.pad_job = self.next_job();
-                self.fw_aux.submit(Job::Multi {
-                    id: self.pad_job,
-                    obj: self.obj.clone(),
-                    src,
-                    max: 9000,
-                });
+            self.pad_jobs.clear();
+            let live = |s: &Structure| !s.dead && !s.pending && s.t == S::Pad;
+            let structs = &self.structs;
+            self.pad_fields.retain(|f| structs.get(f.0).is_some_and(live));
+            for pi in 0..self.structs.len() {
+                if !live(&self.structs[pi]) {
+                    continue;
+                }
+                let src = self.ring_of(pi);
+                if src.is_empty() {
+                    continue;
+                }
+                let id = self.next_job();
+                self.pad_jobs.push((id, pi));
+                self.fw_aux.submit(Job::Multi { id, obj: self.obj.clone(), src, max: 9000 });
             }
         }
         // orc portals: where captured civilians are dragged
@@ -829,21 +850,18 @@ impl Game {
     }
 
     /// Open cells just outside every live structure of one type.
-    fn ring_cells(&self, t: S) -> Vec<u32> {
+    /// The open cells around one structure.
+    fn ring_of(&self, i: usize) -> Vec<u32> {
+        let s = &self.structs[i];
         let mut v = Vec::new();
-        for s in &self.structs {
-            if s.dead || s.pending || s.t != t {
-                continue;
-            }
-            for y in s.y - 1..=s.y + s.h {
-                for x in s.x - 1..=s.x + s.w {
-                    if x < 0 || y < 0 || x >= W as i32 || y >= H as i32 {
-                        continue;
-                    }
-                    let c = y as usize * W + x as usize;
-                    if self.obj[c] == FREE {
-                        v.push(c as u32);
-                    }
+        for y in s.y - 1..=s.y + s.h {
+            for x in s.x - 1..=s.x + s.w {
+                if x < 0 || y < 0 || x >= W as i32 || y >= H as i32 {
+                    continue;
+                }
+                let c = y as usize * W + x as usize;
+                if self.obj[c] == FREE {
+                    v.push(c as u32);
                 }
             }
         }
@@ -2753,7 +2771,8 @@ impl Game {
                 }
             }
         }
-        // extraction flights: each pad flies out the civilians waiting at it, then needs time to turn around
+        // extraction flights: each pad flies out the civilians waiting at it once everyone it called
+        // over from the HQ has arrived (or every seat is taken), then needs time to turn around
         for pi in 0..self.structs.len() {
             let (ok, c) = {
                 let s = &self.structs[pi];
@@ -2763,6 +2782,19 @@ impl Game {
                 )
             };
             if !ok {
+                continue;
+            }
+            let (mut at, mut to) = (0u32, 0u32);
+            for cv in &self.civs {
+                if cv.pad == pi {
+                    match cv.st {
+                        C_AT_PAD => at += 1,
+                        C_TO_IDLE => to += 1,
+                        _ => {}
+                    }
+                }
+            }
+            if at == 0 || (at < PAD_SEATS && to > 0) {
                 continue;
             }
             let mut n = 0u32;
@@ -2780,8 +2812,8 @@ impl Game {
             }
             self.extracted += n;
             self.score += 100.0 * n as f32;
-            self.gain_scrap(20.0 * n as f32);
-            self.gain_ammo(10.0 * n as f32);
+            self.gain_scrap(EVAC_SCRAP * n as f32);
+            self.gain_ammo(EVAC_AMMO * n as f32);
             let ex = if c.x < W as f32 / 2.0 {
                 -30.0
             } else {
@@ -2797,10 +2829,11 @@ impl Game {
             self.structs[pi].cd = PAD_COOLDOWN;
             self.show(
                 format!(
-                    "Extraction flight: {} civilian{} out (+{} score)",
+                    "Extraction flight: {} civilian{} out (+{} scrap, +{} ammo)",
                     n,
                     if n > 1 { "s" } else { "" },
-                    100 * n
+                    (EVAC_SCRAP * n as f32) as u32,
+                    (EVAC_AMMO * n as f32) as u32
                 ),
                 2.5,
             );
@@ -2946,74 +2979,79 @@ impl Game {
         }
     }
 
-    /// Civilians queuing at a pad that is waiting out its turnaround walk over to an idle pad
-    /// with nobody waiting.
-    fn rebalance_pads(&mut self) {
-        let pads: Vec<usize> = (0..self.structs.len())
-            .filter(|&k| {
-                let s = &self.structs[k];
-                !s.dead && !s.pending && s.t == S::Pad
-            })
-            .collect();
-        if pads.len() < 2 {
-            return;
-        }
-        let mut n: Vec<u32> = pads
-            .iter()
-            .map(|&k| self.civs.iter().filter(|c| (c.st == C_AT_PAD || c.st == C_TO_IDLE) && c.pad == k).count() as u32)
-            .collect();
-        for a in 0..pads.len() {
-            if self.structs[pads[a]].cd > 0.0 || n[a] > 0 {
+    /// Evac points with a flight ready call civilians over from the HQ, nearest first, until
+    /// every seat is spoken for.
+    fn dispatch_evac(&mut self) {
+        for pi in 0..self.structs.len() {
+            let (ok, c) = {
+                let s = &self.structs[pi];
+                (!s.dead && !s.pending && s.t == S::Pad && s.cd <= 0.0, s.center())
+            };
+            if !ok {
                 continue;
             }
-            // the busy pad with the longest queue
-            let Some(b) = (0..pads.len())
-                .filter(|&b| self.structs[pads[b]].cd > 0.0 && n[b] > 0)
-                .max_by(|&x, &y| n[x].cmp(&n[y]).then(y.cmp(&x)))
-            else {
-                break;
-            };
-            let mut moved = 0;
-            for cv in self.civs.iter_mut() {
-                if moved >= PAD_SEATS {
-                    break;
-                }
-                if cv.st == C_AT_PAD && cv.pad == pads[b] {
-                    cv.st = C_TO_IDLE;
-                    cv.pad = pads[a];
-                    moved += 1;
-                }
+            let taken = self
+                .civs
+                .iter()
+                .filter(|cv| cv.pad == pi && (cv.st == C_AT_PAD || cv.st == C_TO_IDLE))
+                .count() as u32;
+            if taken >= PAD_SEATS {
+                continue;
             }
-            n[b] -= moved;
-            n[a] += moved;
+            let mut wait: Vec<(f32, usize)> = (0..self.civs.len())
+                .filter(|&k| self.civs[k].st == C_AT_HQ)
+                .map(|k| (self.civs[k].p.distance_squared(c), k))
+                .collect();
+            if wait.is_empty() {
+                return;
+            }
+            let n = ((PAD_SEATS - taken) as usize).min(wait.len());
+            wait.select_nth_unstable_by(n - 1, |a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            for &(_, k) in &wait[..n] {
+                let cv = &mut self.civs[k];
+                cv.st = C_TO_IDLE;
+                cv.pad = pi;
+                // give up and go back to the HQ if the walk takes this long
+                cv.flee_t = 60.0;
+            }
         }
     }
 
     fn civilians(&mut self) {
         let obj = self.obj.clone();
         let hqd = self.hq_dist.clone();
-        let padf = self.pad_field.clone();
         let portf = self.portal_field.clone();
         let mut waiting = 0;
         let mut dragged: Vec<Vec2> = Vec::new();
-        if self.ticks % 20 == 0 {
-            self.rebalance_pads();
+        if self.ticks % 10 == 0 {
+            self.dispatch_evac();
         }
         for i in 0..self.civs.len() {
             let st = self.civs[i].st;
-            if st >= C_DEAD && st != C_TO_PAD && st != C_AT_PAD && st != C_TO_IDLE {
+            if !civ_here(st) {
                 continue;
             }
+            let p = self.civs[i].p;
+            let (cx, cy) = (p.x as usize, p.y as usize);
+            let c = cy * W + cx;
             if st == C_TO_IDLE {
+                // called over from the HQ by an evac point with a flight ready
                 waiting += 1;
                 let pi = self.civs[i].pad;
+                self.civs[i].flee_t -= DT;
                 match self.structs.get(pi) {
-                    Some(s) if !s.dead => {
+                    Some(s) if !s.dead && s.t == S::Pad && self.civs[i].flee_t > 0.0 => {
                         let to = s.center();
-                        let mut pp = self.civs[i].p;
-                        Self::step_toward(&obj, &mut pp, to, 9.0);
+                        let mut pp = p;
+                        let f = self.pad_fields.iter().find(|f| f.0 == pi).map(|f| &f.1);
+                        match f {
+                            Some(f) if pp.distance(to) > 12.0 && f[c] != INF => {
+                                Self::step_on_field(&obj, &mut pp, f, 9.0, &mut self.rng)
+                            }
+                            _ => Self::step_toward(&obj, &mut pp, to, 9.0),
+                        }
                         self.civs[i].p = pp;
-                        if pp.distance(to) < 6.5 {
+                        if pp.distance(to) < 6.5 || f.is_some_and(|f| f[pp.y as usize * W + pp.x as usize] <= 20) {
                             self.civs[i].st = C_AT_PAD;
                         }
                     }
@@ -3021,41 +3059,42 @@ impl Game {
                 }
                 continue;
             }
-            let p = self.civs[i].p;
-            let (cx, cy) = (p.x as usize, p.y as usize);
-            let c = cy * W + cx;
-            if st == C_TO_PAD || st == C_AT_PAD {
+            if st == C_AT_PAD {
                 waiting += 1;
-                if st == C_AT_PAD {
-                    let pi = self.civs[i].pad;
-                    if self.structs.get(pi).map_or(true, |s| s.dead) {
-                        self.civs[i].st = C_TO_PAD;
-                    }
+                let pi = self.civs[i].pad;
+                if self.structs.get(pi).map_or(true, |s| s.dead) {
+                    self.civs[i].st = C_TO_PAD;
+                }
+                continue;
+            }
+            if st == C_TO_PAD {
+                // safe inside the base: head for the HQ and wait there for a seat on a flight
+                waiting += 1;
+                let mut pp = p;
+                Self::step_on_field(&obj, &mut pp, &hqd, 9.0, &mut self.rng);
+                self.civs[i].p = pp;
+                if hqd[pp.y as usize * W + pp.x as usize] <= 40 {
+                    self.civs[i].st = C_AT_HQ;
+                }
+                continue;
+            }
+            if st == C_AT_HQ {
+                // mill about next to the HQ (if it falls, walk to the nearest one still standing)
+                waiting += 1;
+                if hqd[c] > 80 {
+                    self.civs[i].st = C_TO_PAD;
                     continue;
                 }
-                if let Some(f) = &padf {
-                    let mut pp = p;
-                    Self::step_on_field(&obj, &mut pp, f, 9.0, &mut self.rng);
-                    self.civs[i].p = pp;
-                    let v = f[pp.y as usize * W + pp.x as usize];
-                    if v <= 30 {
-                        let pad = self
-                            .structs
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, s)| !s.dead && !s.pending && s.t == S::Pad)
-                            .min_by(|a, b| {
-                                a.1.center()
-                                    .distance(pp)
-                                    .partial_cmp(&b.1.center().distance(pp))
-                                    .unwrap()
-                            })
-                            .map(|(k, _)| k);
-                        if let Some(k) = pad {
-                            self.civs[i].st = C_AT_PAD;
-                            self.civs[i].pad = k;
-                        }
-                    }
+                let civ = &mut self.civs[i];
+                if self.rng.f() < 0.05 {
+                    civ.hd = self.rng.f() * std::f32::consts::TAU;
+                }
+                let np = civ.p + vec2(libm::cosf(civ.hd), libm::sinf(civ.hd)) * 1.2 * DT;
+                let nc = np.y as usize * W + np.x as usize;
+                if np.x > 0.0 && np.y > 0.0 && np.x < W as f32 && np.y < H as f32 && obj[nc] == FREE && hqd[nc] <= 60 {
+                    civ.p = np;
+                } else {
+                    civ.hd = self.rng.f() * std::f32::consts::TAU;
                 }
                 continue;
             }
@@ -3162,6 +3201,17 @@ impl Game {
                         fy -= oy as f32 * v as f32;
                     }
                 }
+            }
+            if hqd[c] <= HQ_SEEK {
+                // close enough to an HQ to make a run for it
+                let mut pp = p;
+                Self::step_on_field(&obj, &mut pp, &hqd, if seen > 0 { 8.5 } else { 4.5 }, &mut self.rng);
+                self.civs[i].p = pp;
+                if self.world.in_zone(pp) {
+                    self.civs[i].st = C_TO_PAD;
+                    self.rescued += 1;
+                }
+                continue;
             }
             let civ = &mut self.civs[i];
             let mut sp = 1.5;
