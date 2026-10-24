@@ -263,6 +263,23 @@ const M_DESYNC: u32 = 11;
 const M_END: u32 = 12;
 const M_BUSY: u32 = 13;
 const M_REJECT: u32 = 14;
+const M_LOBBY: u32 = 15;
+
+/// What the host has picked in the co-op lobby, shown to everybody waiting there.
+#[derive(Clone, Default, PartialEq)]
+pub struct Lobby {
+    /// one of the `MODE_` values
+    pub mode: u32,
+    pub fac: u32,
+    pub diff: u32,
+    /// the real city typed in, or the campaign's next city
+    pub city: String,
+    /// what the host is doing right now
+    pub line: String,
+}
+pub const MODE_RANDOM: u32 = 0;
+pub const MODE_REAL: u32 = 1;
+pub const MODE_CAMPAIGN: u32 = 2;
 
 pub struct Player {
     pub id: u64,
@@ -273,7 +290,8 @@ pub struct Player {
 /// What the session tells the app.
 pub enum Note {
     /// the host started a game (on clients)
-    Started { desc: Box<Desc>, fac: usize, diff: usize, seed: u64 },
+    /// `camp` is the host's campaign (as saved text) when this is a campaign city
+    Started { desc: Box<Desc>, fac: usize, diff: usize, seed: u64, camp: Option<String> },
     /// the host went back to the menu
     Ended,
     /// the session is over (host left, or we were turned away)
@@ -285,6 +303,7 @@ struct Incoming {
     fac: usize,
     diff: usize,
     seed: u64,
+    camp: Option<String>,
     len: usize,
     buf: Vec<u8>,
 }
@@ -304,6 +323,8 @@ pub struct Session {
     pub desync: bool,
     /// ticks simulated so far in this game
     pub exec: u64,
+    /// the host's picks in the lobby (on the host: what was last sent)
+    pub lobby: Lobby,
     frames: BTreeMap<u64, Vec<(u8, Cmd)>>,
     pending: Vec<(u8, Cmd)>,
     hashes: BTreeMap<u64, u64>,
@@ -348,6 +369,7 @@ impl Session {
             paused: false,
             desync: false,
             exec: 0,
+            lobby: Lobby::default(),
             frames: BTreeMap::new(),
             pending: Vec::new(),
             hashes: BTreeMap::new(),
@@ -404,6 +426,23 @@ impl Session {
             }
             w.u32(self.in_game as u32);
             self.queue(id, w.0);
+        }
+        self.send_lobby();
+    }
+    fn send_lobby(&mut self) {
+        let mut w = msg(M_LOBBY);
+        w.u32(self.lobby.mode);
+        w.u32(self.lobby.fac);
+        w.u32(self.lobby.diff);
+        w.str(&self.lobby.city);
+        w.str(&self.lobby.line);
+        self.to_clients(&w.0);
+    }
+    /// Host: tells everybody in the lobby what has been picked, when it changed.
+    pub fn set_lobby(&mut self, l: Lobby) {
+        if l != self.lobby {
+            self.lobby = l;
+            self.send_lobby();
         }
     }
 
@@ -509,13 +548,18 @@ impl Session {
                 }
             }
             M_BUSY => self.host_busy = true,
+            M_LOBBY => {
+                let (Some(mode), Some(fac), Some(diff), Some(city), Some(line)) = (r.u32(), r.u32(), r.u32(), r.str(), r.str()) else { return };
+                self.lobby = Lobby { mode, fac, diff, city, line };
+            }
             M_REJECT => {
                 let s = r.str().unwrap_or_default();
                 self.notes.push(Note::Closed(s));
             }
             M_START => {
-                let (Some(fac), Some(diff), Some(seed), Some(len)) = (r.u32(), r.u32(), r.u64(), r.u32()) else { return };
-                self.incoming = Some(Incoming { fac: fac as usize, diff: diff as usize, seed, len: len as usize, buf: Vec::with_capacity(len as usize) });
+                let (Some(fac), Some(diff), Some(seed), Some(camp), Some(len)) = (r.u32(), r.u32(), r.u64(), r.str(), r.u32()) else { return };
+                let camp = (!camp.is_empty()).then_some(camp);
+                self.incoming = Some(Incoming { fac: fac as usize, diff: diff as usize, seed, camp, len: len as usize, buf: Vec::with_capacity(len as usize) });
                 self.frames.clear();
                 self.exec = 0;
                 self.paused = false;
@@ -531,7 +575,7 @@ impl Session {
                     match desc {
                         Some(desc) => {
                             self.in_game = true;
-                            self.notes.push(Note::Started { desc: Box::new(desc), fac: inc.fac, diff: inc.diff, seed: inc.seed });
+                            self.notes.push(Note::Started { desc: Box::new(desc), fac: inc.fac, diff: inc.diff, seed: inc.seed, camp: inc.camp });
                         }
                         None => self.notes.push(Note::Closed("The map from the host could not be read".into())),
                     }
@@ -569,15 +613,17 @@ impl Session {
 
     // -------------------------------------------------------------------------------------- game
 
-    /// Host: sends the map and settings to everybody and resets the clock. Returns the map exactly
-    /// as the clients will rebuild it, so the host plays on an identical copy.
-    pub fn start_game(&mut self, d: &Desc, fac: usize, diff: usize, seed: u64) -> Desc {
+    /// Host: sends the map and settings (and the campaign, for a campaign city) to everybody and
+    /// resets the clock. Returns the map exactly as the clients will rebuild it, so the host plays
+    /// on an identical copy.
+    pub fn start_game(&mut self, d: &Desc, fac: usize, diff: usize, seed: u64, camp: Option<&str>) -> Desc {
         let raw = storage::encode("co-op", d);
         let packed = miniz_oxide::deflate::compress_to_vec(&raw, 6);
         let mut w = msg(M_START);
         w.u32(fac as u32);
         w.u32(diff as u32);
         w.u64(seed);
+        w.str(camp.unwrap_or(""));
         w.u32(packed.len() as u32);
         self.to_clients(&w.0);
         for c in packed.chunks(CHUNK) {

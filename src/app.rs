@@ -109,6 +109,8 @@ pub struct App {
     place_go: bool,
     /// headless tests start right away with the suggested HQ (`PH_PLACE=1` shows the choice)
     auto_place: bool,
+    /// the "Defending <city>" banner at the start of a campaign city: (city, country, line, start)
+    banner: Option<(String, String, String, f32)>,
     /// the slider being dragged
     drag: Option<u32>,
     /// the settings dialog is open over the screen
@@ -245,6 +247,7 @@ impl App {
             placing: None,
             place_at: None,
             place_go: false,
+            banner: None,
             auto_place: ["PH_SHOT", "PH_NETTEST"].iter().any(|k| std::env::var(k).is_ok()) && std::env::var("PH_PLACE").is_err(),
             drag: None,
             settings_open: std::env::var("PH_SETTINGS").is_ok(),
@@ -274,6 +277,7 @@ impl App {
         self.tip = None;
         self.net_frame();
         self.music.ambience(self.screen == Screen::Play);
+        self.sync_lobby();
         if is_key_pressed(KeyCode::F11) {
             self.set_fullscreen(!self.fullscreen);
         }
@@ -342,16 +346,21 @@ impl App {
         };
         for n in notes {
             match n {
-                net::Note::Started { desc, fac, diff, seed } => {
+                net::Note::Started { desc, fac, diff, seed, camp } => {
                     self.fac = fac;
                     self.diff = diff;
+                    // a campaign city: play it with the host's campaign (never saved here)
+                    self.in_camp = camp.is_some();
+                    self.camp = camp.map(|t| campaign::from_text(&t));
                     self.begin(*desc, seed);
                 }
                 net::Note::Ended => {
                     if self.screen == Screen::Play {
                         self.screen = Screen::Menu;
-                        self.status = "The host ended the game".into();
+                        self.status = if self.in_camp { "Back in the lobby. The host is picking the next city.".into() } else { "The host ended the game".into() };
                     }
+                    self.in_camp = false;
+                    self.camp = None;
                 }
                 net::Note::Closed(why) => {
                     if let Some(mut s) = self.sess.take() {
@@ -387,8 +396,13 @@ impl App {
     }
     /// Back to the menu. The co-op host takes everybody with it; a client leaves the co-op game.
     fn leave_game(&mut self) {
-        self.screen = if self.in_camp { Screen::Hub } else { Screen::Menu };
+        // a guest's campaign city was the host's campaign: nothing of theirs to go back to
+        let guest = self.client();
+        self.screen = if self.in_camp && !guest { Screen::Hub } else { Screen::Menu };
         self.in_camp = false;
+        if guest {
+            self.camp = None;
+        }
         if let Some(s) = self.sess.as_mut() {
             if s.is_host() {
                 s.end_game();
@@ -420,40 +434,186 @@ impl App {
         m
     }
 
-    /// The waiting room a client sees until the host starts.
-    fn client_lobby(&mut self) {
+    /// Where the menu column goes, and in co-op the players panel beside it. The column sits on the
+    /// left of the HUD area so the rest of the screen shows what's behind it; a window too narrow
+    /// for that gets them centred.
+    fn menu_rects(&self) -> (Rect, Option<Rect>) {
+        let area = ui::hud();
+        let h = (area.h - 64.0).min(940.0);
+        let (w, pw, gap) = (548.0, 340.0, 24.0);
+        let lobby = self.sess.is_some();
+        let total = if lobby { w + gap + pw } else { w };
+        let narrow = area.w < 1100.0 || area.w < area.h;
+        let x = if narrow { area.x + (area.w - total) / 2.0 } else { area.x + 48.0 };
+        let r = Rect::new(x, area.y + (area.h - h) / 2.0, w, h);
+        let pr = lobby.then(|| Rect::new(r.right() + gap, r.y, pw, 4.0 * 62.0 + 210.0));
+        (r, pr)
+    }
+
+    /// The co-op players, host first, with open slots that bring up the Steam invite window.
+    fn players_panel(&mut self, r: Rect) {
         let p = pal(self.dark);
-        let r = ui::hud().centered(620.0, 300.0);
+        let Some(s) = self.sess.as_ref() else { return };
+        let rows: Vec<(String, bool)> = s.players.iter().enumerate().map(|(i, pl)| (pl.name.clone(), i == s.me)).collect();
+        let mut a = self.card(r, &format!("Players {}/4", rows.len()));
+        let mut invite = false;
+        for k in 0..4 {
+            let pr = a.cut_top(54.0, 8.0);
+            if let Some((name, me)) = rows.get(k) {
+                let col = PLAYER_COLS[k];
+                rrect(pr, R_CTRL, mix(p.panel2, col, 0.08));
+                rrect_lines(pr, R_CTRL, 1.0, alpha(col, 0.5));
+                draw_circle(pr.x + 26.0, pr.y + 27.0, 9.0, col);
+                draw_circle_lines(pr.x + 26.0, pr.y + 27.0, 9.0, 1.5, WHITE);
+                let name = fit(&self.fonts.head, name, pr.w - 60.0, 16.0);
+                text(&self.fonts.head, &name, pr.x + 46.0, pr.y + 24.0, 16.0, p.text);
+                let tag = match (k == 0, *me) {
+                    (true, true) => "HOST · YOU",
+                    (true, false) => "HOST",
+                    (false, true) => "YOU",
+                    _ => "IN THE LOBBY",
+                };
+                text(&self.fonts.mono, tag, pr.x + 46.0, pr.y + 42.0, 10.5, p.dim);
+            } else {
+                let hot = self.hot(pr);
+                rrect(pr, R_CTRL, if hot { mix(p.panel2, p.text, 0.06) } else { alpha(p.panel2, 0.5) });
+                rrect_lines(pr, R_CTRL, 1.0, if hot { alpha(p.accent, 0.8) } else { p.line });
+                draw_circle_lines(pr.x + 26.0, pr.y + 27.0, 9.0, 1.5, p.dim);
+                text(&self.fonts.mono, "+", pr.x + 22.0, pr.y + 32.0, 14.0, p.dim);
+                text(&self.fonts.mono, "Open slot · invite a friend", pr.x + 46.0, pr.y + 32.0, 13.0, if hot { p.text } else { p.dim });
+                self.ui_rects.push(pr);
+                invite |= hot && is_mouse_button_pressed(MouseButton::Left);
+            }
+        }
+        a.cut_top(4.0, 0.0);
+        let line = "Everybody shares one base, its scrap and its ammo, and sees each other's cursors. The host's machine runs the clock.";
+        for (i, l) in wrap_lines(&self.fonts.mono, line, a.w, 12.0).iter().enumerate() {
+            text(&self.fonts.mono, l, a.x, a.y + 12.0 + i as f32 * 16.0, 12.0, p.dim);
+        }
+        if invite {
+            if let Some(s) = &self.sess {
+                s.invite();
+            }
+        }
+    }
+
+    /// The lobby as a friend sees it: the host's picks, live, until the host starts.
+    fn guest_lobby(&mut self) {
+        let p = pal(self.dark);
+        let (r, pr) = self.menu_rects();
         self.panel(r);
         let s = self.sess.as_ref().unwrap();
-        let title = format!("{}'s co-op game", s.host_name());
-        let (line, recv) = if let Some(f) = s.receiving() {
-            (format!("Receiving the map  {:.0}%", f * 100.0), Some(f))
-        } else if s.host_busy {
-            ("The host is in the middle of a game. You will join the next one.".to_string(), None)
-        } else {
-            ("Waiting for the host to start the game".to_string(), None)
+        let hn = s.host_name();
+        let lob = s.lobby.clone();
+        let (recv, busy) = (s.receiving(), s.host_busy);
+        let mut a = r.pad(30.0, 26.0);
+        let t = a.cut_top(48.0, 2.0);
+        text(&self.fonts.head, "CO-OP LOBBY", t.x, t.y + 40.0, 46.0, p.text);
+        let t = a.cut_top(18.0, 18.0);
+        let sub = fit(&self.fonts.mono, &format!("{}'s game. The host picks what you play.", hn), t.w, 14.0);
+        text(&self.fonts.mono, &sub, t.x, t.y + 13.0, 14.0, p.dim);
+        let foot = a.cut_bottom(36.0, 14.0);
+        let start = a.cut_bottom(56.0, 20.0);
+        let state = a.cut_bottom(40.0, 16.0);
+
+        // the host's picks, read only
+        let y = self.heading("Game mode", a.x, a.y);
+        a.cut_top(y - a.y, 0.0);
+        let mode = lob.mode.min(2) as usize;
+        let _ = self.segmented(a.cut_top(40.0, 12.0), &["Random city", "Real city", "World campaign"], mode);
+        let detail = match lob.mode {
+            net::MODE_CAMPAIGN => format!("The host's campaign: {}.", lob.city),
+            net::MODE_REAL if !lob.city.is_empty() => format!("{}, from OpenStreetMap.", lob.city),
+            net::MODE_REAL => "A real city. The host is typing it in.".into(),
+            _ => "A new random city every game: river, airport, avenues and downtown all move around.".into(),
         };
-        let names: Vec<String> = s.players.iter().map(|p| p.name.clone()).collect();
-        let mut a = r.pad(30.0, 28.0);
-        let t = a.cut_top(34.0, 10.0);
-        text(&self.fonts.head, &title, t.x, t.y + 28.0, 28.0, p.text);
-        ui::spinner(vec2(t.right() - 16.0, t.y + 16.0), 14.0, self.clock, p.accent);
-        let l = a.cut_top(20.0, 8.0);
-        text(&self.fonts.mono, &line, l.x, l.y + 15.0, 14.0, p.dim);
+        let lines = wrap_lines(&self.fonts.mono, &detail, a.w, 13.0);
+        let d = a.cut_top(lines.len() as f32 * 18.0, 18.0);
+        for (i, l) in lines.iter().enumerate() {
+            text(&self.fonts.mono, l, d.x, d.y + 13.0 + i as f32 * 18.0, 13.0, p.text);
+        }
+        let y = self.heading("Faction", a.x, a.y);
+        a.cut_top(y - a.y, 0.0);
+        let rows = a.cut_top(3.0 * 60.0 + 2.0 * 8.0, 18.0).rows(3, 8.0);
+        for (i, f) in FACTIONS.iter().enumerate() {
+            let cr = rows[i];
+            let active = lob.fac as usize == i;
+            let c = Color::from_rgba(f.col[0], f.col[1], f.col[2], 255);
+            rrect(cr, R_CTRL, if active { mix(p.panel2, c, 0.16) } else { alpha(p.panel2, 0.5) });
+            rrect_lines(cr, R_CTRL, if active { 2.0 } else { 1.0 }, if active { c } else { p.line });
+            for k in 0..16 {
+                let q = vec2(cr.x + 14.0 + (k * 37 % 27) as f32, cr.y + 16.0 + (k * 13 % 29) as f32);
+                draw_rectangle(q.x, q.y, 3.0, 3.0, if active { c } else { alpha(c, 0.4) });
+            }
+            text(&self.fonts.head, f.name, cr.x + 56.0, cr.y + 22.0, 17.0, if active { p.text } else { p.dim });
+            let lines = wrap_lines(&self.fonts.mono, f.blurb, cr.w - 70.0, 11.5);
+            for (k, l) in lines.iter().take(2).enumerate() {
+                text(&self.fonts.mono, l, cr.x + 56.0, cr.y + 39.0 + k as f32 * 14.0, 11.5, p.dim);
+            }
+        }
+        let y = self.heading("Difficulty", a.x, a.y);
+        a.cut_top(y - a.y, 0.0);
+        let names: Vec<&str> = DIFFS.iter().map(|d| d.0).collect();
+        let _ = self.segmented(a.cut_top(38.0, 0.0), &names, (lob.diff as usize).min(DIFFS.len() - 1));
+
+        // what the host is doing
+        let line = if let Some(f) = recv {
+            format!("Receiving the map  {:.0}%", f * 100.0)
+        } else if busy {
+            "The host is in the middle of a game. You will join the next one.".into()
+        } else if !lob.line.is_empty() {
+            format!("{} is {}", hn, lob.line)
+        } else {
+            format!("Waiting for {} to start", hn)
+        };
+        ui::spinner(vec2(state.x + 12.0, state.y + 14.0), 10.0, self.clock, p.accent);
+        let line = fit(&self.fonts.mono, &line, state.w - 34.0, 13.0);
+        text(&self.fonts.mono, &line, state.x + 34.0, state.y + 19.0, 13.0, p.text);
         if let Some(f) = recv {
-            self.progress(a.cut_top(6.0, 10.0), f, p.accent);
+            self.progress(Rect::new(state.x, state.y + 32.0, state.w, 4.0), f, p.accent);
         }
-        let y = self.heading("Players", a.x, a.y + 8.0);
-        text(&self.fonts.head, &names.join(", "), a.x, y + 14.0, 16.0, p.text);
-        text(&self.fonts.mono, "The host picks the faction, city and difficulty. You all share one base.", a.x, y + 42.0, 13.0, p.dim);
-        let b = a.cut_bottom(40.0, 0.0);
-        if self.button(Rect::new(b.x, b.y, 140.0, b.h), "Leave", true, false) {
+        if !self.status.is_empty() {
+            let line = fit(&self.fonts.mono, &self.status, start.w, 13.0);
+            text(&self.fonts.mono, &line, start.x, start.y - 6.0, 13.0, p.bad);
+        }
+        self.button_primary(start, "Waiting for the host", false);
+        let fc = foot.cols(2, 10.0);
+        if self.button(fc[0], "Leave lobby", true, false) {
             self.leave_coop();
+            return;
         }
-        if self.button(Rect::new(b.x + 150.0, b.y, 140.0, b.h), "Settings", true, false) {
+        if self.button(fc[1], "Settings", true, false) {
             self.open_settings();
         }
+        if let Some(pr) = pr {
+            self.players_panel(pr);
+        }
+    }
+
+    /// Host: keeps the lobby on everybody's screen in step with what the host is doing.
+    fn sync_lobby(&mut self) {
+        let Some(s) = self.sess.as_ref() else { return };
+        if !s.is_host() || s.in_game {
+            return;
+        }
+        let camp = if self.camp_mode { self.camp.clone().or_else(campaign::load) } else { None };
+        let (mode, fac, diff, city) = match &camp {
+            _ if !self.camp_mode => (if self.real { net::MODE_REAL } else { net::MODE_RANDOM }, self.fac, self.diff, if self.real { self.city.trim().to_string() } else { String::new() }),
+            Some(c) if c.fired() || c.finished() => (net::MODE_CAMPAIGN, c.fac, c.diff, "over, a new one starts in New York".to_string()),
+            Some(c) => (net::MODE_CAMPAIGN, c.fac, c.diff, format!("day {:.0}, {} cities fought, next up {}", c.fought as f32 * campaign::DAYS_PER_CITY, c.fought, c.city().name)),
+            None => (net::MODE_CAMPAIGN, self.fac, self.diff, "a new one, starting in New York".to_string()),
+        };
+        let line = match self.screen {
+            Screen::Hub => match &self.camp {
+                Some(c) if !c.finished() && !c.fired() => format!("on the globe, getting ready to defend {}", c.city().name),
+                _ => "on the campaign globe".into(),
+            },
+            Screen::Loading => "loading the map".into(),
+            Screen::Play if self.placing.is_some() => "choosing where the HQ goes".into(),
+            _ => String::new(),
+        };
+        let l = net::Lobby { mode, fac: fac as u32, diff: diff as u32, city, line };
+        self.sess.as_mut().unwrap().set_lobby(l);
     }
 
     // ------------------------------------------------------------------------------------- widgets
@@ -518,15 +678,12 @@ impl App {
         ui::begin();
         if self.client() {
             while get_char_pressed().is_some() {}
-            self.client_lobby();
+            self.guest_lobby();
             return;
         }
-        // The menu is a column on the left of the HUD area, so the rest of the screen shows what's
-        // behind it. A window too narrow for that gets it centred.
-        let area = ui::hud();
-        let h = (area.h - 64.0).min(940.0);
-        let w = 548.0;
-        let r = if area.w < 1100.0 || area.w < area.h { area.centered(w, h) } else { Rect::new(area.x + 48.0, area.y + (area.h - h) / 2.0, w, h) };
+        // In co-op this is the lobby: the same column, with the players beside it.
+        let lobby = self.sess.is_some();
+        let (r, pr) = self.menu_rects();
         self.panel(r);
         // a strip in the three faction colours along the top
         for (i, c) in Rect::new(r.x + R_PANEL, r.y, r.w - 2.0 * R_PANEL, 3.0).cols(3, 0.0).into_iter().enumerate() {
@@ -535,9 +692,10 @@ impl App {
         }
         let mut a = r.pad(30.0, 26.0);
         let t = a.cut_top(48.0, 2.0);
-        text(&self.fonts.head, "PIXEL HORDE", t.x, t.y + 40.0, 46.0, p.text);
+        text(&self.fonts.head, if lobby { "CO-OP LOBBY" } else { "PIXEL HORDE" }, t.x, t.y + 40.0, 46.0, p.text);
         let t = a.cut_top(18.0, 18.0);
-        text(&self.fonts.mono, "Hold the city. Every pixel is an enemy.", t.x, t.y + 13.0, 14.0, p.dim);
+        let sub = if lobby { "Your game. Pick what the group plays, then start." } else { "Hold the city. Every pixel is an enemy." };
+        text(&self.fonts.mono, sub, t.x, t.y + 13.0, 14.0, p.dim);
 
         // pinned to the bottom: settings row, Start, co-op
         let foot = a.cut_bottom(36.0, 14.0);
@@ -717,23 +875,20 @@ impl App {
         }
 
         // co-op with Steam friends
-        if let Some(s) = &self.sess {
-            let names: Vec<String> = s.players.iter().map(|p| p.name.clone()).collect();
-            let line = format!("Co-op ({}/4): {}", names.len(), names.join(", "));
-            let mut c = coop;
-            if self.button(c.cut_left(150.0, 8.0), "Invite friends", true, true) {
+        if lobby {
+            let c = coop.cols(2, 10.0);
+            if self.button(c[0], "Invite Steam friends", true, true) {
                 if let Some(s) = &self.sess {
                     s.invite();
                 }
             }
-            if self.button(c.cut_left(120.0, 12.0), "Leave co-op", true, false) {
+            if self.button(c[1], "Leave lobby", true, false) {
                 self.leave_coop();
+                return;
             }
-            let line = fit(&self.fonts.mono, &line, c.w, 13.0);
-            text(&self.fonts.mono, &line, c.x, c.y + 24.0, 13.0, p.text);
         } else {
             let have = self.steam.is_some();
-            if self.button(coop, "Play co-op with Steam friends", have, false) {
+            if self.button(coop, "Co-op lobby with Steam friends", have, false) {
                 if let Some(st) = &self.steam {
                     st.create();
                     self.status = "Opening a Steam lobby".into();
@@ -741,7 +896,7 @@ impl App {
             }
             if self.hot(coop) {
                 self.tip = Some(if have {
-                    "Opens a lobby and the Steam invite window. Friends who accept join your base; you pick the map and press Start.".into()
+                    "Opens a co-op lobby and the Steam invite window. Friends who accept join you there; together you play any city or the world campaign.".into()
                 } else {
                     "Steam is not running. Start Steam, then restart Pixel Horde to play co-op.".into()
                 });
@@ -751,13 +906,21 @@ impl App {
             let line = fit(&self.fonts.mono, &self.status, start.w, 13.0);
             text(&self.fonts.mono, &line, start.x, start.y - 6.0, 13.0, p.bad);
         }
-        let can = if self.camp_mode { self.sess.is_none() } else { !self.real || self.city.trim().len() > 1 };
-        let label = if self.camp_mode && saved_camp.is_some() { "Continue campaign" } else { "Start" };
+        let can = self.camp_mode || !self.real || self.city.trim().len() > 1;
+        let label = match (self.camp_mode, saved_camp.is_some(), lobby) {
+            (true, true, _) => "Continue campaign",
+            (true, false, true) => "Start campaign",
+            _ => "Start",
+        };
         if self.button_primary(start, label, can) || (can && !self.blocked && is_key_pressed(KeyCode::Enter)) {
             self.start();
+            return;
         }
-        if self.camp_mode && self.sess.is_some() && self.hot(start) {
-            self.tip = Some("The campaign is single player for now. Leave co-op to play it.".into());
+        if self.camp_mode && lobby && self.hot(start) {
+            self.tip = Some("Opens your campaign for everybody. Spend civilians and pick the city on the globe, then all of you defend it together.".into());
+        }
+        if let Some(pr) = pr {
+            self.players_panel(pr);
         }
         let fc = foot.cols(2, 10.0);
         if self.button(fc[0], "Settings", true, false) {
@@ -971,7 +1134,7 @@ impl App {
                 return;
             }
         }
-        if self.button(Rect::new(x0, left.y + left.h - 38.0, 130.0, 30.0), "Main menu", true, false) {
+        if self.button(Rect::new(x0, left.y + left.h - 38.0, 130.0, 30.0), if self.sess.is_some() { "Lobby" } else { "Main menu" }, true, false) {
             campaign::save(&c);
             self.camp = Some(c);
             self.screen = Screen::Menu;
@@ -1218,7 +1381,8 @@ impl App {
         let chosen = self.placing.take().is_some();
         if let Some(s) = self.sess.as_mut() {
             if s.is_host() {
-                d = s.start_game(&d, self.fac, self.diff, seed);
+                let camp = if self.in_camp { self.camp.as_ref().map(campaign::to_text) } else { None };
+                d = s.start_game(&d, self.fac, self.diff, seed, camp.as_deref());
             }
         }
         let note = d.note.clone();
@@ -1230,8 +1394,14 @@ impl App {
             self.show(g, !chosen);
         }
         let camp = if self.in_camp { self.camp.as_ref() } else { None };
+        self.banner = camp.map(|c| {
+            let city = c.city();
+            let line = format!("Day {:.0} · {:.0} days until it falls · hold out {} until the evac", c.fought as f32 * campaign::DAYS_PER_CITY, c.state().days, mmss(c.hold_secs()));
+            (city.name.to_string(), city.country().to_string(), line, self.clock)
+        });
         self.msg = match camp {
-            Some(c) => (format!("{}, day {}. {:.0} days until it falls. {} Hold out {} until the evac.", c.city().name, c.fought as f32 * campaign::DAYS_PER_CITY, c.state().days, note, mmss(c.hold_secs())), 8.0),
+            // the banner names the city and its days; the line under it says where the HQ went
+            Some(_) => (note, 6.0),
             None => (format!("{}. {}", name, note), 6.0),
         };
     }
@@ -1586,6 +1756,7 @@ impl App {
             self.place_hud();
         } else {
             self.hud(&mut g);
+            self.city_banner();
         }
         if let (Some((s, c)), false) = (cursor_label, self.settings_open || self.over_ui()) {
             let m = self.mouse();
@@ -1612,6 +1783,55 @@ impl App {
         }
         self.place_at = None;
         self.place_go = false;
+    }
+
+    /// "DEFENDING TOKYO": a band across the top of the view when a campaign city starts. It opens
+    /// out from the middle, holds a few seconds, then fades.
+    fn city_banner(&mut self) {
+        let Some((city, country, line, t0)) = self.banner.clone() else { return };
+        let t = self.clock - t0;
+        const LEN: f32 = 6.5;
+        if t > LEN {
+            self.banner = None;
+            return;
+        }
+        let ease = |x: f32| 1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3);
+        let a = ease(t / 0.45).min(1.0 - (t - (LEN - 1.0)).clamp(0.0, 1.0));
+        let open = ease(t / 0.6);
+        let p = pal(self.dark);
+        let area = ui::hud();
+        let amber = p.accent;
+        let (cy, bh) = ((area.y + area.h * 0.24).max(area.y + 160.0), 136.0);
+        let mid = area.x + area.w / 2.0;
+        let bw = area.w * (0.3 + 0.7 * open);
+        let x0 = mid - bw / 2.0;
+        // the band, soft at both ends
+        let fade = 160.0f32.min(bw / 4.0);
+        let ink = Color::new(0.03, 0.04, 0.06, 0.8 * a);
+        draw_rectangle(x0 + fade, cy - bh / 2.0, bw - 2.0 * fade, bh, ink);
+        ui::hgrad(Rect::new(x0, cy - bh / 2.0, fade, bh), alpha(ink, 0.0), ink);
+        ui::hgrad(Rect::new(x0 + bw - fade, cy - bh / 2.0, fade, bh), ink, alpha(ink, 0.0));
+        // amber rules that run out from the centre, with a soft glow
+        let rl = bw * 0.36 * open;
+        for y in [cy - bh / 2.0 + 10.0, cy + bh / 2.0 - 10.0] {
+            draw_line(mid - rl, y, mid + rl, y, 5.0, alpha(amber, 0.12 * a));
+            draw_line(mid - rl, y, mid + rl, y, 1.5, alpha(amber, 0.9 * a));
+            draw_rectangle(mid - rl - 3.0, y - 2.5, 5.0, 5.0, alpha(amber, a));
+            draw_rectangle(mid + rl - 2.0, y - 2.5, 5.0, 5.0, alpha(amber, a));
+        }
+        // DEFENDING, letter spaced
+        let tag = "D E F E N D I N G";
+        let tw = text_w(&self.fonts.mono, tag, 14.0);
+        text(&self.fonts.mono, tag, mid - tw / 2.0, cy - 30.0, 14.0, alpha(amber, a));
+        let name = city.to_uppercase();
+        let ns = 56.0;
+        let nw = text_w(&self.fonts.head, &name, ns);
+        let nx = mid - nw / 2.0 + (1.0 - ease(t / 0.7)) * 26.0;
+        text(&self.fonts.head, &name, nx + 2.0, cy + 22.0, ns, Color::new(0.0, 0.0, 0.0, 0.5 * a));
+        text(&self.fonts.head, &name, nx, cy + 20.0, ns, Color::new(1.0, 1.0, 1.0, a));
+        let sub = if country.is_empty() { line } else { format!("{} · {}", country, line) };
+        let lw = text_w(&self.fonts.mono, &sub, 14.0);
+        text(&self.fonts.mono, &sub, mid - lw / 2.0, cy + 46.0, 14.0, Color::new(0.85, 0.87, 0.9, 0.9 * a));
     }
 
     fn toggle_top(&mut self) {
@@ -2184,11 +2404,29 @@ impl App {
         let l = a.cut_top(20.0, 0.0);
         let world = fit(&self.fonts.mono, &world, l.w, 13.0);
         text(&self.fonts.mono, &world, l.x, l.y + 13.0, 13.0, p.dim);
-        if self.button_primary(b.cut_left(200.0, 0.0), "Continue", true) {
+        if self.client() {
+            // the host carries on for everybody
+            let hn = self.sess.as_ref().map(|s| s.host_name()).unwrap_or_default();
+            ui::spinner(vec2(b.x + 12.0, b.y + 22.0), 10.0, self.clock, p.accent);
+            text(&self.fonts.mono, &format!("Waiting for {} to carry on", hn), b.x + 34.0, b.y + 27.0, 13.0, p.text);
+            if self.button(b.cut_right(150.0, 0.0), "Leave co-op", true, false) {
+                self.leave_game();
+            }
+        } else if self.button_primary(b.cut_left(200.0, 0.0), "Continue", true) {
             campaign::save(&next);
             self.camp = Some(next);
             self.in_camp = false;
+            self.end_round();
             self.screen = Screen::Hub;
+        }
+    }
+
+    /// Co-op host: the city is over, so everybody goes back to the lobby.
+    fn end_round(&mut self) {
+        if let Some(s) = self.sess.as_mut() {
+            if s.is_host() && s.in_game {
+                s.end_game();
+            }
         }
     }
 
@@ -2536,7 +2774,12 @@ impl App {
         let host = s.is_host();
         if host && !s.in_game && s.players.len() >= 2 && self.screen == Screen::Menu {
             self.fac = 0;
-            self.start();
+            // PH_NETCAMP=<city>: a co-op campaign city instead
+            if let Some(l) = std::env::var("PH_NETCAMP").ok().and_then(|v| v.parse::<usize>().ok()) {
+                self.test_campaign(l, true);
+            } else {
+                self.start();
+            }
             return false;
         }
         if self.screen != Screen::Play {
@@ -2562,7 +2805,8 @@ impl App {
             }
         }
         let s = self.sess.as_ref().unwrap();
-        if exec % 100 == 0 && exec > self.test_log {
+        // a catching-up guest runs several ticks a frame, so log the first frame past each 100
+        if exec / 100 > self.test_log / 100 {
             self.test_log = exec;
             eprintln!("{} tick {} checksum {:016x} structs {} hostiles {}{}", if host { "host" } else { "guest" }, exec, g.checksum(), g.structs.iter().filter(|s| !s.dead).count(), g.hostiles(), if s.desync { " DESYNC" } else { "" });
         }
