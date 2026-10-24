@@ -102,8 +102,8 @@ const BASE: Def = Def {
 
 pub fn def(s: S) -> &'static Def {
     static WALL: Def = Def { key: '1', name: "Wall", w: 3, h: 3, hp: 300.0, cost: 3.0, ht: 1.6, top: rgb(139, 147, 159), side: rgb(93, 100, 112), tip: "Drag across a street to seal it. Corners that touch still block. Hordes chew through when there is no other way.", ..BASE };
-    static GUN: Def = Def { key: '2', name: "Gun turret", w: 5, h: 5, hp: 220.0, cost: 90.0, ht: 3.0, top: rgb(255, 212, 59), side: rgb(184, 147, 31), range: 46.0, rate: 0.16, dmg: 14.0, rad: 1.3, ammo: 1.0, turret: true, tip: "Fast, 1 ammo per shot. Click a rooftop for +60% range (it falls with the building). Costs more the further from the HQ it goes; outside the base zone it is flown in by helicopter.", ..BASE };
-    static CANNON: Def = Def { key: '3', name: "Cannon", w: 7, h: 7, hp: 420.0, cost: 240.0, ht: 3.5, top: rgb(255, 146, 43), side: rgb(184, 100, 15), range: 80.0, rate: 1.4, dmg: 70.0, rad: 5.0, ammo: 6.0, bdmg: 6.0, turret: true, tip: "Slow splash damage, 6 ammo per shell. Rooftops give +60% range. Costs more the further from the HQ it goes.", ..BASE };
+    static GUN: Def = Def { key: '2', name: "Gun turret", w: 5, h: 5, hp: 220.0, cost: 90.0, ht: 3.0, top: rgb(255, 212, 59), side: rgb(184, 147, 31), range: 46.0, rate: 0.16, dmg: 14.0, rad: 1.3, ammo: 1.0, turret: true, tip: "Fast, 1 ammo per shot. Click a rooftop for +60% range (it falls with the building). Base price inside the base zone; outside it costs more the further from the HQ it goes and is flown in by helicopter.", ..BASE };
+    static CANNON: Def = Def { key: '3', name: "Cannon", w: 7, h: 7, hp: 420.0, cost: 240.0, ht: 3.5, top: rgb(255, 146, 43), side: rgb(184, 100, 15), range: 80.0, rate: 1.4, dmg: 70.0, rad: 5.0, ammo: 6.0, bdmg: 6.0, turret: true, tip: "Slow splash damage, 6 ammo per shell. Rooftops give +60% range. Base price inside the base zone; outside it costs more the further from the HQ it goes.", ..BASE };
     static EXT: Def = Def {
         key: '4',
         name: "Scrap extractor",
@@ -125,7 +125,7 @@ pub fn def(s: S) -> &'static Def {
         top: rgb(198, 154, 116),
         side: rgb(134, 96, 63),
         zone: true,
-        tip: "Turns 3 scrap into 12 ammo every second. Base zone only.",
+        tip: "Turns 3 scrap into 6 ammo every second. Base zone only.",
         ..BASE
     };
     static SILO: Def = Def {
@@ -295,7 +295,7 @@ pub fn rdef(r: R) -> &'static RDef {
     static CARPET: RDef = RDef { name: "Carpet bombing", tip: "Airstrikes drop 12 bombs; drag on the map to aim the bomb run", cost: 900.0, civs: 200 };
     static NUKE: RDef = RDef { name: "Nuclear warhead", tip: "Bigger ICBM blast that leaves radiation you can't build or send troops into for 90 s", cost: 2500.0, civs: 450 };
     static ARMOUR: RDef = RDef { name: "Reinforced armour", tip: "Walls and turrets get 75% more health", cost: 700.0, civs: 150 };
-    static PRESSES: RDef = RDef { name: "Shell presses", tip: "Ammo plants make 20 ammo a second instead of 12 from the same scrap", cost: 800.0, civs: 180 };
+    static PRESSES: RDef = RDef { name: "Shell presses", tip: "Ammo plants make 10 ammo a second instead of 6 from the same scrap", cost: 800.0, civs: 180 };
     static BARRELS: RDef = RDef { name: "Long barrels", tip: "Turrets reach 25% further", cost: 1000.0, civs: 220 };
     match r {
         R::Rescue => &RESCUE,
@@ -327,7 +327,7 @@ pub struct Faction {
 }
 pub const FACTIONS: [Faction; 3] = [
     Faction { name: "Zombies", stats: FactionStats { mode: Behaviour::Zombie, spd: 9.0, hp: 12.0, atk: 4.0, jit: 8.0 }, sight: 600, col: [92, 220, 110], deep: [20, 120, 40], reward: 0.04, blurb: "Small outbreaks that spread by eating civilians. Attack anything in sight, then rush your HQ." },
-    Faction { name: "Alien bugs", stats: FactionStats { mode: Behaviour::Alien, spd: 20.0, hp: 6.0, atk: 3.0, jit: 14.0 }, sight: 700, col: [222, 120, 255], deep: [120, 30, 170], reward: 0.03, blurb: "Small drops all over the city. Straight for the HQ, killing anyone in the way." },
+    Faction { name: "Alien bugs", stats: FactionStats { mode: Behaviour::Alien, spd: 24.0, hp: 6.0, atk: 3.0, jit: 14.0 }, sight: 700, col: [222, 120, 255], deep: [120, 30, 170], reward: 0.03, blurb: "Small drops all over the city. Straight for the HQ, killing anyone in the way." },
     Faction { name: "Orcs", stats: FactionStats { mode: Behaviour::Orc, spd: 8.0, hp: 50.0, atk: 14.0, jit: 5.0 }, sight: 900, col: [255, 140, 50], deep: [170, 50, 0], reward: 0.2, blurb: "A few portals pour out huge waves that destroy everything they see." },
 ];
 

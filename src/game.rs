@@ -660,8 +660,9 @@ impl Game {
                 }
             }
             if f.stats.mode != Behaviour::Alien {
+                // a civilian already being dragged to a portal is no longer prey
                 for c in &self.civs {
-                    if c.st < 9 {
+                    if c.st < C_DEAD && c.st != C_CAPTURED {
                         src.push((c.p.y as usize * W + c.p.x as usize) as u32);
                     }
                 }
@@ -753,11 +754,12 @@ impl Game {
             .any(|s| !s.dead && !s.pending && s.t == t)
     }
 
-    /// Price of a structure at a spot: turrets get dearer the further they are from the HQ.
+    /// Price of a structure at a spot: outside the base zone, turrets get dearer the further
+    /// they are from the HQ. Inside the zone everything costs its base price.
     pub fn cost_at(&self, t: S, at: Vec2) -> f32 {
         let d = def(t);
         let mut c = d.cost;
-        if d.turret {
+        if d.turret && !self.world.in_zone(at) {
             let dist = at.distance(self.world.hq);
             c *= 1.0 + (dist - 100.0).max(0.0) / 350.0;
         }
@@ -1135,6 +1137,10 @@ impl Game {
     pub fn stress(&mut self) {
         // PH_STRESS_N sets the size of the test horde (default one million)
         let n: f32 = std::env::var("PH_STRESS_N").ok().and_then(|s| s.parse().ok()).unwrap_or(1e6);
+        self.stress_n(n);
+    }
+    /// Test horde of `n` hostiles from eight random spots (the in-game "Spawn 1M" button).
+    pub fn stress_n(&mut self, n: f32) {
         for _ in 0..8 {
             if let Some(p) = self.random_cell(1500) {
                 self.queue(p, n / 8.0, 6.0);
@@ -1494,7 +1500,7 @@ impl Game {
                 S::Plant => {
                     if self.scrap >= 3.0 * DT {
                         self.scrap -= 3.0 * DT;
-                        let rate = if self.research.presses { 20.0 } else { 12.0 };
+                        let rate = if self.research.presses { 10.0 } else { 6.0 };
                         self.ammo += rate * DT * im;
                     }
                 }
@@ -2779,7 +2785,6 @@ impl Game {
                 continue;
             };
             self.portals[k].taken += 1;
-            self.portals[k].t = (self.portals[k].t + 8.0).min(90.0);
             let n = (60.0 * self.mult * (1.0 + self.portals[k].taken as f32 * 0.1).min(2.5)).round();
             let at = (self.portals[k].p.x, self.portals[k].p.y);
             self.queue_ex(at, n, 3.0, 0, 1.0);

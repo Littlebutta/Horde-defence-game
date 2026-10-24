@@ -143,6 +143,8 @@ struct Orbit {
     yaw: f32,
     pitch: f32,
 }
+/// Hostiles the "Spawn 1M" stress-test button (and F9) drops in.
+const STRESS_N: u32 = 1_000_000;
 const FOVY: f32 = 0.8;
 const TOP_PITCH: f32 = 1.5;
 const MIN_PITCH: f32 = 0.3;
@@ -1836,22 +1838,29 @@ impl App {
         let top = Rect::new(area.x + 12.0, 10.0, area.w - 24.0, 52.0);
         self.panel(top);
         let mut row = top.pad(16.0, 0.0);
-        let bs = row.cut_right(4.0 * 90.0 + 3.0 * 6.0, 16.0);
-        let b = Rect::new(bs.x, top.y + 10.0, bs.w, 32.0).cols(4, 6.0);
-        if self.button(b[0], "Settings", true, false) {
+        let bs = row.cut_right(5.0 * 90.0 + 4.0 * 6.0, 16.0);
+        let b = Rect::new(bs.x, top.y + 10.0, bs.w, 32.0).cols(5, 6.0);
+        // stress test: drops a million more hostiles each press (F9 does the same)
+        if !g.over && self.button(b[0], "Spawn 1M", true, false) {
+            self.act(g, Cmd::Stress(STRESS_N));
+        }
+        if self.hot(b[0]) {
+            self.tip = Some("Testing: one million more hostiles pour in from eight spots on the map [F9]".into());
+        }
+        if self.button(b[1], "Settings", true, false) {
             self.open_settings();
         }
-        if self.button(b[1], if self.cam.top() { "3D view" } else { "Top view" }, true, false) {
+        if self.button(b[2], if self.cam.top() { "3D view" } else { "Top view" }, true, false) {
             self.toggle_top();
         }
-        if self.hot(b[1]) {
+        if self.hot(b[2]) {
             self.tip = Some("Switch between the tilted 3D view and straight down [T]".into());
         }
         let paused = self.paused_now();
-        if self.button(b[2], if paused { "Resume" } else { "Pause" }, true, paused) {
+        if self.button(b[3], if paused { "Resume" } else { "Pause" }, true, paused) {
             self.toggle_pause();
         }
-        if self.button(b[3], "Menu", true, false) {
+        if self.button(b[4], "Menu", true, false) {
             self.leave_game();
             return;
         }
@@ -2273,8 +2282,8 @@ impl App {
             self.sel_struct = None;
             self.press = None;
         }
-        if is_key_pressed(KeyCode::F9) && self.sess.is_none() && self.placing.is_none() {
-            g.stress();
+        if is_key_pressed(KeyCode::F9) && self.placing.is_none() {
+            self.act(g, Cmd::Stress(STRESS_N));
         }
         // camera: WASD pans along the view, Z/C turn, PageUp/PageDown tilt
         let pan = 500.0 / self.cam.scale() * dt;

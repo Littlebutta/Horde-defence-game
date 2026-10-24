@@ -40,6 +40,8 @@ pub enum Cmd {
     Order(u32, Vec2),
     Ability(A, Vec2, Vec2),
     Research(R),
+    /// test horde of this many hostiles
+    Stress(u32),
     /// point an artillery piece or a heli pad's gunship at a spot
     Aim(u32, Vec2),
     /// stop an artillery piece firing
@@ -106,6 +108,10 @@ impl Wr {
                 self.u32(6);
                 self.u32(RESEARCH.iter().position(|x| *x == r).unwrap() as u32);
             }
+            Cmd::Stress(n) => {
+                self.u32(7);
+                self.u32(n);
+            }
             Cmd::Aim(i, p) => {
                 self.u32(20);
                 self.u32(i);
@@ -140,6 +146,7 @@ impl Rd<'_> {
             4 => Cmd::Order(self.u32()?, self.v2()?),
             5 => Cmd::Ability(self.a()?, self.v2()?, self.v2()?),
             6 => Cmd::Research(*RESEARCH.get(self.u32()? as usize)?),
+            7 => Cmd::Stress(self.u32()?.min(10_000_000)),
             20 => Cmd::Aim(self.u32()?, self.v2()?),
             21 => Cmd::Cease(self.u32()?),
             _ => return None,
@@ -205,6 +212,10 @@ pub fn apply(g: &mut Game, c: Cmd) -> Option<&'static str> {
         Cmd::Ability(a, f, t) => (!g.use_ability(a, f, t)).then_some(BAD_TARGET),
         Cmd::Research(r) => {
             g.start_research(r);
+            None
+        }
+        Cmd::Stress(n) => {
+            g.stress_n(n as f32);
             None
         }
         Cmd::Aim(i, p) => (!g.aim(i as usize, p)).then_some("Can't fire there"),
