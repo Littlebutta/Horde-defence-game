@@ -39,6 +39,9 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 - Outposts push the base zone outwards. Factories, silos, pads and labs must go inside the zone.
 - Rescue squads walk up to civilians one by one and escort them back. Once inside the base, civilians walk to the nearest extraction pad. Each pad flies up to 16 out (+100 score, +20 scrap, +10 ammo each), then needs 30 seconds, so more pads means faster extraction. A crowded base slows your income.
 - Every missile silo has its own ICBM cooldown.
+- Special towers: the **flame bunker** (B) is very tough but short ranged and burns everything in a cone; the **railgun** (N) waits for a dense group, charges, then kills everything in a straight line to the end of its range; the **helium tower** (I) slows everything in its field to 40% speed and needs no ammo; **artillery** (Y) shells any spot on the map (click it, right-click a target, **Cease fire** to stop) at 45 ammo a shell.
+- The **heli pad** (U) keeps its own gunship: click the pad, right-click anywhere and it flies there for free, fires for 20 s (right-click again to move it), then rearms for 35 s.
+- A **rescue station** (J) sends a rescue team every 25 s to the biggest group of civilians it can reach safely and walks them back to the base.
 - The research lab unlocks upgrades: bigger rescue squads, carpet bombing (drag to aim the bomb run), a nuclear warhead that leaves radiation nobody of yours can enter or build in, and (on its own panel under the abilities) reinforced armour for walls and turrets, shell presses for faster ammo, and long barrels for turret range.
 - Units go anywhere on land except inside buildings: water is the only barrier. Only your turrets and garrisoned rifles stand on rooftops.
 - Hordes walk around your walls and only chew through one when it blocks the way.

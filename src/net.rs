@@ -40,9 +40,13 @@ pub enum Cmd {
     Order(u32, Vec2),
     Ability(A, Vec2, Vec2),
     Research(R),
+    /// point an artillery piece or a heli pad's gunship at a spot
+    Aim(u32, Vec2),
+    /// stop an artillery piece firing
+    Cease(u32),
 }
 
-const ALL_S: [S; 10] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq];
+const ALL_S: [S; 16] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue];
 const ALL_U: [U; 2] = [U::Rifle, U::Tank];
 
 fn s_id(t: S) -> u32 {
@@ -102,6 +106,15 @@ impl Wr {
                 self.u32(6);
                 self.u32(RESEARCH.iter().position(|x| *x == r).unwrap() as u32);
             }
+            Cmd::Aim(i, p) => {
+                self.u32(20);
+                self.u32(i);
+                self.v2(p);
+            }
+            Cmd::Cease(i) => {
+                self.u32(21);
+                self.u32(i);
+            }
         }
     }
 }
@@ -127,6 +140,8 @@ impl Rd<'_> {
             4 => Cmd::Order(self.u32()?, self.v2()?),
             5 => Cmd::Ability(self.a()?, self.v2()?, self.v2()?),
             6 => Cmd::Research(*RESEARCH.get(self.u32()? as usize)?),
+            20 => Cmd::Aim(self.u32()?, self.v2()?),
+            21 => Cmd::Cease(self.u32()?),
             _ => return None,
         })
     }
@@ -190,6 +205,11 @@ pub fn apply(g: &mut Game, c: Cmd) -> Option<&'static str> {
         Cmd::Ability(a, f, t) => (!g.use_ability(a, f, t)).then_some(BAD_TARGET),
         Cmd::Research(r) => {
             g.start_research(r);
+            None
+        }
+        Cmd::Aim(i, p) => (!g.aim(i as usize, p)).then_some("Can't fire there"),
+        Cmd::Cease(i) => {
+            g.cease(i as usize);
             None
         }
     }

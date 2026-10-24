@@ -229,7 +229,248 @@ pub fn structure(mb: &mut MB, g: &Game, i: usize, s: &Structure, base: f32, t: f
             labels.items.push((p3(c, top + 3.0), "HQ".into(), WHITE, 14.0));
             top
         }
+        S::Flame => flame(mb, d, c, w, h, base, s.aim, g.time - s.last_fire < 0.25, t),
+        S::Rail => {
+            let charge = if s.charge > 0.0 { 1.0 - s.charge / RAIL_CHARGE } else { 0.0 };
+            rail(mb, d, c, w, h, base, s.aim, charge, g.time - s.last_fire, t)
+        }
+        S::Helium => helium(mb, d, c, w, h, base, t),
+        S::Artillery => {
+            let top = artillery(mb, d, c, w, h, base, s.aim, ((g.time - s.last_fire) / 0.5).clamp(0.0, 1.0));
+            if s.target.is_none() {
+                labels.items.push((p3(c, top + 3.0), "No target".into(), rgb(200, 205, 212), 11.0));
+            }
+            top
+        }
+        S::Helipad => {
+            let home = g.pad_gunship(i).is_none();
+            let top = helipad(mb, d, c, w, h, base, home && s.cd <= 0.0, t);
+            if s.cd > 0.0 && home {
+                bar(mb, c + vec2(0.0, -h / 2.0 - 1.5), top + 0.5, 9.0, 1.0 - s.cd / HELIPAD_COOLDOWN, rgb(255, 212, 59));
+            }
+            top
+        }
+        S::Rescue => {
+            let top = rescue(mb, d, c, w, h, base, t);
+            if s.cd > 0.0 && s.cd < RESCUE_EVERY {
+                bar(mb, c + vec2(0.0, -h / 2.0 - 1.5), top + 0.5, 8.0, 1.0 - s.cd / RESCUE_EVERY, rgb(64, 192, 87));
+            }
+            top
+        }
     }
+}
+
+/// A squat armoured bunker with sloped walls, fuel tanks at the back and a flame nozzle that
+/// swings to the target; the pilot light flares while it fires.
+#[allow(clippy::too_many_arguments)]
+fn flame(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, aim: f32, firing: bool, t: f32) -> f32 {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    plinth(mb, c, hw, hh, base);
+    let lo = chamfer(c, hw - 0.3, hh - 0.3, 1.4, 0.0);
+    let hi = chamfer(c, hw - 1.1, hh - 1.1, 1.0, 0.0);
+    let z1 = base + 1.7;
+    loft(mb, &lo, &hi, base + 0.5, z1, Some(mix(CONCRETE, d.top, 0.1)), body_col(d));
+    band(mb, &hi, z1 - 0.45, z1 - 0.22, d.top);
+    // hazard stripes on the roof edge
+    for k in 0..4 {
+        let a = k as f32 * std::f32::consts::FRAC_PI_2;
+        mb.poly_at(&rect(c, hw - 1.6, -0.25, hw - 1.25, 0.25, a), z1 + 0.02, rgb(255, 212, 59));
+    }
+    let fwd = vec2(aim.cos(), aim.sin());
+    let side = vec2(-fwd.y, fwd.x);
+    // fuel tanks ride on the turret's back
+    cyl(mb, c, 1.5, z1, z1 + 0.3, STEEL, STEEL_DARK);
+    let zh = z1 + 0.3;
+    for k in [-0.55f32, 0.55] {
+        let p = c - fwd * 0.6 + side * k;
+        cyl(mb, p, 0.42, zh, zh + 1.0, mix(d.top, WHITE, 0.15), d.side);
+        dome(mb, p, 0.42, zh + 1.0, 0.25, d.top);
+    }
+    let head = chamfer(c + fwd * 0.3, 0.9, 0.75, 0.35, aim);
+    loft(mb, &head, &shrink(&head, 0.2), zh, zh + 0.7, Some(STEEL), STEEL_DARK);
+    // nozzle
+    let n0 = c + fwd * 0.9;
+    beam(mb, n0, n0 + fwd * 2.3, 0.17, zh + 0.4, STEEL_DARK);
+    beam(mb, n0 + fwd * 2.0, n0 + fwd * 2.6, 0.26, zh + 0.4, STEEL);
+    let tip = n0 + fwd * 2.75;
+    let flick = 0.5 + 0.5 * (t * 23.0).sin().abs();
+    let pilot = if firing { mix(rgb(255, 150, 40), rgb(255, 240, 160), flick) } else { mix(rgb(70, 140, 255), rgb(170, 210, 255), flick) };
+    lamp(mb, tip, zh + 0.25, if firing { 0.4 } else { 0.16 }, pilot);
+    zh + 1.25
+}
+
+/// A round railgun mount: a turning housing with two long rails, field coils across them and a
+/// core that glows brighter as the slug charges.
+#[allow(clippy::too_many_arguments)]
+fn rail(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, aim: f32, charge: f32, since: f32, t: f32) -> f32 {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    plinth(mb, c, hw, hh, base);
+    let r = hw.min(hh) - 0.4;
+    let z1 = base + 1.5;
+    loft(mb, &ngon(c, r, 18, 0.0), &ngon(c, r - 0.6, 18, 0.0), base + 0.5, z1, Some(mix(STEEL, d.top, 0.15)), body_col(d));
+    band(mb, &ngon(c, r - 0.6, 18, 0.0), z1 - 0.4, z1 - 0.18, d.top);
+    cyl(mb, c, 1.9, z1, z1 + 0.35, STEEL, STEEL_DARK);
+    let zh = z1 + 0.35;
+    let fwd = vec2(aim.cos(), aim.sin());
+    let side = vec2(-fwd.y, fwd.x);
+    // recoil after a shot
+    let kick = (1.0 - (since / 0.6).clamp(0.0, 1.0)) * 0.8;
+    let back = c - fwd * (0.7 + kick);
+    let body = chamfer(back, 1.7, 1.3, 0.6, aim);
+    loft(mb, &body, &shrink(&body, 0.25), zh, zh + 1.2, Some(d.top), mix(d.side, STEEL, 0.4));
+    mb.poly_at(&rect(back, -1.0, -0.35, 0.6, 0.35, aim), zh + 1.22, STEEL_DARK);
+    let zr = zh + 0.7;
+    let (r0, r1) = (c + fwd * (0.4 - kick), c + fwd * (6.2 - kick));
+    for k in [-0.45f32, 0.45] {
+        beam(mb, r0 + side * k, r1 + side * k, 0.17, zr, rgb(206, 212, 218));
+    }
+    let core = mix(rgb(30, 70, 120), rgb(210, 248, 255), charge.max(0.15));
+    beam(mb, r0, r1 - fwd * 0.6, 0.09, zr, core);
+    for k in 0..3 {
+        let p = r0 + fwd * (1.2 + k as f32 * 1.6);
+        block(mb, &rect(p, -0.18, -0.72, 0.18, 0.72, aim), zr - 0.35, zr + 0.35, d.top, d.side);
+    }
+    // capacitor lights fill up with the charge
+    for k in 0..4 {
+        let on = charge > k as f32 / 4.0 || (charge == 0.0 && ((t * 0.8) as i32 % 4) == k);
+        lamp(mb, back + rot(vec2(-1.2 + k as f32 * 0.5, 1.15), aim), zh + 0.5, 0.15, if on { rgb(150, 230, 255) } else { STEEL_DARK });
+    }
+    zh + 1.3
+}
+
+/// A frosted cryo tank in cooling rings on a steel skid, with a spray head turning on top.
+fn helium(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, t: f32) -> f32 {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    plinth(mb, c, hw, hh, base);
+    let z0 = base + 0.5;
+    block(mb, &chamfer(c, hw - 0.6, hh - 0.6, 0.8, 0.0), z0, z0 + 0.35, STEEL, STEEL_DARK);
+    let frost = rgb(232, 240, 248);
+    let r = hw.min(hh) - 1.0;
+    let z1 = z0 + 0.35 + 3.0;
+    cyl(mb, c, r, z0 + 0.35, z1, frost, mix(d.top, frost, 0.5));
+    for k in 0..3 {
+        let z = z0 + 0.9 + k as f32 * 0.9;
+        band(mb, &ngon(c, r, 20, 0.0), z, z + 0.2, d.side);
+    }
+    dome(mb, c, r, z1, 0.9, frost);
+    // feed pipes down the side
+    for k in 0..3 {
+        let a = k as f32 * 2.094 + 0.5;
+        let o = vec2(a.cos(), a.sin());
+        strut(mb, c + o * (r + 0.15), z0 + 0.4, c + o * (r + 0.15), z1 + 0.2, 0.09, STEEL);
+    }
+    let zt = z1 + 0.9;
+    cyl(mb, c, 0.35, zt - 0.1, zt + 0.35, STEEL, STEEL_DARK);
+    for k in 0..3 {
+        let a = t * 1.6 + k as f32 * 2.094;
+        let q = rot(vec2(1.1, 0.0), a);
+        beam(mb, c, c + q, 0.08, zt + 0.25, STEEL);
+        lamp(mb, c + q, zt + 0.15, 0.13, rgb(180, 230, 255));
+    }
+    zt + 0.4
+}
+
+/// A howitzer in a sandbagged ring: carriage and gun shield on a turntable, the barrel raised
+/// toward the target and kicking back on each shot.
+fn artillery(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, aim: f32, recoil: f32) -> f32 {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    plinth(mb, c, hw, hh, base);
+    let z0 = base + 0.5;
+    let ring = chamfer(c, hw - 0.3, hh - 0.3, 2.2, 0.0);
+    let sand = rgb(176, 156, 116);
+    loft(mb, &ring, &shrink(&ring, 0.5), z0, z0 + 0.9, Some(mix(sand, WHITE, 0.1)), mix(sand, BLACK, 0.2));
+    mb.poly_at(&shrink(&ring, 1.1), z0 + 0.03, CONCRETE_DARK);
+    // shell crates by the wall
+    for (x, y) in [(-hw + 1.6, hh - 1.7), (-hw + 2.6, hh - 1.7)] {
+        block(mb, &rect(c, x - 0.4, y - 0.3, x + 0.4, y + 0.3, 0.0), z0, z0 + 0.5, rgb(120, 130, 80), rgb(84, 92, 56));
+    }
+    cyl(mb, c, 2.4, z0, z0 + 0.4, STEEL, STEEL_DARK);
+    let zh = z0 + 0.4;
+    let fwd = vec2(aim.cos(), aim.sin());
+    let carriage = chamfer(c - fwd * 0.4, 1.9, 1.5, 0.5, aim);
+    loft(mb, &carriage, &shrink(&carriage, 0.3), zh, zh + 0.9, Some(d.top), mix(d.side, STEEL, 0.3));
+    // trails behind
+    for k in [-0.9f32, 0.9] {
+        let a = c - fwd * 1.5 + vec2(-fwd.y, fwd.x) * k;
+        beam(mb, a, a - fwd * 2.2 + vec2(-fwd.y, fwd.x) * k * 0.6, 0.18, zh + 0.25, STEEL_DARK);
+    }
+    block(mb, &rect(c + fwd * 0.8, -0.18, -1.8, 0.18, 1.8, aim), zh + 0.5, zh + 1.9, mix(d.top, WHITE, 0.1), d.side);
+    let kick = (1.0 - recoil) * 1.1;
+    let b0 = c + fwd * (0.2 - kick);
+    let b1 = c + fwd * (6.8 - kick);
+    strut(mb, b0, zh + 1.1, b1, zh + 2.9, 0.3, STEEL_DARK);
+    strut(mb, b0 - fwd * 0.6, zh + 0.95, b0 + fwd * 1.0, zh + 1.35, 0.5, STEEL);
+    strut(mb, b1 - fwd * 0.5, zh + 2.75, b1 + fwd * 0.2, zh + 2.95, 0.4, STEEL);
+    zh + 3.0
+}
+
+/// The gunship's own pad: a dark steel deck with a yellow ring and H, rearming crates at the
+/// corners and edge lights that turn green when the gunship is ready.
+#[allow(clippy::too_many_arguments)]
+fn helipad(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, ready: bool, t: f32) -> f32 {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    let deck = chamfer(c, hw, hh, 2.2, 0.0);
+    loft(mb, &deck, &shrink(&deck, 0.3), base, base + d.ht, Some(d.top), CONCRETE_DARK);
+    let z = base + d.ht;
+    let r = hw.min(hh) - 1.4;
+    let yellow = rgb(250, 204, 40);
+    ring_flat(mb, c, r, 0.4, z + 0.02, yellow);
+    for (x0, y0, x1, y1) in [(-1.9, -2.6, -1.1, 2.6), (1.1, -2.6, 1.9, 2.6), (-1.1, -0.4, 1.1, 0.4)] {
+        mb.poly_at(&rect(c, x0, y0, x1, y1, 0.0), z + 0.04, yellow);
+    }
+    // rearming crates and a fuel drum in the corners
+    for k in 0..4 {
+        let a = k as f32 * std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_4;
+        let p = c + vec2(a.cos(), a.sin()) * (r + 1.4);
+        if k % 2 == 0 {
+            block(mb, &rect(p, -0.45, -0.35, 0.45, 0.35, a), z, z + 0.55, rgb(120, 130, 80), rgb(84, 92, 56));
+        } else {
+            cyl(mb, p, 0.35, z, z + 0.7, rgb(200, 60, 50), rgb(150, 40, 34));
+        }
+    }
+    let col = if ready { rgb(80, 230, 110) } else { rgb(255, 170, 50) };
+    for k in 0..12 {
+        let a = k as f32 / 12.0 * std::f32::consts::TAU;
+        let on = ((t * 1.5 - k as f32 / 12.0).fract()) < 0.3;
+        lamp(mb, c + vec2(a.cos(), a.sin()) * (r + 0.55), z, 0.16, if on { col } else { mix(col, BLACK, 0.55) });
+    }
+    z
+}
+
+/// A white field station with a green cross on the roof, a vehicle bay, a radio mast with a
+/// blinking light and an ambulance parked by the door.
+fn rescue(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, t: f32) -> f32 {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    plinth(mb, c, hw, hh, base);
+    let z0 = base + 0.5;
+    let white = rgb(238, 241, 244);
+    let wall_c = rgb(196, 202, 210);
+    let body = chamfer(c + vec2(0.0, -0.8), hw - 0.6, hh - 1.4, 0.7, 0.0);
+    let top = base + d.ht;
+    block(mb, &body, z0, top, white, wall_c);
+    band(mb, &body, top - 0.75, top - 0.45, d.top);
+    // vehicle bay doors on the front
+    for k in [-1.6f32, 1.6] {
+        let p = c + vec2(k, hh - 2.35);
+        block(mb, &rect(p, -1.1, -0.05, 1.1, 0.12, 0.0), z0, z0 + 1.6, STEEL, STEEL_DARK);
+    }
+    // the cross
+    let cc = c + vec2(0.0, -0.8);
+    mb.poly_at(&rect(cc, -2.2, -2.2, 2.2, 2.2, 0.0), top + 0.02, white);
+    mb.poly_at(&rect(cc, -0.6, -1.8, 0.6, 1.8, 0.0), top + 0.04, d.top);
+    mb.poly_at(&rect(cc, -1.8, -0.6, 1.8, 0.6, 0.0), top + 0.04, d.top);
+    vent(mb, c + vec2(-hw + 1.6, -hh + 1.6), top, 0.5, 0.0);
+    // radio mast
+    let m = c + vec2(hw - 1.5, -hh + 1.5);
+    strut(mb, m, top, m, top + 3.4, 0.07, STEEL);
+    let blink = (t * 1.4).fract() < 0.4;
+    lamp(mb, m, top + 3.4, 0.18, if blink { rgb(255, 70, 60) } else { rgb(110, 30, 30) });
+    // ambulance on the apron
+    let a = c + vec2(-hw + 2.2, hh - 0.9);
+    block(mb, &rect(a, -1.3, -0.5, 1.3, 0.5, 0.0), z0, z0 + 0.9, white, wall_c);
+    band(mb, &rect(a, -1.3, -0.5, 1.3, 0.5, 0.0), z0 + 0.4, z0 + 0.55, d.top);
+    lamp(mb, a + vec2(0.6, 0.0), z0 + 0.9, 0.12, if blink { rgb(80, 160, 255) } else { rgb(255, 70, 60) });
+    top
 }
 
 /// Jersey-barrier style concrete: sloped sides, a capping strip and hazard paint on the ends.

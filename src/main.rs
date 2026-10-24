@@ -16,6 +16,7 @@ mod render;
 mod selftest;
 mod storage;
 mod swarm;
+mod ui;
 mod update;
 mod world;
 
@@ -45,6 +46,7 @@ fn window_conf() -> Conf {
             4
         },
         window_resizable: true,
+        fullscreen: std::env::var("PH_SHOT").is_err() && storage::load_settings().fullscreen,
         ..Default::default()
     }
 }
@@ -136,7 +138,34 @@ async fn run(steam: Option<net::Steam>) {
                 if std::env::var("PH_GALLERY").is_ok() {
                     selftest::gallery(g);
                 }
+                if std::env::var("PH_TOWERS").is_ok() {
+                    selftest::towers(g);
+                }
                 let mut hq = g.world.hq;
+                // PH_LOOK=air|gunship|heli|icbm: look at the first one in flight instead
+                match std::env::var("PH_LOOK").as_deref() {
+                    Ok("air") => {
+                        if let Some(game::Strike::Air { from, dir, pos, .. }) = g.strikes.iter().find(|s| matches!(s, game::Strike::Air { .. })) {
+                            hq = *from + *dir * *pos;
+                        }
+                    }
+                    Ok("icbm") => {
+                        if let Some(game::Strike::Icbm { from, to, t, dur, .. }) = g.strikes.iter().find(|s| matches!(s, game::Strike::Icbm { .. })) {
+                            hq = from.lerp(*to, t / dur);
+                        }
+                    }
+                    Ok("gunship") => {
+                        if let Some(s) = g.gunships.first() {
+                            hq = s.p;
+                        }
+                    }
+                    Ok("heli") => {
+                        if let Some(h) = g.helis.first() {
+                            hq = h.from.lerp(h.to, (h.t / h.dur).clamp(0.0, 1.0));
+                        }
+                    }
+                    _ => {}
+                }
                 // PH_HIVE=1: look at the first alien hive instead
                 if let (true, Some(h)) = (std::env::var("PH_HIVE").is_ok(), g.hives.iter().find(|h| !h.dead)) {
                     hq = h.p;

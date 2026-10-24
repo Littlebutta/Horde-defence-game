@@ -19,6 +19,7 @@ use macroquad::prelude::*;
 use rayon::prelude::*;
 use std::sync::atomic::Ordering::Relaxed;
 
+mod air;
 mod art;
 
 pub struct Fonts {
@@ -34,11 +35,18 @@ pub fn load_fonts() -> Fonts {
     Fonts { head, mono }
 }
 
+/// Text at baseline `x`, `y`. Inside `ui::begin`/`ui::end` the glyphs are rasterised at the real
+/// pixel size, so they stay sharp at any UI scale.
 pub fn text(f: &Font, s: &str, x: f32, y: f32, size: f32, c: Color) {
-    draw_text_ex(s, x, y, TextParams { font: Some(f), font_size: size as u16, color: c, ..Default::default() });
+    let k = crate::ui::draw_scale();
+    let px = (size * k).round().max(1.0);
+    draw_text_ex(s, x, y, TextParams { font: Some(f), font_size: px as u16, font_scale: size / px, color: c, ..Default::default() });
 }
+/// The width of `s` in the units it is drawn in (points inside `ui::begin`/`ui::end`).
 pub fn text_w(f: &Font, s: &str, size: f32) -> f32 {
-    measure_text(s, Some(f), size as u16, 1.0).width
+    let k = crate::ui::draw_scale();
+    let px = (size * k).round().max(1.0);
+    measure_text(s, Some(f), px as u16, 1.0).width * size / px
 }
 
 /// A point `h` cells above the map point `p`.
@@ -113,6 +121,25 @@ fn solid_material(mut pp: PipelineParams) -> Material {
     load_material(
         ShaderSource::Glsl { vertex: VS_PULSE, fragment: FS_PULSE },
         MaterialParams { pipeline_params: pp, uniforms: vec![UniformDesc::new("Time", UniformType::Float1)], ..Default::default() },
+    )
+    .unwrap()
+}
+
+/// Glowing line art over the scene: tested against depth (unless it doesn't work), never written.
+pub fn glow_material(painter: bool) -> Material {
+    let blend = BlendState::new(Equation::Add, BlendFactor::Value(BlendValue::SourceAlpha), BlendFactor::OneMinusValue(BlendValue::SourceAlpha));
+    load_material(
+        ShaderSource::Glsl { vertex: VS, fragment: FS },
+        MaterialParams {
+            pipeline_params: PipelineParams {
+                depth_test: if painter { Comparison::Always } else { Comparison::LessOrEqual },
+                depth_write: false,
+                color_blend: Some(blend),
+                alpha_blend: Some(blend),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
     )
     .unwrap()
 }
@@ -580,6 +607,8 @@ pub struct Scene {
     bare: Material,
     /// solids with depth testing (when the depth buffer works)
     depth: Material,
+    /// glowing line art: depth tested (when it works) but not written, so strokes blend
+    line_mat: Material,
     pub dark: bool,
     btimer: f32,
     ztimer: f32,
@@ -638,6 +667,7 @@ impl Scene {
             solid: painter_material(true),
             bare: painter_material(false),
             depth: depth_material(),
+            line_mat: glow_material(painter),
             dark: th.dark,
             btimer: 0.0,
             ztimer: 0.0,
@@ -1004,28 +1034,6 @@ fn rot(v: Vec2, a: f32) -> Vec2 {
     let (s, c) = a.sin_cos();
     vec2(v.x * c - v.y * s, v.x * s + v.y * c)
 }
-fn fan(c: Vec2, pts: &[Vec2], a: f32, s: f32, col: Color) {
-    let n = pts.len();
-    let ctr = pts.iter().fold(Vec2::ZERO, |acc, p| acc + *p) / n as f32;
-    let cc = c + rot(ctr * s, a);
-    for k in 0..n {
-        draw_triangle(cc, c + rot(pts[k] * s, a), c + rot(pts[(k + 1) % n] * s, a), col);
-    }
-}
-fn ellipse_pts(rx: f32, ry: f32, cx: f32, n: usize) -> Vec<Vec2> {
-    (0..n)
-        .map(|k| {
-            let t = k as f32 / n as f32 * std::f32::consts::TAU;
-            vec2(cx + t.cos() * rx, t.sin() * ry)
-        })
-        .collect()
-}
-#[allow(clippy::too_many_arguments)]
-fn rect_rot(c: Vec2, x0: f32, y0: f32, x1: f32, y1: f32, a: f32, s: f32, col: Color) {
-    let p = [vec2(x0, y0), vec2(x1, y0), vec2(x1, y1), vec2(x0, y1)].map(|v| c + rot(v * s, a));
-    draw_triangle(p[0], p[1], p[2], col);
-    draw_triangle(p[0], p[2], p[3], col);
-}
 fn fill_concave(pts: &[Vec2], col: Color) {
     let flat: Vec<f32> = pts.iter().flat_map(|p| [p.x, p.y]).collect();
     if let Ok(tris) = earcutr::earcut(&flat, &[], 2) {
@@ -1044,77 +1052,6 @@ pub fn at_height(h: f32, f: impl FnOnce()) {
     let mut gl = unsafe { get_internal_gl() };
     gl.flush();
     gl.quad_gl.pop_model_matrix();
-}
-
-/// A detailed little helicopter: shadow on the ground, the machine itself at altitude.
-#[allow(clippy::too_many_arguments)]
-pub fn draw_heli(ground: Vec2, alt: f32, heading: f32, time: f32, gunship: bool, cargo: bool, k: f32) {
-    let s = 0.55 * k;
-    let sh = Color::new(0.0, 0.0, 0.0, 0.22);
-    fan(ground, &ellipse_pts(4.2, 2.3, 0.0, 12), heading, s, sh);
-    rect_rot(ground, -9.0, -0.6, -2.0, 0.6, heading, s, sh);
-    draw_circle(ground.x, ground.y, 6.0 * s, Color::new(0.0, 0.0, 0.0, 0.08));
-    let (hull, dark, glass) = if gunship { (rgb(58, 66, 50), rgb(34, 38, 30), rgb(120, 200, 230)) } else { (rgb(86, 104, 68), rgb(52, 62, 42), rgb(150, 215, 240)) };
-    if cargo {
-        let ch = alt * 0.45;
-        draw_line_3d(p3(ground, alt), p3(ground, ch), rgb(40, 40, 40));
-        at_height(ch, || {
-            rect_rot(ground, -1.6, -1.6, 1.6, 1.6, heading, s, rgb(160, 120, 70));
-            rect_rot(ground, -1.6, -0.2, 1.6, 0.2, heading, s, rgb(110, 80, 45));
-        });
-    }
-    at_height(alt, || {
-        let body = ground;
-        for side in [-2.3f32, 2.3] {
-            rect_rot(body, -3.2, side - 0.2, 3.0, side + 0.2, heading, s, dark);
-        }
-        rect_rot(body, -9.5, -0.55, -2.5, 0.55, heading, s, hull);
-        rect_rot(body, -9.8, -2.0, -8.8, 2.0, heading, s, dark);
-        if gunship {
-            rect_rot(body, -1.2, -4.6, 0.6, 4.6, heading, s, dark);
-            for side in [-4.0f32, 4.0] {
-                rect_rot(body, -1.6, side - 0.5, 1.4, side + 0.5, heading, s, rgb(30, 30, 30));
-            }
-        }
-        fan(body, &ellipse_pts(4.3, 2.2, 0.0, 16), heading, s, dark);
-        fan(body, &ellipse_pts(4.0, 1.9, 0.0, 16), heading, s, hull);
-        fan(body, &ellipse_pts(1.7, 1.4, 2.3, 12), heading, s, glass);
-        fan(body, &ellipse_pts(0.6, 0.5, 2.7, 8), heading, s, Color::new(1.0, 1.0, 1.0, 0.6));
-        rect_rot(body, -1.8, -0.9, 0.6, 0.9, heading, s, dark);
-    });
-    at_height(alt + 1.2 * k, || {
-        let rc = ground + rot(vec2(-0.4, 0.0) * s, heading);
-        draw_circle(rc.x, rc.y, 6.2 * s, Color::new(0.1, 0.1, 0.1, 0.12));
-        let ra = time * 28.0;
-        for b in 0..2 {
-            rect_rot(rc, -6.2, -0.28, 6.2, 0.28, ra + b as f32 * std::f32::consts::PI, s, Color::new(0.12, 0.12, 0.12, 0.75));
-        }
-        draw_circle(rc.x, rc.y, 0.6 * s, rgb(25, 25, 25));
-        let tr = ground + rot(vec2(-9.3, 1.1) * s, heading);
-        let ta = time * 40.0;
-        let d = vec2(ta.cos(), ta.sin()) * 1.4 * s;
-        draw_line(tr.x - d.x, tr.y - d.y, tr.x + d.x, tr.y + d.y, 0.25 * k, Color::new(0.1, 0.1, 0.1, 0.8));
-    });
-}
-
-/// A simple B-2: a flying wing with a saw-tooth trailing edge, outlined in yellow so it stands out.
-pub fn draw_bomber(p: Vec2, heading: f32, k: f32) {
-    let s = 1.25 * k;
-    let half = [vec2(6.0, 0.0), vec2(-1.4, 12.0), vec2(-2.7, 11.0), vec2(-0.9, 7.6), vec2(-3.0, 4.4), vec2(-1.3, 0.0)];
-    let mut shape: Vec<Vec2> = half.to_vec();
-    for q in half[1..5].iter().rev() {
-        shape.push(vec2(q.x, -q.y));
-    }
-    let place = |c: Vec2, grow: f32| -> Vec<Vec2> { shape.iter().map(|v| c + rot((*v - vec2(0.8, 0.0)) * s * grow + vec2(0.8, 0.0) * s, heading)).collect() };
-    fill_concave(&place(p, 1.0), Color::new(0.0, 0.0, 0.0, 0.2));
-    at_height(60.0, || {
-        fill_concave(&place(p, 1.13), rgb(255, 212, 59));
-        fill_concave(&place(p, 1.0), rgb(44, 48, 56));
-        fan(p, &ellipse_pts(1.5, 0.75, 3.0, 10), heading, s, rgb(78, 84, 96));
-        for side in [-2.4f32, 2.4] {
-            fan(p, &ellipse_pts(1.7, 0.6, 0.2, 8).iter().map(|v| *v + vec2(0.0, side)).collect::<Vec<_>>(), heading, s, rgb(62, 68, 78));
-        }
-    });
 }
 
 /// A Google Maps style location pin, standing up on its point.
@@ -1144,6 +1081,8 @@ pub struct ViewInfo {
     pub radius: f32,
     pub scale: f32,
     pub selected: Option<usize>,
+    /// a selected structure (artillery or heli pad being aimed)
+    pub sel_struct: Option<usize>,
     pub time: f32,
     /// the camera's ground position (painter mode draws far to near from it)
     pub eye: Vec2,
@@ -1269,6 +1208,13 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
         match b.kind {
             1 => mb.disc(b.p, b.r * (0.3 + 0.7 * f), Color::new(1.0, 0.95, 0.85, 0.45 * (1.0 - f))),
             2 => ring(&mut mb, b.p, b.r * (0.5 + f), 0.8, Color::new(0.8, 0.45, 1.0, 1.0 - f)),
+            3 => {
+                // flame: hot core in a wider orange lick
+                mb.disc(b.p, b.r * (0.8 + 0.5 * f), Color::new(1.0, 0.38, 0.05, 0.7 * (1.0 - f * f)));
+                mb.disc(b.p, b.r * (0.5 + 0.3 * f), Color::new(1.0, 0.72, 0.2, 0.85 * (1.0 - f)));
+                mb.disc(b.p, b.r * 0.25, Color::new(1.0, 0.95, 0.7, 0.9 * (1.0 - f)));
+            }
+            4 => ring(&mut mb, b.p, b.r * (0.4 + f * 1.4), 0.6, Color::new(0.75, 0.95, 1.0, 1.0 - f)),
             _ => mb.disc(b.p, b.r * (0.6 + 0.6 * f), Color::new(1.0, 0.65, 0.25, 0.6 * (1.0 - f))),
         }
     }
@@ -1295,6 +1241,64 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
         if s.phase == 1 {
             ring(&mut mb, s.center, 25.0, 0.4, rgba(150, 240, 255, 0.35));
         }
+        if s.pad.is_some() && s.phase < 2 {
+            ring(&mut mb, s.center, 3.0, 0.5, rgba(255, 212, 59, 0.8));
+        }
+    }
+    // railgun slugs: a bright streak that fades
+    for tr in &g.tracers {
+        if tr.kind == 6 {
+            let f = (tr.t / 0.4).clamp(0.0, 1.0);
+            mb.line(&[tr.a, tr.b], 3.5 * f, Color::new(0.55, 0.85, 1.0, 0.35 * f));
+            mb.line(&[tr.a, tr.b], 1.0 * f, Color::new(0.9, 0.98, 1.0, 0.9 * f));
+        }
+    }
+    for (i, s) in g.structs.iter().enumerate() {
+        if s.dead || s.pending {
+            continue;
+        }
+        let c = s.center();
+        match s.t {
+            S::Helium if inview(c, 60.0) => {
+                let r = g.turret_range(S::Helium, s.roof >= 0);
+                mb.disc(c, r, rgba(165, 216, 255, 0.10 + 0.03 * (t * 1.3).sin()));
+                ring(&mut mb, c, r, 0.5, rgba(200, 235, 255, 0.55));
+                for k in 0..10 {
+                    let a = k as f32 * 0.628 + t * 0.25;
+                    let q = c + vec2(a.cos(), a.sin()) * r * (0.35 + 0.5 * ((k * 7 % 10) as f32 / 10.0));
+                    let n = 0.9;
+                    mb.line(&[q - vec2(n, 0.0), q + vec2(n, 0.0)], 0.25, rgba(230, 245, 255, 0.5));
+                    mb.line(&[q - vec2(0.0, n), q + vec2(0.0, n)], 0.25, rgba(230, 245, 255, 0.5));
+                }
+            }
+            S::Rail if s.charge > 0.0 => {
+                if let Some(tg) = s.target {
+                    let f = 1.0 - s.charge / RAIL_CHARGE;
+                    let dir = (tg - c).normalize_or_zero();
+                    let end = c + dir * g.turret_range(S::Rail, s.roof >= 0);
+                    mb.dashed(&[c, end], 0.3 + 0.5 * f, 3.0, 2.0, Color::new(0.6, 0.9, 1.0, 0.25 + 0.5 * f));
+                }
+            }
+            S::Artillery => {
+                if let Some(tg) = s.target {
+                    let sel = v.sel_struct == Some(i);
+                    let col = if sel { rgba(255, 90, 70, 0.9) } else { rgba(255, 90, 70, 0.45) };
+                    let r = def(S::Artillery).rad + 3.0 + tg.distance(c) * 0.012;
+                    ring(&mut mb, tg, r, 0.6, col);
+                    mb.line(&[tg - vec2(r * 0.5, 0.0), tg + vec2(r * 0.5, 0.0)], 0.4, col);
+                    mb.line(&[tg - vec2(0.0, r * 0.5), tg + vec2(0.0, r * 0.5)], 0.4, col);
+                    if sel {
+                        mb.dashed(&[c, tg], 0.5, 5.0, 4.0, rgba(255, 90, 70, 0.4));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // shell shadows
+    for sh in &g.shells {
+        let (p, _) = arc(sh.from, sh.to, sh.t / sh.dur);
+        mb.disc(p, 0.9, Color::new(0.0, 0.0, 0.0, 0.25));
     }
     mb
 }
@@ -1325,6 +1329,9 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels, painter: bool
             // flown in by helicopter: a translucent ghost until it lands
             mb.prism(&rect_pts(x, y, w, h), base, base + 0.3, alpha(d.top, 0.3), alpha(d.top, 0.3));
             continue;
+        }
+        if v.sel_struct == Some(i) {
+            art::ring_flat(&mut mb, c, w.max(h) / 2.0 + 1.5, 0.5, base + 0.05, rgb(255, 212, 59));
         }
         let top = art::structure(&mut mb, g, i, s, base, t, labels);
         if s.hp < s.max * 0.99 && s.t != S::Wall {
@@ -1440,17 +1447,24 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
             1 => rgb(255, 170, 80),
             2 => rgb(150, 240, 255),
             4 => rgb(200, 220, 255),
+            6 => rgb(230, 248, 255),
             _ => rgb(220, 235, 255),
         };
         draw_line_3d(p3(tr.a, tr.az), p3(tr.b, 0.3), c);
     }
     for b in &g.booms {
+        if b.kind == 3 {
+            // flame: a licking ball of fire above the ground puff
+            let f = 1.0 - b.t / b.life;
+            draw_sphere(p3(b.p, 0.8 + f * 1.5), b.r * (0.35 + 0.25 * f), None, Color::new(1.0, 0.55 + 0.3 * (1.0 - f), 0.15, 0.55 * (1.0 - f)));
+        }
         if b.kind == 1 {
             let f = 1.0 - b.t / b.life;
             draw_sphere(p3(b.p, 0.0), b.r * (0.2 + 0.5 * f), None, Color::new(1.0, 0.7, 0.3, 0.35 * (1.0 - f)));
         }
     }
     // ICBMs riding their arc, pins on the targets
+    let mut glow = air::Glow::default();
     for s in &g.strikes {
         if let Strike::Icbm { from, to, t: tt, dur, nuke } = s {
             draw_pin(*to, 5.0 * mk, rgb(234, 67, 53), if *nuke { rgb(255, 212, 59) } else { rgb(165, 14, 14) });
@@ -1467,27 +1481,53 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
             }
             let (p, h) = arc(*from, *to, f);
             draw_circle(p.x, p.y, 2.2 * mk, Color::new(0.0, 0.0, 0.0, 0.2));
-            at_height(h, || {
-                draw_circle(p.x, p.y, 3.4 * mk, WHITE);
-                draw_circle(p.x, p.y, 2.6 * mk, blue);
-            });
+            let (q, qh) = arc(*from, *to, (f + 0.002).min(1.0));
+            let dir = if f < 0.998 { p3(q, qh) - p3(p, h) } else { p3(p, h) - p3(arc(*from, *to, f - 0.002).0, arc(*from, *to, f - 0.002).1) };
+            let trail: Vec<Vec3> = (0..=16).map(|k| {
+                let ff = (f - 0.12 * (1.0 - k as f32 / 16.0)).max(0.0);
+                let (p, h) = arc(*from, *to, ff);
+                p3(p, h)
+            }).collect();
+            air::missile_trail(&mut glow, &trail, mk);
+            air::missile(&mut glow, p3(p, h), dir, t, mk);
         }
     }
     for s in &g.strikes {
         if let Strike::Air { from, dir, pos, .. } = s {
-            draw_bomber(*from + *dir * *pos, dir.to_angle(), mk);
+            air::bomber(&mut glow, *from + *dir * *pos, dir.to_angle(), mk);
+        }
+    }
+    // artillery shells on their lob
+    for sh in &g.shells {
+        let f = sh.t / sh.dur;
+        let (p, hgt) = arc(sh.from, sh.to, f);
+        let hgt = hgt * 0.5;
+        at_height(hgt, || {
+            draw_circle(p.x, p.y, 0.9 * mk, rgb(255, 200, 120));
+            draw_circle(p.x, p.y, 0.55 * mk, rgb(60, 50, 40));
+        });
+    }
+    // gunships parked on their heli pads
+    for (i, s) in g.structs.iter().enumerate() {
+        if s.t == S::Helipad && !s.dead && !s.pending && g.pad_gunship(i).is_none() {
+            air::heli(&mut glow, s.center(), def(S::Helipad).ht + 1.0, -std::f32::consts::FRAC_PI_2, if s.cd > 0.0 { 0.0 } else { t }, true, false, mk.min(1.4));
         }
     }
     for h in &g.helis {
         let f = (h.t / h.dur).clamp(0.0, 1.0);
         let ground = h.from.lerp(h.to, f);
         let alt = 30.0 * (f * 8.0).min(1.0) * ((1.0 - f) * 8.0).min(1.0) + 1.0;
-        draw_heli(ground, alt, (h.to - h.from).to_angle(), t, false, matches!(h.kind, HeliKind::Deliver(_)), mk);
+        air::heli(&mut glow, ground, alt, (h.to - h.from).to_angle(), t, false, matches!(h.kind, HeliKind::Deliver(_)), mk);
     }
     for s in &g.gunships {
         let heading = if s.phase == 1 { s.ang + std::f32::consts::FRAC_PI_2 } else { (s.center - s.p).to_angle() };
-        draw_heli(s.p, 16.0 + 20.0, heading, t, true, false, mk);
+        air::heli(&mut glow, s.p, 16.0 + 20.0, heading, t, true, false, mk);
     }
+    gl_use_material(&sc.line_mat);
+    for m in glow.finish() {
+        draw_mesh(&m);
+    }
+    gl_use_default_material();
 }
 
 /// Ghost of a structure about to be placed (drawn by the app at ground or roof height).
