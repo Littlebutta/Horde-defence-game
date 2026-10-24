@@ -5,6 +5,7 @@ use crate::defs::*;
 use crate::game::*;
 use crate::net::{self, Cmd};
 use crate::osm::{self, OsmMsg};
+use crate::menubg::MenuBg;
 use crate::music;
 use crate::storage;
 use crate::render::{self, text, text_w, Fonts, Scene, ViewInfo, WorldLabels};
@@ -94,6 +95,8 @@ pub struct App {
     place_go: bool,
     /// headless tests start right away with the suggested HQ (`PH_PLACE=1` shows the choice)
     auto_place: bool,
+    /// the battle behind the menu, made on the first menu frame
+    bg: Option<MenuBg>,
 }
 
 /// Colours of the co-op players' cursors, host first.
@@ -232,6 +235,7 @@ impl App {
             place_at: None,
             place_go: false,
             auto_place: ["PH_SHOT", "PH_NETTEST"].iter().any(|k| std::env::var(k).is_ok()) && std::env::var("PH_PLACE").is_err(),
+            bg: None,
         }
     }
 
@@ -535,21 +539,12 @@ impl App {
         clear_background(th.bg);
         let p = pal(self.dark);
         let (sw, sh) = (screen_width(), screen_height());
-        // a faint street grid behind the menu
-        let gc = if self.dark {
-            rgba(255, 255, 255, 0.035)
-        } else {
-            rgba(255, 255, 255, 0.06)
-        };
-        let mut x = (self.clock * 6.0) % 60.0 - 60.0;
-        while x < sw {
-            draw_rectangle(x, 0.0, 10.0, sh, gc);
-            x += 60.0;
+        // a random city behind the menu, its civilians hunted by all three armies
+        if !self.bg.as_ref().map_or(false, |b| b.fits(sw, sh, th)) {
+            self.bg = Some(MenuBg::new(sw, sh, th, macroquad::miniquad::date::now() as u64));
         }
-        let mut y = 0.0;
-        while y < sh {
-            draw_rectangle(0.0, y, sw, 10.0, gc);
-            y += 72.0;
+        if let Some(b) = &mut self.bg {
+            b.frame(get_frame_time().min(0.1), th);
         }
         if self.client() {
             while get_char_pressed().is_some() {}
