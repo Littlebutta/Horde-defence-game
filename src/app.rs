@@ -837,12 +837,14 @@ impl App {
         }
 
         // two columns at the sides, the globe between them
-        let colw = (sw * 0.25).clamp(300.0, 430.0);
+        // inside the safe area, so on ultrawide screens the columns stay near the globe
+        let hud = ui::hud();
+        let colw = (hud.w * 0.25).clamp(300.0, 430.0);
         let pad = 16.0;
-        let left = Rect::new(pad, pad, colw, sh - 2.0 * pad);
-        let right = Rect::new(sw - pad - colw, pad, colw, sh - 2.0 * pad);
+        let left = Rect::new(hud.x + pad, pad, colw, sh - 2.0 * pad);
+        let right = Rect::new(hud.x + hud.w - pad - colw, pad, colw, sh - 2.0 * pad);
         let gc = vec2(sw / 2.0, sh / 2.0 + 14.0);
-        let gr = ((sw - 2.0 * colw - 4.0 * pad) / 2.0).min(sh / 2.0 - 64.0).max(120.0);
+        let gr = ((hud.w - 2.0 * colw - 4.0 * pad) / 2.0).min(sh / 2.0 - 64.0).max(120.0);
         let m = self.mouse();
         let globe = self.globe.get_or_insert_with(globe::Globe::new);
         if self.globe_city != Some(c.current) {

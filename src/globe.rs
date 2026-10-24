@@ -5,7 +5,8 @@
 //! sphere is drawn without the depth buffer (some GPUs' depth doesn't work, see `render`): it's
 //! convex, so culling its far side is enough.
 
-use crate::render::{painter_material, text, text_w};
+use crate::render::{text, text_w};
+use macroquad::miniquad;
 use macroquad::prelude::*;
 
 static LAND: &[u8] = include_bytes!("../assets/land.bin");
@@ -71,7 +72,7 @@ impl Globe {
             }
             bands.push(Mesh { vertices, indices, texture: Some(tex.clone()) });
         }
-        Globe { tex, mat: painter_material(true), bands, lat: 25.0, lon: -40.0, zoom: 1.0, goal: None, drag: None }
+        Globe { tex, mat: globe_material(), bands, lat: 25.0, lon: -40.0, zoom: 1.0, goal: None, drag: None }
     }
 
     /// Turns the globe to bring a point to the middle, smoothly.
@@ -220,6 +221,44 @@ impl Globe {
         }
         (hover, if click { hover } else { None })
     }
+}
+
+const VS: &str = r#"#version 100
+attribute vec3 position;
+attribute vec2 texcoord;
+attribute vec4 color0;
+varying lowp vec2 uv;
+varying lowp vec4 color;
+uniform mat4 Model;
+uniform mat4 Projection;
+void main() {
+    gl_Position = Projection * Model * vec4(position, 1);
+    color = color0 / 255.0;
+    uv = texcoord;
+}"#;
+const FS: &str = r#"#version 100
+varying lowp vec4 color;
+varying lowp vec2 uv;
+uniform sampler2D Texture;
+void main() {
+    gl_FragColor = color * texture2D(Texture, uv);
+}"#;
+
+/// Textured, lit by vertex colour, no depth test, far side culled.
+fn globe_material() -> Material {
+    load_material(
+        ShaderSource::Glsl { vertex: VS, fragment: FS },
+        MaterialParams {
+            pipeline_params: PipelineParams {
+                depth_test: Comparison::Always,
+                depth_write: false,
+                cull_face: miniquad::CullFace::Back,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }
 
 /// A fixed matrix as a camera, for the shifted globe projection.
