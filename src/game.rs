@@ -3,7 +3,7 @@
 
 use crate::defs::*;
 use crate::fields::{Done, FieldWorker, Job, DX, DY, INF};
-use crate::swarm::{kind_flag, kind_of, Behaviour, RevIn, StepIn, Swarm, DMG_SCALE, F_FLY, TINT_ARMY_SHIFT};
+use crate::swarm::{kind_flag, kind_of, Behaviour, Rally, RevIn, StepIn, Swarm, DMG_SCALE, F_FLY, TINT_ARMY_SHIFT};
 use crate::world::*;
 use macroquad::prelude::{vec2, Vec2};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
@@ -264,6 +264,22 @@ pub enum Sfx {
     /// a gunship's chain gun (raised as each burst sound runs out)
     HeliGun,
 }
+/// Orcs that just lost one of their own near `from`: everyone around falls back to `to`, bunches
+/// up, then charges in together (see `Game::regroup`).
+pub struct Regroup {
+    pub from: Vec2,
+    pub to: Vec2,
+    pub t: f32,
+}
+/// Seconds orcs fall back and gather, then charge; after that the area is left alone for a while
+/// so the same fight doesn't start another regroup straight away.
+pub const REGROUP_BACK: f32 = 5.0;
+pub const REGROUP_CHARGE: f32 = 6.0;
+pub const REGROUP_REST: f32 = 8.0;
+/// how far around a loss orcs join the regroup, and how far back they fall
+const REGROUP_R: f32 = 30.0;
+const REGROUP_DIST: usize = 34;
+
 pub struct Portal {
     pub p: Vec2,
     pub t: f32,
@@ -371,6 +387,9 @@ pub struct Game {
     pub ammo_cap: f32,
     /// coarse cells inside a helium tower's field (the horde moves slowly there)
     pub slow: Vec<u8>,
+    /// orcs regrouping after losses, and the coarse cells each one gathers from
+    pub regroups: Vec<Regroup>,
+    rally: Vec<u16>,
     pub helis: Vec<Heli>,
     pub tracers: Vec<Tracer>,
     pub booms: Vec<Boom>,
@@ -483,6 +502,8 @@ impl Game {
             scrap_cap: SCRAP_CAP,
             ammo_cap: AMMO_CAP,
             slow: vec![0; CW * CH],
+            regroups: Vec::new(),
+            rally: Vec::new(),
             helis: Vec::new(),
             tracers: Vec::new(),
             booms: Vec::new(),
@@ -1709,6 +1730,7 @@ impl Game {
                 field: r.field.as_deref().map(|v| v.as_slice()),
             })
             .collect();
+        let rallies: Vec<Rally> = self.regroups.iter().map(|r| Rally { to: r.to, charge: r.t >= REGROUP_BACK }).collect();
         let (killed, deaths) = self.swarm.step(&StepIn {
             dt: DT,
             obj: &obj,
@@ -1725,10 +1747,15 @@ impl Game {
             lock: &self.lock,
             rev: &revs,
             slow: &self.slow,
+            rally: &self.rally,
+            rallies: &rallies,
         });
         drop(revs);
         lap(&mut self.prof[2]);
         self.update_revs(&deaths);
+        if self.has_army(2) {
+            self.regroup();
+        }
         lap(&mut self.prof[3]);
         self.kills += killed as u64;
         self.score += killed as f32;
@@ -1932,6 +1959,83 @@ impl Game {
                 h.hp -= d;
             }
         }
+    }
+
+    // ----------------------------------------------------------------------------- orc regroups
+
+    /// Orcs that see one of their own die pull back (away from the HQ), bunch up, and come on again
+    /// as one mob at full rage. Each loss away from a regroup already running starts one.
+    fn regroup(&mut self) {
+        for r in &mut self.regroups {
+            r.t += DT;
+        }
+        self.regroups.retain(|r| r.t < REGROUP_BACK + REGROUP_CHARGE + REGROUP_REST);
+        if self.regroups.len() < 32 {
+            for gi in 0..CW * CH {
+                if self.swarm.deaths[gi].load(Relaxed) == 0 {
+                    continue;
+                }
+                let p = vec2((gi % CW * CG) as f32 + 4.0, (gi / CW * CG) as f32 + 4.0);
+                if self.regroups.iter().any(|r| r.from.distance(p) < REGROUP_R + 12.0 || r.to.distance(p) < REGROUP_R) {
+                    continue;
+                }
+                let to = self.fall_back(p);
+                self.regroups.push(Regroup { from: p, to, t: 0.0 });
+                if self.regroups.len() >= 32 {
+                    break;
+                }
+            }
+        }
+        // the coarse cells each regroup gathers from: around the loss, the rally point and between
+        if self.rally.len() != CW * CH {
+            self.rally = vec![0; CW * CH];
+        }
+        self.rally.iter_mut().for_each(|v| *v = 0);
+        let rr = REGROUP_R / CG as f32;
+        for (k, r) in self.regroups.iter().enumerate() {
+            if r.t >= REGROUP_BACK + REGROUP_CHARGE {
+                continue;
+            }
+            let (a, b) = (r.from / CG as f32, r.to / CG as f32);
+            let (x0, x1) = ((a.x.min(b.x) - rr).floor().max(0.0) as usize, ((a.x.max(b.x) + rr).ceil() as usize).min(CW - 1));
+            let (y0, y1) = ((a.y.min(b.y) - rr).floor().max(0.0) as usize, ((a.y.max(b.y) + rr).ceil() as usize).min(CH - 1));
+            let ab = b - a;
+            for gy in y0..=y1 {
+                for gx in x0..=x1 {
+                    let q = vec2(gx as f32 + 0.5, gy as f32 + 0.5);
+                    let f = if ab.length_squared() > 0.0 { ((q - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                    if q.distance(a + ab * f) <= rr && self.rally[gy * CW + gx] == 0 {
+                        self.rally[gy * CW + gx] = k as u16 + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Where orcs fall back to from `p`: a walk up the HQ field, away from the HQ.
+    fn fall_back(&self, p: Vec2) -> Vec2 {
+        let (mut x, mut y) = (p.x as i32, p.y as i32);
+        for _ in 0..REGROUP_DIST {
+            let here = self.hq_dist[y as usize * W + x as usize];
+            let mut best = None;
+            let mut bv = if here == INF { 0 } else { here };
+            for k in 0..8 {
+                let (nx, ny) = (x + DX[k], y + DY[k]);
+                if nx < 2 || ny < 2 || nx >= W as i32 - 2 || ny >= H as i32 - 2 {
+                    continue;
+                }
+                let v = self.hq_dist[ny as usize * W + nx as usize];
+                if v != INF && v > bv {
+                    bv = v;
+                    best = Some((nx, ny));
+                }
+            }
+            match best {
+                Some((nx, ny)) => (x, y) = (nx, ny),
+                None => break,
+            }
+        }
+        vec2(x as f32 + 0.5, y as f32 + 0.5)
     }
 
     // ----------------------------------------------------------------------------- zombie revenge

@@ -169,6 +169,41 @@ pub struct StepIn<'a> {
     pub rev: &'a [RevIn<'a>],
     /// coarse cells in a helium tower's slowing field
     pub slow: &'a [u8],
+    /// orcs: coarse cells inside a regroup (index + 1 into `rallies`, 0 = none; may be empty)
+    pub rally: &'a [u16],
+    pub rallies: &'a [Rally],
+}
+
+/// Orcs that lost one of their own: they fall back to `to` and bunch up, then (`charge`) come on
+/// again together at full rage.
+#[derive(Clone, Copy)]
+pub struct Rally {
+    pub to: Vec2,
+    pub charge: bool,
+}
+
+/// The step from cell (`cx`, `cy`) that heads most directly for `d` away, with a little noise.
+#[inline]
+fn toward(m: u8, cx: i32, cy: i32, obj: &[i32], d: Vec2, s: &mut u64) -> i32 {
+    let mut best = -1;
+    let mut bv = f32::MAX;
+    for k in 0..8 {
+        let nx = cx + DX[k];
+        let ny = cy + DY[k];
+        if m & (1 << k) == 0 {
+            continue;
+        }
+        let o = obj[ny as usize * W + nx as usize];
+        if o == SOLID || o <= -2 {
+            continue;
+        }
+        let v = -(DX[k] as f32 * d.x + DY[k] as f32 * d.y) / (if k < 4 { 1.0 } else { 1.414 }) + xs(s) * 4.0;
+        if v < bv {
+            bv = v;
+            best = k as i32;
+        }
+    }
+    best
 }
 
 /// Fixed-point scale for damage tallies kept in atomics.
@@ -547,6 +582,13 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
             let near = rage_near[((cy - y0) as usize / CG) * TC + (cx - x0) as usize / CG];
             u.aux =
                 ((u.aux - dt * 0.015) + near.min(200) as f32 * 0.004).clamp(0.0, 1.0);
+            // charging back in after a regroup: all at full rage
+            if !inp.rally.is_empty() {
+                let ri = inp.rally[gi];
+                if ri != 0 && inp.rallies.get(ri as usize - 1).is_some_and(|r| r.charge) {
+                    u.aux = 1.0;
+                }
+            }
             spd *= 1.0 + u.aux * 1.2;
         }
         if inp.slow[gi] != 0 {
@@ -608,28 +650,21 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
                 }
                 _ => {
                     // no field yet: head straight at it
-                    let d = r.pos - vec2(x, y);
-                    let mut bv = f32::MAX;
-                    for k in 0..8 {
-                        let nx = cx + DX[k];
-                        let ny = cy + DY[k];
-                        if m & (1 << k) == 0 {
-                            continue;
-                        }
-                        let o = obj[ny as usize * W + nx as usize];
-                        if o == SOLID || o <= -2 {
-                            continue;
-                        }
-                        let v = -(DX[k] as f32 * d.x + DY[k] as f32 * d.y)
-                            / (if k < 4 { 1.0 } else { 1.414 })
-                            + xs(&mut s) * 4.0;
-                        if v < bv {
-                            bv = v;
-                            best = k as i32;
-                        }
-                    }
+                    best = toward(m, cx, cy, obj, r.pos - vec2(x, y), &mut s);
                     field_hq = false;
                 }
+            }
+        }
+        // orcs regrouping after a loss: back to the rally point and wait there for the others
+        let ri = if orc && !inp.rally.is_empty() { inp.rally[gi] } else { 0 };
+        if let (true, Some(r)) = (field_hq, inp.rallies.get(ri.wrapping_sub(1) as usize)) {
+            if !r.charge {
+                let d = r.to - vec2(x, y);
+                if d.length_squared() < 9.0 + xs(&mut s) * 16.0 {
+                    continue;
+                }
+                best = toward(m, cx, cy, obj, d, &mut s);
+                field_hq = false;
             }
         }
         if !field_hq {

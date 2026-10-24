@@ -182,7 +182,7 @@ pub fn towers(g: &mut Game) {
             let slowed = g.slow.iter().filter(|v| **v != 0).count();
             let fires = g.napalm.len();
             eprintln!(
-                "t {:.0}s: kills {} ammo used {:.0} shells {} slow cells {} napalm {} rail charge {:?} gunships {} station squads {} sfx {}",
+                "t {:.0}s: kills {} ammo used {:.0} shells {} slow cells {} napalm {} rail charge {:?} gunships {} station squads {} sfx {} orc regroups {}",
                 g.time,
                 g.kills - kills0,
                 ammo0 - g.ammo,
@@ -192,7 +192,8 @@ pub fn towers(g: &mut Game) {
                 rail.map(|r| (g.structs[r].charge, g.structs[r].cd)),
                 g.gunships.len(),
                 g.squads.iter().filter(|q| q.from >= 0).count(),
-                g.sfx.len()
+                g.sfx.len(),
+                g.regroups.len()
             );
         }
     }
@@ -287,4 +288,48 @@ pub fn units(g: &mut Game) {
     for _ in 0..40 {
         g.tick();
     }
+}
+
+/// Headless check of orc regroups (`PH_ORCS=1`, with PH_FAC=2): a horde walks at two gun turrets;
+/// logs how far the orcs are from the HQ and the regroups running, every second.
+pub fn orcs(g: &mut Game) {
+    g.scrap = 1e6;
+    g.ammo = 1e6;
+    let h = g.world.hq;
+    for dx in [-20, 14] {
+        for k in 0..40 {
+            if g.place(S::Gun, h.x as i32 + dx + (k % 8) * 3, h.y as i32 - 40 - (k / 8) * 3) {
+                break;
+            }
+        }
+    }
+    g.queue((h.x, h.y - 85.0), 2500.0, 3.0);
+    for t in 0..400 {
+        g.tick();
+        if t % 20 == 19 {
+            let (mut n, mut d) = (0, 0.0);
+            for u in g.swarm.units() {
+                n += 1;
+                d += vec2(u.x, u.y).distance(h);
+            }
+            // each regroup: its age, and how far its orcs (those near the loss or the rally point) are from the rally point
+            let phases: Vec<String> = g
+                .regroups
+                .iter()
+                .map(|r| {
+                    let (mut k, mut dd) = (0, 0.0);
+                    for u in g.swarm.units() {
+                        let p = vec2(u.x, u.y);
+                        if p.distance(r.from) < 40.0 || p.distance(r.to) < 40.0 {
+                            k += 1;
+                            dd += p.distance(r.to);
+                        }
+                    }
+                    format!("{:.0}s:{}@{:.0}", r.t, k, dd / k.max(1) as f32)
+                })
+                .collect();
+            eprintln!("t {:.0}s orcs {} mean dist {:.0} kills {} regroups [{}]", g.time, n, d / n.max(1) as f32, g.kills, phases.join(" "));
+        }
+    }
+    eprintln!("orcs checksum {:016x}", g.checksum());
 }

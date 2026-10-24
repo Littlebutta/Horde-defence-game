@@ -20,8 +20,9 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 | 1 to 7, O, L | Wall, gun turret, cannon, scrap extractor, ammo plant, missile silo, evac point, outpost, research lab |
 | 8 / 9 | Rifle squad / tank, deployed from the HQ to where you click |
 | Left click / drag | Place. Drag walls along a street; drag other buildings to lay a row or grid |
-| Left click a unit, right click the map | Select troops, then move them (rifles can garrison a building) |
+| Left click a unit, right click the map | Select troops, then move them (rifles can garrison a building or man a bunker) |
 | R / Q / G / E | Rescue squad / airstrike / gunship / ICBM (panel on the right, greyed out until ready) |
+| Q, then right-drag | Airstrike: right-click where the B-2's run starts, drag to its end, let go to send it |
 | X | Sell the structure under the cursor for 50% |
 | Left drag on empty map, WASD | Pan |
 | Middle drag, or Alt + left drag | Orbit the camera (sideways turns, up and down tilts) |
@@ -38,14 +39,16 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 - Click a rooftop with a turret selected to mount it there for +60% range. If the building falls, so does the turret.
 - Outposts push the base zone outwards. Factories, silos, pads and labs must go inside the zone.
 - Rescue squads walk up to civilians one by one and escort them back. Once inside the base, civilians walk to the nearest extraction pad. Each pad flies up to 16 out (+100 score, +20 scrap, +10 ammo each), then needs 30 seconds, so more pads means faster extraction. A crowded base slows your income.
-- Every missile silo has its own ICBM cooldown.
+- Every missile silo has its own ICBM cooldown. Nothing survives the inner third of the blast; it weakens out to the edge, where the toughest of the horde live through it.
+- **Bunkers** (-) hold any number of riflemen, who fire from inside with +60% range. Squads sent into the same bunker or building join up into one. If it falls, three in four of the troops inside die and the rest are left in the rubble.
+- Rifle squads spread out around the spot you send them to; riflemen and tanks need no ammo. Tanks and cannons aim for the thickest part of the horde.
 - Special towers: the **flame bunker** (B) is very tough but short ranged: it sprays fire for a second from its walls outward, leaves burning napalm, and won't hit a spot again until the napalm there is out; the **railgun** (N) picks the line through the most of the horde (leading their movement), charges, then kills everything in a wide straight line to the end of its range; the **helium tower** (I) slows everything in its field to 40% speed and needs no ammo; **artillery** (Y) shells any spot on the map (click it, right-click a target, **Cease fire** to stop) at 45 ammo a shell.
 - The **heli pad** (U) keeps its own gunship: click the pad, right-click anywhere and it flies there for free, fires for 20 s (right-click again to move it), then rearms for 35 s.
 - Storage is limited (2500 scrap, 1500 ammo to start, shown as stored/limit in the top bar): each **scrap depot** (0) adds 2500 scrap, each **ammo depot** (V) 2000 ammo.
 - Gun turrets never pile onto the same target, and a rooftop turret needs a roof big enough for its whole base.
 - Civilians queuing at a pad that is turning around walk over to an idle pad.
 - A **rescue station** (J) sends a rescue team every 25 s to the biggest group of civilians it can reach safely and walks them back to the base.
-- The research lab unlocks upgrades: bigger rescue squads, carpet bombing (drag to aim the bomb run), a nuclear warhead that leaves radiation nobody of yours can enter or build in, and (on its own panel under the abilities) reinforced armour for walls and turrets, shell presses for faster ammo, and long barrels for turret range.
+- The research lab unlocks upgrades: bigger rescue squads, carpet bombing (drag to aim the bomb run), a nuclear warhead that leaves radiation nobody of yours can enter or build in, and (on its own panel under the abilities) reinforced armour for walls and turrets, shell presses for faster ammo, long barrels for turret range, and turret mounts (a turret on top of a bunker gets the rooftop range bonus).
 - Units go anywhere on land except inside buildings: water is the only barrier. Only your turrets and garrisoned rifles stand on rooftops.
 - Hordes walk around your walls and only chew through one when it blocks the way.
 - Real cities you have played appear under **Played before** on the menu and start instantly, without downloading again (the x removes one).
@@ -84,7 +87,7 @@ How it stays in sync: every player runs the same deterministic simulation and on
 
 - **Zombies:** small outbreaks that grow by eating civilians; every bite turns one civilian into two zombies. A zombie that dies gets back up once. When one is killed, the zombies around it speed up and swarm whatever killed it, and stay locked on until it's dead. They wander, attack what they see, and periodically rush the HQ.
 - **Alien bugs:** small drops all over the city, straight for the HQ. Some drops are lighter-coloured flyers that cross rooftops and walls. Hives take root now and then: they spawn bugs, stop you building nearby, grow, and infect buildings around them, each one making the hive's waves bigger. Turrets can't hurt a hive; use abilities or troops.
-- **Orcs:** portals pour out huge waves that destroy everything they see. Orcs build rage as units around them die, turning redder and running faster. They sometimes grab civilians and drag them back through a portal (troops nearby can free them); every capture brings more orcs out at full rage.
+- **Orcs:** portals pour out huge waves that destroy everything they see. Orcs build rage as units around them die, turning redder and running faster. When one falls, the orcs around it pull back, bunch up, and charge in again together at full rage. They sometimes grab civilians and drag them back through a portal (troops nearby can free them); every capture brings more orcs out at full rage.
 - **Chaos:** all three armies at once, each a little smaller than on its own and each in its own colour: zombie outbreaks, bug drops and hives, and orc portals.
 
 ## Building from source
