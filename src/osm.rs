@@ -33,7 +33,7 @@ const MIRRORS: [&str; 4] = [
 
 pub fn start(query: String) -> Loader {
     let (tx, rx) = channel();
-    std::thread::spawn(move || match load(&query, &tx) {
+    std::thread::spawn(move || match load(&query, &tx, 2) {
         Ok(d) => {
             let _ = tx.send(OsmMsg::Done(Box::new(d)));
         }
@@ -237,7 +237,8 @@ fn road_style(h: &str) -> Option<(f32, u8)> {
     })
 }
 
-fn load(query: &str, tx: &Sender<OsmMsg>) -> Result<Desc, String> {
+/// Downloads a city in `tiles`×`tiles` pieces (more pieces = smaller Overpass queries).
+pub fn load(query: &str, tx: &Sender<OsmMsg>, tiles: usize) -> Result<Desc, String> {
     let a = agent();
     let _ = tx.send(OsmMsg::Status(format!("Looking up {}", query)));
     let (lat, lon, name) = geocode(&a, query)?;
@@ -303,17 +304,18 @@ fn load(query: &str, tx: &Sender<OsmMsg>) -> Result<Desc, String> {
     };
     let mut seen: HashSet<(bool, u64)> = HashSet::new();
     let mut aerodromes: Vec<Poly> = Vec::new();
-    for ty in 0..2 {
-        for tx_ in 0..2 {
-            let ts = s + (n - s) * ty as f64 / 2.0;
-            let tn = s + (n - s) * (ty + 1) as f64 / 2.0;
-            let tw = w + (e - w) * tx_ as f64 / 2.0;
-            let te = w + (e - w) * (tx_ + 1) as f64 / 2.0;
+    let nt = tiles.max(1);
+    for ty in 0..nt {
+        for tx_ in 0..nt {
+            let ts = s + (n - s) * ty as f64 / nt as f64;
+            let tn = s + (n - s) * (ty + 1) as f64 / nt as f64;
+            let tw = w + (e - w) * tx_ as f64 / nt as f64;
+            let te = w + (e - w) * (tx_ + 1) as f64 / nt as f64;
             let q = format!(
                 "[out:json][timeout:170][bbox:{ts:.6},{tw:.6},{tn:.6},{te:.6}];(way[\"highway\"];way[\"building\"];way[\"natural\"=\"water\"];relation[\"natural\"=\"water\"];way[\"waterway\"~\"^(river|canal)$\"];way[\"landuse\"~\"^(grass|forest|recreation_ground|cemetery|meadow|village_green)$\"];way[\"leisure\"~\"^(park|garden|pitch|golf_course)$\"];way[\"aeroway\"~\"^(aerodrome|apron|runway|taxiway)$\"];relation[\"aeroway\"=\"aerodrome\"];);out geom qt;"
             );
-            let k = ty * 2 + tx_ + 1;
-            let j = overpass(&a, &q, tx, &format!("Downloading map tile {}/4", k))?;
+            let k = ty * nt + tx_ + 1;
+            let j = overpass(&a, &q, tx, &format!("Downloading map tile {}/{}", k, nt * nt))?;
             for el in j["elements"].as_array().into_iter().flatten() {
                 let id = el["id"].as_u64().unwrap_or(0);
                 let rel = el["type"] == "relation";

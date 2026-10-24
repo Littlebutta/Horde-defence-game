@@ -21,10 +21,11 @@ pub struct Settings {
     pub diff: usize,
     pub real: bool,
     pub city: String,
+    pub campaign: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { dark: true, fac: 0, diff: 1, real: false, city: String::new() }
+        Settings { dark: true, fac: 0, diff: 1, real: false, city: String::new(), campaign: false }
     }
 }
 
@@ -40,6 +41,7 @@ pub fn load_settings() -> Settings {
             "difficulty" => s.diff = v.parse().unwrap_or(1).min(3),
             "real" => s.real = v == "1",
             "city" => s.city = v.to_string(),
+            "campaign" => s.campaign = v == "1",
             _ => {}
         }
     }
@@ -47,7 +49,7 @@ pub fn load_settings() -> Settings {
 }
 
 pub fn save_settings(s: &Settings) {
-    let t = format!("dark={}\nfaction={}\ndifficulty={}\nreal={}\ncity={}\n", s.dark as u8, s.fac, s.diff, s.real as u8, s.city.replace('\n', " "));
+    let t = format!("dark={}\nfaction={}\ndifficulty={}\nreal={}\ncity={}\ncampaign={}\n", s.dark as u8, s.fac, s.diff, s.real as u8, s.city.replace('\n', " "), s.campaign as u8);
     let _ = std::fs::write(data_dir().join("settings.txt"), t);
 }
 

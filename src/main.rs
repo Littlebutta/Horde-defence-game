@@ -2,6 +2,7 @@
 //! Pixel Horde: a horde-defence game where every enemy is a single pixel.
 
 mod app;
+mod campaign;
 mod citygen;
 mod defs;
 mod fields;
@@ -46,6 +47,10 @@ fn window_conf() -> Conf {
 }
 
 fn main() {
+    // PH_FETCH=<dir>: download the campaign cities for the `cities` release (GitHub workflow), no window
+    if let Ok(dir) = std::env::var("PH_FETCH") {
+        std::process::exit(if campaign::fetch_all(std::path::Path::new(&dir)) { 0 } else { 1 });
+    }
     // Steam has to start before the window exists, or its overlay (the invite window) can't hook in
     let steam = net::Steam::init();
     macroquad::Window::from_config(conf(), run(steam));
@@ -56,7 +61,13 @@ async fn run(steam: Option<net::Steam>) {
     // PH_SHOT=<png> renders a test game headlessly and saves a screenshot (used in CI-less testing)
     let shot = std::env::var("PH_SHOT").ok();
     let menu_shot = std::env::var("PH_MENU").is_ok();
-    if shot.is_some() && !menu_shot {
+    // PH_CAMP=<city 0-9>: the test game is that campaign city, with a small veteran army; PH_HUB=1 shows the campaign screen
+    let camp: Option<usize> = std::env::var("PH_CAMP").ok().and_then(|s| s.parse().ok());
+    if std::env::var("PH_HUB").is_ok() {
+        app.test_campaign(camp.unwrap_or(3), false);
+    } else if let (Some(l), Some(_), false) = (camp, &shot, menu_shot) {
+        app.test_campaign(l, true);
+    } else if shot.is_some() && !menu_shot {
         let fac = std::env::var("PH_FAC")
             .ok()
             .and_then(|s| s.parse().ok())

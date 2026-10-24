@@ -2663,6 +2663,15 @@ impl Game {
         if self.scrap < d.cost || self.world.irradiated_at(at) {
             return false;
         }
+        if !self.spawn_group(kind, d.n, at) {
+            return false;
+        }
+        self.scrap -= d.cost;
+        true
+    }
+    /// Sends `n` troops out of the HQ to a spot (free; `deploy` is the paid version).
+    pub fn spawn_group(&mut self, kind: U, n: usize, at: Vec2) -> bool {
+        let d = udef(kind);
         let roof = if kind == U::Rifle {
             self.roof_at(at)
         } else {
@@ -2671,11 +2680,10 @@ impl Game {
         let Some(tc) = self.order_cell(roof, at) else {
             return false;
         };
-        self.scrap -= d.cost;
         let hq = &self.structs[self.hq_idx];
         let base = vec2(hq.center().x, (hq.y + hq.h + 3) as f32);
         let mut m = Vec::new();
-        for _ in 0..d.n {
+        for _ in 0..n {
             m.push(Member {
                 p: base + vec2((self.rng.f() - 0.5) * 8.0, self.rng.f() * 3.0),
                 hp: d.hp,

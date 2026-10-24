@@ -1,5 +1,6 @@
 //! Screens, HUD and input: the start menu, the city loader, and the game itself.
 
+use crate::campaign::{self, Campaign, CITIES};
 use crate::defs::*;
 use crate::game::*;
 use crate::net::{self, Cmd};
@@ -23,6 +24,8 @@ enum Screen {
     Menu,
     Loading,
     Play,
+    /// the campaign between cities: unlocks, recruits and the next city
+    Hub,
 }
 
 const DIFFS: [(&str, f32); 4] = [
@@ -40,6 +43,14 @@ pub struct App {
     diff: usize,
     real: bool,
     city: String,
+    /// "World campaign" picked on the menu
+    camp_mode: bool,
+    camp: Option<Campaign>,
+    /// the game being played (or loaded) is a campaign city
+    in_camp: bool,
+    pack: campaign::Pack,
+    /// loading screen is waiting for the city pack instead of OpenStreetMap
+    wait_pack: bool,
     status: String,
     loader: Option<osm::Loader>,
     game: Option<Game>,
@@ -166,6 +177,11 @@ impl App {
             diff: st.diff,
             real: st.real,
             city: st.city,
+            camp_mode: st.campaign,
+            camp: None,
+            in_camp: false,
+            pack: campaign::Pack::start(),
+            wait_pack: false,
             saved: storage::list_maps(),
             status: String::new(),
             loader: None,
@@ -215,6 +231,12 @@ impl App {
             }
             Screen::Loading => self.loading(),
             Screen::Play => self.play(dt),
+            Screen::Hub => {
+                self.hub();
+                if let Some(t) = self.tip.clone() {
+                    self.tooltip(&t);
+                }
+            }
         }
     }
 
@@ -299,7 +321,8 @@ impl App {
     }
     /// Back to the menu. The co-op host takes everybody with it; a client leaves the co-op game.
     fn leave_game(&mut self) {
-        self.screen = Screen::Menu;
+        self.screen = if self.in_camp { Screen::Hub } else { Screen::Menu };
+        self.in_camp = false;
         if let Some(s) = self.sess.as_mut() {
             if s.is_host() {
                 s.end_game();
@@ -517,20 +540,69 @@ impl App {
             Rect::new(x0, y, 170.0, 36.0),
             "Random city",
             true,
-            !self.real,
+            !self.real && !self.camp_mode,
         ) {
             self.real = false;
+            self.camp_mode = false;
         }
         if self.button(
             Rect::new(x0 + 180.0, y, 170.0, 36.0),
             "Real city",
             true,
-            self.real,
+            self.real && !self.camp_mode,
         ) {
             self.real = true;
+            self.camp_mode = false;
+        }
+        if self.button(
+            Rect::new(x0 + 360.0, y, 190.0, 36.0),
+            "World campaign",
+            true,
+            self.camp_mode,
+        ) {
+            self.camp_mode = true;
         }
         y += 48.0;
-        if self.real {
+        let saved_camp = if self.camp_mode { campaign::load() } else { None };
+        if self.camp_mode {
+            while get_char_pressed().is_some() {}
+            text(&self.fonts.mono, "Ten of the world's biggest cities, Osaka to Tokyo. The horde grows 30% every city.", x0, y + 6.0, 13.0, p.dim);
+            text(&self.fonts.mono, "Troops that survive march on to the next city; scrap and buildings stay behind.", x0, y + 24.0, 13.0, p.dim);
+            text(&self.fonts.mono, "Civilians you fly out unlock research and recruit troops between cities.", x0, y + 42.0, 13.0, p.dim);
+            let ready = self.pack.ready();
+            let maps = match self.pack.get() {
+                campaign::PackState::Fetching(i) if ready < CITIES.len() => format!("City maps: {}/{} ready, getting {}…", ready, CITIES.len(), CITIES[i].name),
+                campaign::PackState::Failed(_) if ready < CITIES.len() => format!("City maps: {}/{} ready. The rest download when you reach them.", ready, CITIES.len()),
+                _ => format!("City maps: all {} ready", CITIES.len()),
+            };
+            text(&self.fonts.mono, &maps, x0, y + 66.0, 13.0, p.text);
+            y += 76.0;
+            if let Some(c) = &saved_camp {
+                let line = if c.finished() {
+                    format!("Saved campaign: all ten cities held ({})", FACTIONS[c.fac].name)
+                } else {
+                    format!(
+                        "Saved campaign: city {}/{} {} · {} · {} · {} civilians to spend",
+                        c.level + 1,
+                        CITIES.len(),
+                        c.city().name,
+                        FACTIONS[c.fac].name,
+                        DIFFS[c.diff].0,
+                        c.points
+                    )
+                };
+                text(&self.fonts.mono, &line, x0, y + 22.0, 13.0, p.accent);
+                let nr = Rect::new(x0 + w - 56.0 - 150.0, y + 2.0, 150.0, 30.0);
+                if self.button(nr, "New campaign", true, false) {
+                    self.open_campaign(Some(Campaign::new(self.fac, self.diff)));
+                    return;
+                }
+                if self.hot(nr) {
+                    self.tip = Some("Starts over in Osaka with the faction and difficulty picked here. The saved campaign is lost.".into());
+                }
+                y += 40.0;
+            }
+        } else if self.real {
             let fr = Rect::new(x0, y, w - 56.0, 38.0);
             draw_rectangle(fr.x, fr.y, fr.w, fr.h, p.panel2);
             draw_rectangle_lines(fr.x, fr.y, fr.w, fr.h, 1.5, p.accent);
@@ -658,15 +730,14 @@ impl App {
                 });
             }
         }
-        let can = !self.real || self.city.trim().len() > 1;
-        if self.button(
-            Rect::new(r.x + r.w - 228.0, by, 200.0, 44.0),
-            "Start",
-            can,
-            false,
-        ) || (can && is_key_pressed(KeyCode::Enter))
-        {
+        let can = if self.camp_mode { self.sess.is_none() } else { !self.real || self.city.trim().len() > 1 };
+        let label = if self.camp_mode && saved_camp.is_some() { "Continue" } else { "Start" };
+        let sr = Rect::new(r.x + r.w - 228.0, by, 200.0, 44.0);
+        if self.button(sr, label, can, false) || (can && is_key_pressed(KeyCode::Enter)) {
             self.start();
+        }
+        if self.camp_mode && self.sess.is_some() && self.hot(sr) {
+            self.tip = Some("The campaign is single player for now. Leave co-op to play it.".into());
         }
         if self.button(
             Rect::new(x0, by + 6.0, 130.0, 32.0),
@@ -708,6 +779,198 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------------------------------- campaign
+
+    /// Opens the campaign screen with a saved or new campaign.
+    fn open_campaign(&mut self, c: Option<Campaign>) {
+        let c = c.unwrap_or_else(|| Campaign::new(self.fac, self.diff));
+        campaign::save(&c);
+        self.camp = Some(c);
+        self.camp_mode = true;
+        self.save_settings();
+        self.status.clear();
+        self.screen = Screen::Hub;
+    }
+
+    /// Starts the campaign's next city: from the data folder, the city pack, or OpenStreetMap.
+    fn start_city(&mut self) {
+        let Some(c) = &self.camp else { return };
+        let city = c.city();
+        self.in_camp = true;
+        self.status.clear();
+        if let Some(d) = campaign::load_map(city) {
+            self.begin(d, 1000 + c.level as u64);
+            return;
+        }
+        self.screen = Screen::Loading;
+        if self.pack.busy() {
+            self.wait_pack = true;
+            self.status = format!("Getting the {} map", city.name);
+        } else {
+            self.loader = Some(osm::start(city.query.to_string()));
+            self.status = "Starting download".into();
+        }
+    }
+
+    /// Between cities: the campaign map, unlocks, recruits and the way into the next city.
+    fn hub(&mut self) {
+        let th = self.theme();
+        clear_background(th.bg);
+        let p = pal(self.dark);
+        let (sw, sh) = (screen_width(), screen_height());
+        let Some(mut c) = self.camp.clone() else {
+            self.screen = Screen::Menu;
+            return;
+        };
+        let before = (c.points, c.research.len(), c.units.len());
+        let w = 900.0f32.min(sw - 32.0);
+        let h = 680.0f32.min(sh - 32.0);
+        let r = Rect::new((sw - w) / 2.0, (sh - h) / 2.0, w, h);
+        self.panel(r);
+        let (x0, mut y) = (r.x + 28.0, r.y + 50.0);
+        text(&self.fonts.head, "WORLD CAMPAIGN", x0, y, 34.0, p.text);
+        y += 26.0;
+        text(
+            &self.fonts.mono,
+            &format!("{} · {} · {} civilians flown out · {} kills", FACTIONS[c.fac].name, DIFFS[c.diff].0, c.flown, fmt_n(c.kills as usize)),
+            x0,
+            y,
+            13.0,
+            p.dim,
+        );
+        y += 22.0;
+        // the ten cities
+        let n = CITIES.len();
+        let cw = (w - 56.0 - (n as f32 - 1.0) * 6.0) / n as f32;
+        for (i, city) in CITIES.iter().enumerate() {
+            let cr = Rect::new(x0 + i as f32 * (cw + 6.0), y, cw, 58.0);
+            let (bg, fc) = if i < c.level {
+                (mix(p.panel2, p.accent, 0.45), WHITE)
+            } else if i == c.level {
+                (mix(p.panel2, p.accent, 0.15), p.text)
+            } else {
+                (p.panel2, p.dim)
+            };
+            draw_rectangle(cr.x, cr.y, cr.w, cr.h, bg);
+            if i == c.level {
+                draw_rectangle_lines(cr.x, cr.y, cr.w, cr.h, 2.0, p.accent);
+            }
+            text(&self.fonts.mono, &format!("{}", i + 1), cr.x + 6.0, cr.y + 14.0, 11.0, fc);
+            let size = if text_w(&self.fonts.head, city.name, 14.0) > cw - 10.0 { 11.5 } else { 14.0 };
+            text(&self.fonts.head, city.name, cr.x + 6.0, cr.y + 34.0, size, fc);
+            let sub = if i < c.level { "Held".to_string() } else { format!("×{:.1}", campaign::horde_mult(i)) };
+            text(&self.fonts.mono, &sub, cr.x + 6.0, cr.y + 51.0, 11.0, fc);
+            self.ui_rects.push(cr);
+            if self.hot(cr) {
+                self.tip = Some(format!(
+                    "{}: horde ×{:.2} of {} difficulty, hold out {}. Map {}.",
+                    city.query,
+                    campaign::horde_mult(i),
+                    DIFFS[c.diff].0,
+                    mmss(campaign::hold_secs(i)),
+                    if campaign::have_map(city) { "downloaded" } else { "not downloaded yet" }
+                ));
+            }
+        }
+        y += 84.0;
+        let by = r.y + r.h - 64.0;
+        if self.button(Rect::new(x0, by + 6.0, 130.0, 32.0), "Main menu", true, false) {
+            self.screen = Screen::Menu;
+            return;
+        }
+        if c.finished() {
+            text(&self.fonts.head, "All ten cities held.", x0, y + 30.0, 30.0, p.text);
+            text(&self.fonts.mono, &format!("{} civilians flown out of the world's biggest cities. The world is safe, for now.", c.flown), x0, y + 64.0, 14.0, p.dim);
+            if self.button(Rect::new(r.x + r.w - 228.0, by, 200.0, 44.0), "New campaign", true, true) {
+                self.open_campaign(Some(Campaign::new(c.fac, c.diff)));
+            }
+            return;
+        }
+        // unlocks
+        let lw = (w - 56.0) * 0.6;
+        text(&self.fonts.head, "Unlock with civilians", x0, y, 18.0, p.text);
+        let pts = format!("{} civilians to spend", c.points);
+        text(&self.fonts.head, &pts, x0 + lw - text_w(&self.fonts.head, &pts, 16.0), y, 16.0, p.accent);
+        y += 14.0;
+        for rs in RESEARCH {
+            let d = rdef(rs);
+            let rr = Rect::new(x0, y, lw, 52.0);
+            draw_rectangle(rr.x, rr.y, rr.w, rr.h, p.panel2);
+            text(&self.fonts.head, d.name, rr.x + 10.0, rr.y + 19.0, 15.0, p.text);
+            wrap(&self.fonts.mono, d.tip, rr.x + 10.0, rr.y + 33.0, lw - 160.0, 11.0, p.dim);
+            let br = Rect::new(rr.x + rr.w - 128.0, rr.y + 11.0, 120.0, 30.0);
+            if c.has(rs) {
+                self.button(br, "Unlocked", false, true);
+            } else if self.button(br, &format!("{} civilians", d.civs), c.points >= d.civs, false) {
+                c.buy_research(rs);
+            }
+            y += 57.0;
+        }
+        // army
+        let ax = x0 + lw + 24.0;
+        let aw = w - 56.0 - lw - 24.0;
+        let mut ay = r.y + 194.0;
+        text(&self.fonts.head, "Your army", ax, ay, 18.0, p.text);
+        ay += 14.0;
+        let ar = Rect::new(ax, ay, aw, 74.0);
+        draw_rectangle(ar.x, ar.y, ar.w, ar.h, p.panel2);
+        let (rs, rn) = c.army(U::Rifle);
+        let (ts, _) = c.army(U::Tank);
+        text(&self.fonts.mono, &format!("Rifle squads: {} ({} soldiers)", rs, rn), ar.x + 10.0, ar.y + 24.0, 13.0, p.text);
+        text(&self.fonts.mono, &format!("Tanks: {}", ts), ar.x + 10.0, ar.y + 46.0, 13.0, p.text);
+        text(&self.fonts.mono, "They roll out of the HQ when the city starts.", ar.x + 10.0, ar.y + 66.0, 11.0, p.dim);
+        ay += 88.0;
+        for u in [U::Rifle, U::Tank] {
+            let cost = campaign::recruit_cost(u);
+            let br = Rect::new(ax, ay, aw, 34.0);
+            if self.button(br, &format!("Recruit {} · {} civilians", udef(u).name.to_lowercase(), cost), c.points >= cost, false) {
+                c.recruit(u);
+            }
+            ay += 40.0;
+        }
+        wrap(&self.fonts.mono, "Troops that survive a city march on to the next. Scrap, ammo and buildings stay behind.", ax, ay + 12.0, aw, 12.0, p.dim);
+        // next city
+        let city = c.city();
+        let ready = campaign::have_map(city);
+        let line = format!(
+            "Next: {} · hold out {} for the evac · horde ×{:.2}{}",
+            city.name,
+            mmss(campaign::hold_secs(c.level)),
+            campaign::horde_mult(c.level),
+            if ready { "" } else { " · map downloads first" }
+        );
+        text(&self.fonts.mono, &line, x0, by - 14.0, 13.0, p.text);
+        if !self.status.is_empty() {
+            text(&self.fonts.mono, &self.status, x0 + 150.0, by + 28.0, 13.0, rgb(250, 82, 82));
+        }
+        let go = self.button(Rect::new(r.x + r.w - 228.0, by, 200.0, 44.0), &format!("Fight in {}", city.name), true, true) || is_key_pressed(KeyCode::Enter);
+        if (c.points, c.research.len(), c.units.len()) != before {
+            campaign::save(&c);
+        }
+        self.camp = Some(c);
+        if go {
+            self.start_city();
+        }
+    }
+
+    /// Headless test hook: a campaign at city `level` with some troops and unlocks, on its screen or
+    /// already playing a random city.
+    pub fn test_campaign(&mut self, level: usize, play: bool) {
+        let mut c = Campaign::new(std::env::var("PH_FAC").ok().and_then(|s| s.parse().ok()).unwrap_or(0), 1);
+        c.level = level.min(CITIES.len());
+        c.points = 260;
+        c.flown = 640;
+        c.kills = 182_000;
+        c.research = vec![R::Rescue, R::Armour];
+        c.units = vec![(U::Rifle, 6), (U::Rifle, 4), (U::Tank, 1), (U::Rifle, 6)];
+        self.camp = Some(c);
+        self.screen = Screen::Hub;
+        if play {
+            self.in_camp = true;
+            self.begin(crate::citygen::generate(42), 1000 + level as u64);
+        }
+    }
+
     /// Headless test hook: start a random city right away.
     pub fn quick_start(&mut self, fac: usize, seed: u64) {
         self.fac = fac;
@@ -727,12 +990,16 @@ impl App {
     }
 
     fn save_settings(&self) {
-        storage::save_settings(&storage::Settings { dark: self.dark, fac: self.fac, diff: self.diff, real: self.real, city: self.city.clone() });
+        storage::save_settings(&storage::Settings { dark: self.dark, fac: self.fac, diff: self.diff, real: self.real, city: self.city.clone(), campaign: self.camp_mode });
     }
 
     fn start(&mut self) {
         self.status.clear();
         self.save_settings();
+        if self.camp_mode {
+            self.open_campaign(campaign::load());
+            return;
+        }
         if self.real {
             // a city played before loads straight from the data folder
             if let Some(p) = storage::find_map(self.city.trim()) {
@@ -759,7 +1026,14 @@ impl App {
         }
         let note = d.note.clone();
         let name = d.name.clone();
-        let g = Game::new(d, self.fac, DIFFS[self.diff].1, seed);
+        let camp = if self.in_camp { self.camp.clone() } else { None };
+        let mut g = match &camp {
+            Some(c) => Game::new(d, c.fac, DIFFS[c.diff].1 * campaign::horde_mult(c.level), seed),
+            None => Game::new(d, self.fac, DIFFS[self.diff].1, seed),
+        };
+        if let Some(c) = &camp {
+            c.apply(&mut g);
+        }
         self.cam = Orbit { t: g.world.hq, dist: 0.0, yaw: 0.0, pitch: 0.95 };
         self.cam.set_scale((screen_height() / 260.0).max(1.5));
         self.scene = Some(Scene::new(&g, self.theme()));
@@ -769,13 +1043,30 @@ impl App {
         self.paused = false;
         self.acc = 0.0;
         self.screen = Screen::Play;
-        self.msg = (format!("{}. {}", name, note), 6.0);
+        self.msg = match &camp {
+            Some(c) => (format!("{} ({}/{}). {} Hold out {} until the evac.", c.city().name, c.level + 1, CITIES.len(), note, mmss(campaign::hold_secs(c.level))), 8.0),
+            None => (format!("{}. {}", name, note), 6.0),
+        };
     }
 
     fn loading(&mut self) {
         let th = self.theme();
         clear_background(th.bg);
         let p = pal(self.dark);
+        if self.wait_pack {
+            let city = self.camp.as_ref().map(|c| c.city()).unwrap_or(&CITIES[0]);
+            if let Some(d) = campaign::have_map(city).then(|| campaign::load_map(city)).flatten() {
+                self.wait_pack = false;
+                self.begin(d, 7);
+                return;
+            }
+            if !self.pack.busy() {
+                // the pack didn't have it: straight from OpenStreetMap
+                self.wait_pack = false;
+                self.loader = Some(osm::start(city.query.to_string()));
+                self.status = "Starting download".into();
+            }
+        }
         if let Some(l) = &self.loader {
             while let Ok(m) = l.rx.try_recv() {
                 match m {
@@ -783,14 +1074,19 @@ impl App {
                     OsmMsg::Fail(e) => {
                         self.status = e;
                         self.loader = None;
-                        self.screen = Screen::Menu;
+                        self.screen = if self.in_camp { Screen::Hub } else { Screen::Menu };
+                        self.in_camp = false;
                         return;
                     }
                     OsmMsg::Done(d) => {
                         self.loader = None;
                         self.status.clear();
-                        storage::save_map(self.city.trim(), &d);
-                        self.saved = storage::list_maps();
+                        if let (true, Some(c)) = (self.in_camp, &self.camp) {
+                            campaign::save_map(c.city(), &d);
+                        } else {
+                            storage::save_map(self.city.trim(), &d);
+                            self.saved = storage::list_maps();
+                        }
                         self.begin(*d, 7);
                         return;
                     }
@@ -800,9 +1096,13 @@ impl App {
         let (sw, sh) = (screen_width(), screen_height());
         let r = Rect::new(sw / 2.0 - 260.0, sh / 2.0 - 80.0, 520.0, 160.0);
         self.panel(r);
+        let what = match (&self.camp, self.in_camp) {
+            (Some(c), true) => c.city().name.to_string(),
+            _ => self.city.trim().to_string(),
+        };
         text(
             &self.fonts.head,
-            &format!("Loading {}", self.city.trim()),
+            &format!("Loading {}", what),
             r.x + 24.0,
             r.y + 44.0,
             22.0,
@@ -828,8 +1128,10 @@ impl App {
             false,
         ) {
             self.loader = None;
+            self.wait_pack = false;
             self.status.clear();
-            self.screen = Screen::Menu;
+            self.screen = if self.in_camp { Screen::Hub } else { Screen::Menu };
+            self.in_camp = false;
         }
     }
 
@@ -1251,7 +1553,7 @@ impl App {
         let fc = Color::from_rgba(f.col[0], f.col[1], f.col[2], 255);
         draw_rectangle(12.0, 14.0, 12.0, 12.0, fc);
         text(&self.fonts.head, f.name, 32.0, 26.0, 17.0, p.text);
-        let stats = [
+        let mut stats = vec![
             ("Scrap", format!("{:.0}", g.scrap)),
             ("Ammo", format!("{:.0}", g.ammo)),
             ("Score", format!("{:.0}", g.score)),
@@ -1261,6 +1563,9 @@ impl App {
             ("Waiting", format!("{}", g.waiting)),
             ("Flown out", format!("{}", g.extracted)),
         ];
+        if g.goal > 0.0 {
+            stats.push(("Evac in", mmss((g.goal - g.time).max(0.0))));
+        }
         let mut x = 150.0;
         for (k, v) in stats.iter() {
             text(&self.fonts.mono, k, x, 17.0, 11.0, p.dim);
@@ -1323,6 +1628,7 @@ impl App {
         // build bar
         let items: Vec<Tool> = BUILD_ORDER
             .iter()
+            .filter(|s| !(g.campaign && **s == S::Lab))
             .map(|s| Tool::Build(*s))
             .chain([Tool::Unit(U::Rifle), Tool::Unit(U::Tank)])
             .collect();
@@ -1577,7 +1883,9 @@ impl App {
             let tw = text_w(&self.fonts.head, s, 30.0);
             text(&self.fonts.head, s, (sw - tw) / 2.0, sh / 2.0, 30.0, WHITE);
         }
-        if g.over {
+        if g.over && self.in_camp {
+            self.campaign_over(g);
+        } else if g.over {
             let r = Rect::new(sw / 2.0 - 220.0, sh / 2.0 - 90.0, 440.0, 180.0);
             self.panel(r);
             text(
@@ -1609,6 +1917,51 @@ impl App {
                 true,
             ) {
                 self.leave_game();
+            }
+        }
+    }
+
+    /// The end of a campaign city: held (bank civilians, carry the army on) or lost (try again).
+    fn campaign_over(&mut self, g: &mut Game) {
+        let p = pal(self.dark);
+        let (sw, sh) = (screen_width(), screen_height());
+        let Some(c) = self.camp.clone() else { return };
+        let r = Rect::new(sw / 2.0 - 260.0, sh / 2.0 - 110.0, 520.0, 220.0);
+        self.panel(r);
+        let squads = g.groups.iter().filter(|gr| !gr.dead).count();
+        if g.won {
+            let last = c.level + 1 >= CITIES.len();
+            text(&self.fonts.head, &format!("{} held", c.city().name), r.x + 24.0, r.y + 46.0, 26.0, p.text);
+            text(&self.fonts.mono, &format!("{} civilians flown out: +{} to spend", g.extracted, g.extracted), r.x + 24.0, r.y + 82.0, 14.0, p.accent);
+            let army = if last {
+                "That was the last city.".to_string()
+            } else if squads == 0 {
+                format!("No troops survived to march on to {}.", CITIES[c.level + 1].name)
+            } else {
+                format!("{} squad{} march on to {}.", squads, if squads == 1 { "" } else { "s" }, CITIES[c.level + 1].name)
+            };
+            text(&self.fonts.mono, &army, r.x + 24.0, r.y + 106.0, 14.0, p.text);
+            text(&self.fonts.mono, &format!("{} kills · score {:.0}", fmt_n(g.kills as usize), g.score), r.x + 24.0, r.y + 130.0, 13.0, p.dim);
+            if self.button(Rect::new(r.x + 24.0, r.y + 154.0, 200.0, 42.0), "Continue", true, true) {
+                let mut c = c;
+                c.harvest(g);
+                campaign::save(&c);
+                self.camp = Some(c);
+                self.in_camp = false;
+                self.screen = Screen::Hub;
+            }
+        } else {
+            text(&self.fonts.head, &format!("{} has fallen", c.city().name), r.x + 24.0, r.y + 46.0, 26.0, p.text);
+            text(&self.fonts.mono, "The HQ was overrun. Your army and civilians are as they were before this city.", r.x + 24.0, r.y + 82.0, 13.0, p.dim);
+            text(&self.fonts.mono, &format!("Held for {} of {}.", mmss(g.time), mmss(g.goal)), r.x + 24.0, r.y + 106.0, 13.0, p.dim);
+            if self.button(Rect::new(r.x + 24.0, r.y + 154.0, 200.0, 42.0), "Try again", true, true) {
+                self.camp = campaign::load().or(Some(c));
+                self.in_camp = false;
+                self.screen = Screen::Hub;
+            }
+            if self.button(Rect::new(r.x + 236.0, r.y + 154.0, 160.0, 42.0), "Main menu", true, false) {
+                self.in_camp = false;
+                self.screen = Screen::Menu;
             }
         }
     }
@@ -1648,7 +2001,7 @@ impl App {
         // keyboard
         while let Some(ch) = get_char_pressed() {
             let ch = ch.to_ascii_lowercase();
-            if let Some(s) = BUILD_ORDER.iter().find(|s| def(**s).key == ch) {
+            if let Some(s) = BUILD_ORDER.iter().find(|s| def(**s).key == ch && !(g.campaign && **s == S::Lab)) {
                 self.tool = if self.tool == Tool::Build(*s) {
                     Tool::None
                 } else {
@@ -1808,6 +2161,12 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
 fn alpha(c: Color, a: f32) -> Color {
     Color::new(c.r, c.g, c.b, a)
 }
+/// Seconds as m:ss.
+fn mmss(t: f32) -> String {
+    let s = t.max(0.0).ceil() as u32;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
 fn fmt_n(n: usize) -> String {
     if n >= 1_000_000 {
         format!("{:.2}M", n as f32 / 1e6)
