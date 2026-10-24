@@ -142,7 +142,7 @@ pub fn def(s: S) -> &'static Def {
         tip: "Unlocks the ICBM. Each silo has its own 75 s cooldown. Base zone only.",
         ..BASE
     };
-    static PAD: Def = Def { key: '7', name: "Extraction pad", w: 11, h: 11, hp: 500.0, cost: 200.0, ht: 0.5, top: rgb(248, 249, 250), side: rgb(173, 181, 189), zone: true, tip: "Rescued civilians walk to the nearest pad. A pad flies up to 16 out at a time (+100 score, +20 scrap, +10 ammo each), then needs 30 s before its next flight, so build several. A crowded base slows your income.", ..BASE };
+    static PAD: Def = Def { key: '7', name: "Evac point", w: 11, h: 11, hp: 500.0, cost: 200.0, ht: 0.5, top: rgb(248, 249, 250), side: rgb(173, 181, 189), zone: true, tip: "Rescued civilians walk to the nearest pad. A pad flies up to 16 out at a time (+100 score, +20 scrap, +10 ammo each), then needs 30 s before its next flight, so build several. A crowded base slows your income.", ..BASE };
     static OUTPOST: Def = Def {
         key: 'o',
         name: "Outpost",
@@ -256,7 +256,7 @@ pub struct ADef {
     pub tip: &'static str,
 }
 pub fn adef(a: A) -> &'static ADef {
-    static RESCUE: ADef = ADef { key: 'r', name: "Rescue squad", cost: 80.0, ammo: 0.0, cd: 6.0, tip: "Sends troops to the spot you click. Each soldier walks up to civilians one by one and escorts them back to the base, where they walk to an extraction pad." };
+    static RESCUE: ADef = ADef { key: 'r', name: "Rescue squad", cost: 80.0, ammo: 0.0, cd: 6.0, tip: "Sends troops to the spot you click. Each soldier walks up to civilians one by one and escorts them back to the base, where they walk to an evac point." };
     static AIR: ADef = ADef { key: 'q', name: "Airstrike", cost: 250.0, ammo: 0.0, cd: 18.0, tip: "A bomber crosses the map and drops a line of bombs through the spot you click. Flattens buildings." };
     static GUNSHIP: ADef = ADef { key: 'g', name: "Gunship", cost: 300.0, ammo: 150.0, cd: 40.0, tip: "A helicopter gunship flies out and circles the spot you click for 20 seconds, firing at anything in range." };
     static ICBM: ADef = ADef { key: 'e', name: "ICBM", cost: 1500.0, ammo: 400.0, cd: 75.0, tip: "$1500 + 400 ammo. Launches from the nearest ready silo and erases everything in a huge radius. Every silo has its own cooldown, so more silos means more launches." };
@@ -306,6 +306,49 @@ pub fn rdef(r: R) -> &'static RDef {
         R::Barrels => &BARRELS,
     }
 }
+/// Campaign-only turret upgrades, two for each kind of turret, bought with research points.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Up {
+    GunRapid,
+    GunAp,
+    CannonAuto,
+    CannonSplash,
+    FlameNapalm,
+    FlameReach,
+    RailCaps,
+    RailWide,
+    HeliumReach,
+    HeliumHull,
+    ArtyRapid,
+    ArtyHe,
+}
+pub const UPGRADES: [Up; 12] = [Up::GunRapid, Up::GunAp, Up::CannonAuto, Up::CannonSplash, Up::FlameNapalm, Up::FlameReach, Up::RailCaps, Up::RailWide, Up::HeliumReach, Up::HeliumHull, Up::ArtyRapid, Up::ArtyHe];
+pub struct UpDef {
+    pub name: &'static str,
+    pub tip: &'static str,
+    /// the turret it upgrades
+    pub on: S,
+    /// research points
+    pub cost: u32,
+}
+pub fn updef(u: Up) -> UpDef {
+    let (name, tip, on, cost) = match u {
+        Up::GunRapid => ("Rapid fire", "Gun turrets fire 40% faster", S::Gun, 120),
+        Up::GunAp => ("Armour-piercing rounds", "Gun turret bullets do 50% more damage", S::Gun, 140),
+        Up::CannonAuto => ("Autoloader", "Cannons reload 30% faster", S::Cannon, 160),
+        Up::CannonSplash => ("Heavy shells", "Cannon shells blast a 40% wider area", S::Cannon, 180),
+        Up::FlameNapalm => ("Napalm mix", "Flame bunkers burn 50% hotter", S::Flame, 150),
+        Up::FlameReach => ("High-pressure nozzles", "Flame bunkers reach 30% further", S::Flame, 150),
+        Up::RailCaps => ("Capacitor banks", "Railguns recharge 35% faster", S::Rail, 220),
+        Up::RailWide => ("Wide slugs", "Railgun shots cut a 50% wider path", S::Rail, 220),
+        Up::HeliumReach => ("Bigger balloons", "Helium towers slow the horde over a 35% wider area", S::Helium, 160),
+        Up::HeliumHull => ("Armoured tanks", "Helium towers have twice the health", S::Helium, 120),
+        Up::ArtyRapid => ("Gun crews", "Artillery fires 30% faster", S::Artillery, 220),
+        Up::ArtyHe => ("High explosive", "Artillery shells blast a 40% wider area and hit 30% harder", S::Artillery, 240),
+    };
+    UpDef { name, tip, on, cost }
+}
+
 /// The research that upgrades an ability, if any.
 pub fn ability_research(a: A) -> Option<R> {
     match a {

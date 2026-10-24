@@ -14,7 +14,7 @@
 //! anyway, it falls back to downloading the city live.
 
 use crate::defs::*;
-use crate::game::Game;
+use crate::game::{Allowed, Game};
 use crate::storage::{self, data_dir};
 use crate::world::*;
 use macroquad::prelude::vec2;
@@ -53,6 +53,131 @@ impl City {
     /// The country, from the lookup ("Cairo, Egypt" -> "Egypt").
     pub fn country(&self) -> &'static str {
         self.query.rsplit(", ").next().unwrap_or("")
+    }
+}
+
+// ------------------------------------------------------------------------------------------ tech tree
+
+/// Something the campaign's tech tree unlocks with research points (civilians flown out).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tech {
+    Build(S),
+    Unit(U),
+    Ability(A),
+    Research(R),
+    Up(Up),
+}
+
+/// What every campaign starts with.
+pub const START_BUILDS: [S; 4] = [S::Wall, S::Extractor, S::Pad, S::Rescue];
+
+/// The whole tree, in the order the campaign screen lists it. Saves store indices into it, so new entries go at the end.
+pub const TECH: [Tech; 31] = [
+    Tech::Build(S::Gun),
+    Tech::Build(S::Cannon),
+    Tech::Build(S::Flame),
+    Tech::Build(S::Rail),
+    Tech::Build(S::Helium),
+    Tech::Build(S::Artillery),
+    Tech::Build(S::Outpost),
+    Tech::Build(S::Helipad),
+    Tech::Build(S::Silo),
+    Tech::Unit(U::Tank),
+    Tech::Ability(A::Rescue),
+    Tech::Ability(A::Air),
+    Tech::Ability(A::Gunship),
+    Tech::Research(R::Rescue),
+    Tech::Research(R::Carpet),
+    Tech::Research(R::Nuke),
+    Tech::Research(R::Armour),
+    Tech::Research(R::Presses),
+    Tech::Research(R::Barrels),
+    Tech::Up(Up::GunRapid),
+    Tech::Up(Up::GunAp),
+    Tech::Up(Up::CannonAuto),
+    Tech::Up(Up::CannonSplash),
+    Tech::Up(Up::FlameNapalm),
+    Tech::Up(Up::FlameReach),
+    Tech::Up(Up::RailCaps),
+    Tech::Up(Up::RailWide),
+    Tech::Up(Up::HeliumReach),
+    Tech::Up(Up::HeliumHull),
+    Tech::Up(Up::ArtyRapid),
+    Tech::Up(Up::ArtyHe),
+];
+
+/// Turrets that shoot ammo: the first one unlocked brings the ammo plant with it.
+fn shoots(t: S) -> bool {
+    matches!(t, S::Gun | S::Cannon | S::Flame | S::Rail | S::Artillery)
+}
+
+impl Tech {
+    pub fn name(self) -> &'static str {
+        match self {
+            Tech::Build(s) => def(s).name,
+            Tech::Unit(u) => udef(u).name,
+            Tech::Ability(a) => adef(a).name,
+            Tech::Research(r) => rdef(r).name,
+            Tech::Up(u) => updef(u).name,
+        }
+    }
+    pub fn tip(self) -> String {
+        match self {
+            Tech::Build(S::Silo) => format!("{} Unlocks the ICBM.", def(S::Silo).tip),
+            Tech::Build(s) if shoots(s) => format!("{} The first turret also unlocks the ammo plant.", def(s).tip),
+            Tech::Build(s) => def(s).tip.to_string(),
+            Tech::Unit(u) => format!("{}: a squad you can call in from the build bar.", udef(u).name),
+            Tech::Ability(a) => adef(a).tip.to_string(),
+            Tech::Research(r) => rdef(r).tip.to_string(),
+            Tech::Up(u) => updef(u).tip.to_string(),
+        }
+    }
+    /// Research points it costs.
+    pub fn cost(self) -> u32 {
+        match self {
+            Tech::Build(s) => match s {
+                S::Gun => 60,
+                S::Cannon => 140,
+                S::Flame => 120,
+                S::Rail => 260,
+                S::Helium => 160,
+                S::Artillery => 320,
+                S::Outpost => 100,
+                S::Helipad => 260,
+                S::Silo => 380,
+                _ => 0,
+            },
+            Tech::Unit(_) => 150,
+            Tech::Ability(a) => match a {
+                A::Rescue => 60,
+                A::Air => 150,
+                A::Gunship => 220,
+                A::Icbm => 0,
+            },
+            Tech::Research(r) => rdef(r).civs,
+            Tech::Up(u) => updef(u).cost,
+        }
+    }
+    /// The heading it's listed under.
+    pub fn group(self) -> &'static str {
+        match self {
+            Tech::Build(s) if shoots(s) || s == S::Helium => "Turrets",
+            Tech::Build(_) | Tech::Unit(_) => "Support",
+            Tech::Ability(_) | Tech::Research(R::Rescue | R::Carpet | R::Nuke) => "Abilities",
+            Tech::Research(_) => "Research",
+            Tech::Up(_) => "Turret upgrades",
+        }
+    }
+    /// What has to be unlocked first, if anything.
+    pub fn needs(self) -> Option<Tech> {
+        match self {
+            Tech::Up(u) => Some(Tech::Build(updef(u).on)),
+            Tech::Research(R::Rescue) => Some(Tech::Ability(A::Rescue)),
+            Tech::Research(R::Carpet) => Some(Tech::Ability(A::Air)),
+            Tech::Research(R::Nuke) => Some(Tech::Build(S::Silo)),
+            Tech::Research(R::Presses | R::Barrels) => Some(Tech::Build(S::Gun)),
+            _ => None,
+        }
     }
 }
 
@@ -133,7 +258,8 @@ pub struct Campaign {
     pub lost: u32,
     /// civilians to spend
     pub points: u32,
-    pub research: Vec<R>,
+    /// tech tree unlocks bought with research points
+    pub tech: Vec<Tech>,
     /// surviving troops: (kind, soldiers) per squad
     pub units: Vec<(U, u32)>,
     pub flown: u32,
@@ -153,7 +279,7 @@ impl Campaign {
                 CityState { days, start: days, rate: 0.7 + 0.8 * hash(seed, 100 + i as u64), fate: Fate::Open }
             })
             .collect();
-        Campaign { fac, diff, seed, cities, current: 0, fought: 0, lost: 0, points: 0, research: Vec::new(), units: Vec::new(), flown: 0, kills: 0 }
+        Campaign { fac, diff, seed, cities, current: 0, fought: 0, lost: 0, points: 0, tech: Vec::new(), units: Vec::new(), flown: 0, kills: 0 }
     }
     /// Fired after three lost cities.
     pub fn fired(&self) -> bool {
@@ -205,17 +331,44 @@ impl Campaign {
             self.current = i;
         }
     }
-    pub fn has(&self, r: R) -> bool {
-        self.research.contains(&r)
+    pub fn has_tech(&self, t: Tech) -> bool {
+        self.tech.contains(&t)
     }
-    pub fn buy_research(&mut self, r: R) -> bool {
-        let c = rdef(r).civs;
-        if self.has(r) || self.points < c {
+    /// Unlocked, or what it needs is: it can be bought once there are points for it.
+    pub fn open_tech(&self, t: Tech) -> bool {
+        !self.has_tech(t) && t.needs().is_none_or(|n| self.has_tech(n))
+    }
+    pub fn can_buy(&self, t: Tech) -> bool {
+        self.open_tech(t) && self.points >= t.cost()
+    }
+    pub fn buy(&mut self, t: Tech) -> bool {
+        if !self.can_buy(t) {
             return false;
         }
-        self.points -= c;
-        self.research.push(r);
+        self.points -= t.cost();
+        self.tech.push(t);
         true
+    }
+    /// What the tech tree lets a city's game build, recruit and use.
+    pub fn allowed(&self) -> Allowed {
+        let mut a = Allowed { builds: START_BUILDS.to_vec(), units: vec![U::Rifle], abilities: Vec::new() };
+        for t in &self.tech {
+            match *t {
+                Tech::Build(s) => {
+                    a.builds.push(s);
+                    if shoots(s) && !a.builds.contains(&S::Plant) {
+                        a.builds.push(S::Plant);
+                    }
+                    if s == S::Silo {
+                        a.abilities.push(A::Icbm);
+                    }
+                }
+                Tech::Unit(u) => a.units.push(u),
+                Tech::Ability(x) => a.abilities.push(x),
+                _ => {}
+            }
+        }
+        a
     }
     pub fn recruit(&mut self, u: U) -> bool {
         let c = recruit_cost(u);
@@ -238,8 +391,19 @@ impl Campaign {
         g.campaign = true;
         g.goal = self.hold_secs();
         g.set_civilians(self.civilians_at(self.current));
-        for r in &self.research {
-            g.complete_research(*r);
+        g.allowed = Some(self.allowed());
+        // the starter base keeps only what's unlocked
+        for i in 0..g.structs.len() {
+            if !g.structs[i].dead && !g.build_ok(g.structs[i].t) {
+                g.kill_struct(i);
+            }
+        }
+        for t in &self.tech {
+            match *t {
+                Tech::Research(r) => g.complete_research(r),
+                Tech::Up(u) => g.ups.push(u),
+                _ => {}
+            }
         }
         let hq = g.world.hq;
         for (i, (u, n)) in self.units.iter().enumerate() {
@@ -341,8 +505,8 @@ pub fn from_text(t: &str) -> Campaign {
             }
         }
     }
-    if let Some(v) = field("research") {
-        c.research = v.split(',').filter_map(|x| x.trim().parse::<usize>().ok()).filter_map(|i| RESEARCH.get(i).copied()).collect();
+    if let Some(v) = field("tech") {
+        c.tech = v.split(',').filter_map(|x| x.trim().parse::<usize>().ok()).filter_map(|i| TECH.get(i).copied()).collect();
     }
     if let Some(v) = field("units") {
         c.units = v
@@ -364,7 +528,7 @@ pub fn from_text(t: &str) -> Campaign {
 /// The whole campaign as text: the save file, and what the co-op host sends its guests. Floats are
 /// written exactly, so both sides build the same game.
 pub fn to_text(c: &Campaign) -> String {
-    let research: Vec<String> = c.research.iter().filter_map(|r| RESEARCH.iter().position(|x| x == r)).map(|i| i.to_string()).collect();
+    let tech: Vec<String> = c.tech.iter().filter_map(|t| TECH.iter().position(|x| x == t)).map(|i| i.to_string()).collect();
     let units: Vec<String> = c.units.iter().map(|(u, n)| format!("{}{}", if *u == U::Rifle { 'r' } else { 't' }, n)).collect();
     let cities: Vec<String> = c
         .cities
@@ -380,7 +544,7 @@ pub fn to_text(c: &Campaign) -> String {
         })
         .collect();
     format!(
-        "faction={}\ndifficulty={}\nseed={}\ncurrent={}\nfought={}\nlost={}\npoints={}\nflown={}\nkills={}\ncities={}\nresearch={}\nunits={}\n",
+        "faction={}\ndifficulty={}\nseed={}\ncurrent={}\nfought={}\nlost={}\npoints={}\nflown={}\nkills={}\ncities={}\ntech={}\nunits={}\n",
         c.fac,
         c.diff,
         c.seed,
@@ -391,7 +555,7 @@ pub fn to_text(c: &Campaign) -> String {
         c.flown,
         c.kills,
         cities.join(","),
-        research.join(","),
+        tech.join(","),
         units.join(",")
     )
 }
@@ -559,7 +723,7 @@ mod tests {
         let mut c = Campaign::with_seed(2, 1, 77);
         c.fought = 3;
         c.current = 4;
-        c.research = vec![R::Armour, R::Barrels, R::Rescue];
+        c.tech = vec![Tech::Research(R::Armour), Tech::Build(S::Gun), Tech::Research(R::Barrels), Tech::Ability(A::Rescue), Tech::Research(R::Rescue), Tech::Up(Up::GunAp)];
         c.units = vec![(U::Rifle, 6), (U::Tank, 1), (U::Rifle, 2)];
         c
     }
@@ -578,6 +742,10 @@ mod tests {
         assert_eq!(a.civs.len(), c.civilians_at(4));
         assert!(a.research.armour && a.research.barrels && a.research.rescue && !a.research.nuke);
         assert!(!a.can_research(R::Nuke));
+        assert!(a.build_ok(S::Gun) && a.build_ok(S::Plant) && a.build_ok(S::Pad) && !a.build_ok(S::Cannon) && !a.build_ok(S::Lab));
+        assert!(a.unit_ok(U::Rifle) && !a.unit_ok(U::Tank));
+        assert!(!a.can_use(A::Air) && a.has_up(Up::GunAp) && a.dmg_mult(S::Gun) > 1.0);
+        assert!(a.structs.iter().all(|s| s.dead || a.build_ok(s.t)));
         for _ in 0..400 {
             a.tick();
             b.tick();
@@ -659,7 +827,7 @@ mod tests {
         let d = from_text(&to_text(&c));
         assert_eq!((d.fac, d.diff, d.seed, d.current, d.fought, d.lost, d.points, d.kills), (2, 1, 77, 4, 3, 2, 321, 1_234_567));
         assert_eq!(d.cities, c.cities);
-        assert_eq!(d.research, c.research);
+        assert_eq!(d.tech, c.tech);
         assert_eq!(d.units, c.units);
         assert_eq!(to_text(&d), to_text(&c));
     }
@@ -667,12 +835,15 @@ mod tests {
     #[test]
     fn shop() {
         let mut c = Campaign::new(0, 1);
-        c.points = 200;
-        assert!(c.buy_research(R::Rescue));
-        assert!(!c.buy_research(R::Rescue));
+        c.points = 300;
+        assert!(!c.buy(Tech::Up(Up::GunRapid)), "needs the gun turret first");
+        assert!(c.buy(Tech::Build(S::Gun)));
+        assert!(!c.buy(Tech::Build(S::Gun)));
+        assert!(c.allowed().builds.contains(&S::Plant), "the first turret brings the ammo plant");
+        assert!(c.buy(Tech::Up(Up::GunRapid)));
         assert!(c.recruit(U::Rifle));
         assert!(!c.recruit(U::Tank));
-        assert_eq!(c.points, 200 - rdef(R::Rescue).civs - recruit_cost(U::Rifle));
+        assert_eq!(c.points, 300 - Tech::Build(S::Gun).cost() - Tech::Up(Up::GunRapid).cost() - recruit_cost(U::Rifle));
         assert_eq!(c.army(U::Rifle), (1, 6));
     }
 }

@@ -69,6 +69,8 @@ pub struct App {
     globe: Option<globe::Globe>,
     /// the city the globe last turned to
     globe_city: Option<usize>,
+    /// which part of the campaign's tech tree is showing
+    tech_tab: usize,
     /// loading screen is waiting for the city pack instead of OpenStreetMap
     wait_pack: bool,
     status: String,
@@ -226,6 +228,7 @@ impl App {
             pack: campaign::Pack::start(),
             globe: None,
             globe_city: None,
+            tech_tab: 0,
             wait_pack: false,
             saved: storage::list_maps(),
             status: String::new(),
@@ -998,7 +1001,7 @@ impl App {
             self.screen = Screen::Menu;
             return;
         };
-        let before = (c.points, c.research.len(), c.units.len(), c.current);
+        let before = (c.points, c.tech.len(), c.units.len(), c.current);
         // space
         clear_background(rgb(6, 9, 16));
         for k in 0..220u32 {
@@ -1158,54 +1161,70 @@ impl App {
             return;
         }
 
-        // ---- right: unlocks and the army
+        // ---- right: the tech tree and the army
         self.panel(right);
         let (x0, w) = (right.x + 20.0, right.w - 40.0);
         let mut y = right.y + 34.0;
-        text(&self.fonts.head, "Spend civilians", x0, y, 20.0, p.text);
-        let pts = format!("{}", c.points);
+        text(&self.fonts.head, "Tech tree", x0, y, 20.0, p.text);
+        let pts = format!("{} RP", c.points);
         text(&self.fonts.head, &pts, x0 + w - text_w(&self.fonts.head, &pts, 22.0), y, 22.0, p.accent);
         y += 18.0;
-        text(&self.fonts.mono, "Flown out of held cities.", x0, y, 11.5, p.dim);
-        y += 14.0;
-        let rows = RESEARCH.len() as f32 + 4.6;
-        let rh = ((right.y + right.h - y - 20.0) / rows).clamp(36.0, 54.0);
-        for rs in RESEARCH {
-            let d = rdef(rs);
-            let rr = Rect::new(right.x + 10.0, y, right.w - 20.0, rh - 5.0);
+        text(&self.fonts.mono, "Every civilian flown out is a research point.", x0, y, 11.5, p.dim);
+        y += 12.0;
+        const GROUPS: [&str; 5] = ["Turrets", "Support", "Abilities", "Research", "Turret upgrades"];
+        const SHORT: [&str; 5] = ["Turrets", "Support", "Abilities", "Research", "Upgrades"];
+        if let Some(k) = self.segmented(Rect::new(right.x + 10.0, y, right.w - 20.0, 30.0), &SHORT, self.tech_tab) {
+            self.tech_tab = k;
+        }
+        y += 40.0;
+        let list: Vec<campaign::Tech> = campaign::TECH.into_iter().filter(|t| t.group() == GROUPS[self.tech_tab.min(4)]).collect();
+        let army_h = 150.0;
+        let rh = ((right.y + right.h - army_h - y) / list.len().max(6) as f32).clamp(30.0, 50.0);
+        for t in list {
+            let rr = Rect::new(right.x + 10.0, y, right.w - 20.0, rh - 4.0);
             draw_rectangle(rr.x, rr.y, rr.w, rr.h, p.panel2);
-            text(&self.fonts.head, d.name, rr.x + 10.0, rr.y + rr.h / 2.0 + 5.0, 14.0, p.text);
-            let br = Rect::new(rr.x + rr.w - 118.0, rr.y + (rr.h - 28.0) / 2.0, 110.0, 28.0);
-            if c.has(rs) {
+            let fs = if rh < 38.0 { 12.5 } else { 14.0 };
+            text(&self.fonts.head, t.name(), rr.x + 10.0, rr.y + rr.h / 2.0 + fs * 0.35, fs, if c.has_tech(t) { p.text } else { p.dim });
+            let br = Rect::new(rr.x + rr.w - 112.0, rr.y + (rr.h - 26.0).max(0.0) / 2.0, 104.0, rr.h.min(26.0));
+            let need = t.needs().filter(|n| !c.has_tech(*n));
+            if c.has_tech(t) {
                 self.button(br, "Unlocked", false, true);
-            } else if self.button(br, &format!("{} civilians", d.civs), c.points >= d.civs && !c.finished(), false) {
-                c.buy_research(rs);
+            } else if let Some(n) = need {
+                self.button(br, "Locked", false, false);
+                if self.hot(rr) {
+                    self.tip = Some(format!("{}: {} Needs {} first.", t.name(), t.tip(), n.name()));
+                }
+            } else if self.button(br, &format!("{} RP", t.cost()), c.can_buy(t) && !c.finished(), false) {
+                c.buy(t);
             }
-            if self.hot(rr) {
-                self.tip = Some(format!("{}: {}", d.name, d.tip));
+            if self.hot(rr) && need.is_none() {
+                self.tip = Some(format!("{}: {}", t.name(), t.tip()));
             }
             y += rh;
         }
-        y += 18.0;
+        // the army, at the bottom
+        let mut y = right.y + right.h - army_h + 14.0;
         text(&self.fonts.head, "Your army", x0, y, 16.0, p.text);
         y += 10.0;
         let (rs, rn) = c.army(U::Rifle);
         let (ts, _) = c.army(U::Tank);
-        let ar = Rect::new(right.x + 10.0, y, right.w - 20.0, rh * 1.1);
+        let ar = Rect::new(right.x + 10.0, y, right.w - 20.0, 52.0);
         draw_rectangle(ar.x, ar.y, ar.w, ar.h, p.panel2);
-        text(&self.fonts.mono, &format!("{} rifle squads ({} soldiers) · {} tanks", rs, rn, ts), x0, ar.y + ar.h / 2.0 - 2.0, 12.5, p.text);
-        text(&self.fonts.mono, "Survivors march on to the next city.", x0, ar.y + ar.h / 2.0 + 14.0, 11.0, p.dim);
+        text(&self.fonts.mono, &format!("{} rifle squads ({} soldiers) · {} tanks", rs, rn, ts), x0, ar.y + 22.0, 12.5, p.text);
+        text(&self.fonts.mono, "Survivors march on to the next city.", x0, ar.y + 40.0, 11.0, p.dim);
         y += ar.h + 8.0;
         let half = (right.w - 28.0) / 2.0;
         for (k, u) in [U::Rifle, U::Tank].into_iter().enumerate() {
             let cost = campaign::recruit_cost(u);
             let br = Rect::new(right.x + 10.0 + k as f32 * (half + 8.0), y, half, 34.0);
-            if self.button(br, &format!("+{} · {}", udef(u).name.to_lowercase(), cost), c.points >= cost && !c.finished(), false) {
+            let open = u == U::Rifle || c.has_tech(campaign::Tech::Unit(u));
+            let label = if open { format!("+{} · {} RP", udef(u).name.to_lowercase(), cost) } else { format!("{}: locked", udef(u).name) };
+            if self.button(br, &label, open && c.points >= cost && !c.finished(), false) {
                 c.recruit(u);
             }
         }
 
-        if (c.points, c.research.len(), c.units.len(), c.current) != before {
+        if (c.points, c.tech.len(), c.units.len(), c.current) != before {
             campaign::save(&c);
         }
         if c.current != before.3 {
@@ -1272,7 +1291,7 @@ impl App {
         c.points = 260;
         c.flown = 640;
         c.kills = 182_000;
-        c.research = vec![R::Rescue, R::Armour];
+        c.tech = vec![campaign::Tech::Build(S::Gun), campaign::Tech::Ability(A::Rescue), campaign::Tech::Research(R::Rescue), campaign::Tech::Research(R::Armour)];
         c.units = vec![(U::Rifle, 6), (U::Rifle, 4), (U::Tank, 1), (U::Rifle, 6)];
         self.camp = Some(c);
         self.screen = Screen::Hub;
@@ -2117,7 +2136,7 @@ impl App {
             stats.push(("EVAC IN", mmss((g.goal - g.time).max(0.0)), p.warn, Some("Hold out until the evac flies everyone out")));
         }
         if g.income_mult < 0.999 {
-            stats.push(("INCOME", format!("×{:.2}", g.income_mult), p.bad, Some("Too many rescued civilians are waiting in the base. Build more extraction pads to fly them out faster.")));
+            stats.push(("INCOME", format!("×{:.2}", g.income_mult), p.bad, Some("Too many rescued civilians are waiting in the base. Build more evac points to fly them out faster.")));
         }
         stats.extend([
             ("RESCUED", format!("{}", g.rescued), p.text, None),
@@ -2151,9 +2170,9 @@ impl App {
         // ---- build bar, centred along the bottom; wraps to two rows when the HUD is too narrow
         let items: Vec<Tool> = BUILD_ORDER
             .iter()
-            .filter(|s| !(g.campaign && **s == S::Lab))
+            .filter(|s| !(g.campaign && **s == S::Lab) && g.build_ok(**s))
             .map(|s| Tool::Build(*s))
-            .chain([Tool::Unit(U::Rifle), Tool::Unit(U::Tank)])
+            .chain([U::Rifle, U::Tank].into_iter().filter(|u| g.unit_ok(*u)).map(Tool::Unit))
             .collect();
         let (gap, ch) = (6.0, 60.0);
         let room = area.w - 24.0 - 16.0;
@@ -2201,7 +2220,7 @@ impl App {
                 Tool::Build(S::Extractor) => "Extractor",
                 Tool::Build(S::Plant) => "Ammo plant",
                 Tool::Build(S::Silo) => "Missile silo",
-                Tool::Build(S::Pad) => "Extraction",
+                Tool::Build(S::Pad) => "Evac point",
                 Tool::Build(S::Lab) => "Research",
                 Tool::Build(S::Rescue) => "Rescue stn",
                 Tool::Build(S::Flame) => "Flame",
@@ -2229,8 +2248,10 @@ impl App {
         let lab = !g.campaign && g.has(S::Lab);
         let lab_h = if lab { 44.0 + LAB_ONLY.len() as f32 * 30.0 } else { 0.0 };
         let room = bar.y - 12.0 - ay - lab_h;
-        let card_h = ((room - 8.0 * (ABILITIES.len() as f32 - 1.0)) / ABILITIES.len() as f32).clamp(64.0, 88.0);
-        for a in ABILITIES {
+        // campaign: only what the tech tree has unlocked
+        let abilities: Vec<A> = ABILITIES.into_iter().filter(|a| g.ability_ok(*a)).collect();
+        let card_h = ((room - 8.0 * (abilities.len().max(1) as f32 - 1.0)) / abilities.len().max(1) as f32).clamp(64.0, 88.0);
+        for a in abilities {
             let d = adef(a);
             let r = Rect::new(ax, ay, aw, card_h);
             self.panel(r);
@@ -2497,14 +2518,14 @@ impl App {
         // keyboard
         while let Some(ch) = get_char_pressed() {
             let ch = ch.to_ascii_lowercase();
-            if let Some(s) = BUILD_ORDER.iter().find(|s| def(**s).key == ch && !(g.campaign && **s == S::Lab) && self.placing.is_none()) {
+            if let Some(s) = BUILD_ORDER.iter().find(|s| def(**s).key == ch && !(g.campaign && **s == S::Lab) && g.build_ok(**s) && self.placing.is_none()) {
                 self.tool = if self.tool == Tool::Build(*s) {
                     Tool::None
                 } else {
                     Tool::Build(*s)
                 };
             } else if self.placing.is_some() && !"tkmfh".contains(ch) {
-            } else if let Some(u) = [U::Rifle, U::Tank].iter().find(|u| udef(**u).key == ch) {
+            } else if let Some(u) = [U::Rifle, U::Tank].iter().find(|u| udef(**u).key == ch && g.unit_ok(**u)) {
                 self.tool = Tool::Unit(*u);
             } else if let Some(a) = ABILITIES.iter().find(|a| adef(**a).key == ch) {
                 if g.can_use(*a) {
