@@ -35,11 +35,18 @@ pub fn load_fonts() -> Fonts {
     Fonts { head, mono }
 }
 
+/// Text at baseline `x`, `y`. Inside `ui::begin`/`ui::end` the glyphs are rasterised at the real
+/// pixel size, so they stay sharp at any UI scale.
 pub fn text(f: &Font, s: &str, x: f32, y: f32, size: f32, c: Color) {
-    draw_text_ex(s, x, y, TextParams { font: Some(f), font_size: size as u16, color: c, ..Default::default() });
+    let k = crate::ui::draw_scale();
+    let px = (size * k).round().max(1.0);
+    draw_text_ex(s, x, y, TextParams { font: Some(f), font_size: px as u16, font_scale: size / px, color: c, ..Default::default() });
 }
+/// The width of `s` in the units it is drawn in (points inside `ui::begin`/`ui::end`).
 pub fn text_w(f: &Font, s: &str, size: f32) -> f32 {
-    measure_text(s, Some(f), size as u16, 1.0).width
+    let k = crate::ui::draw_scale();
+    let px = (size * k).round().max(1.0);
+    measure_text(s, Some(f), px as u16, 1.0).width * size / px
 }
 
 /// A point `h` cells above the map point `p`.

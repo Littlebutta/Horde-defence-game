@@ -15,6 +15,7 @@ mod render;
 mod selftest;
 mod storage;
 mod swarm;
+mod ui;
 mod update;
 mod world;
 
@@ -44,6 +45,7 @@ fn window_conf() -> Conf {
             4
         },
         window_resizable: true,
+        fullscreen: std::env::var("PH_SHOT").is_err() && storage::load_settings().fullscreen,
         ..Default::default()
     }
 }

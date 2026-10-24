@@ -79,14 +79,14 @@ impl Globe {
         self.goal = Some((lat.clamp(-60.0, 70.0), lon));
     }
 
-    /// Draws the globe centred at `c` (pixels) with radius `r` at zoom 1, and its pins. `input`:
+    /// Draws the globe centred at `c` (UI points, inside `ui::begin`) with radius `r` at zoom 1, and its pins. `input`:
     /// whether the mouse is over the globe's part of the screen. Returns the pin under the mouse and
     /// the pin clicked, if any.
     pub fn draw(&mut self, c: Vec2, r: f32, marks: &[Mark], font: &Font, input: bool, dt: f32) -> (Option<usize>, Option<usize>) {
-        let (sw, sh) = (screen_width(), screen_height());
+        let (sw, sh) = (crate::ui::sw(), crate::ui::sh());
         let rad = r * self.zoom;
         // turning: drag, wheel, or easing towards a picked city
-        let m: Vec2 = mouse_position().into();
+        let m = crate::ui::mouse();
         if input {
             let wheel = mouse_wheel().1;
             if wheel != 0.0 {

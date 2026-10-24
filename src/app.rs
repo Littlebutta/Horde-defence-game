@@ -9,9 +9,14 @@ use crate::osm::{self, OsmMsg};
 use crate::music;
 use crate::storage;
 use crate::render::{self, text, text_w, Fonts, Scene, ViewInfo, WorldLabels};
+use crate::ui::{self, alpha, mix, pal, rrect, rrect_lines, Flow, RectExt};
 use crate::update::{UpState, Updater};
 use crate::world::*;
 use macroquad::prelude::*;
+
+mod settings;
+mod widgets;
+use widgets::{R_CTRL, R_PANEL};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tool {
@@ -103,6 +108,22 @@ pub struct App {
     place_go: bool,
     /// headless tests start right away with the suggested HQ (`PH_PLACE=1` shows the choice)
     auto_place: bool,
+    /// the slider being dragged
+    drag: Option<u32>,
+    /// the settings dialog is open over the screen
+    settings_open: bool,
+    /// opening settings paused the game (it resumes when they close)
+    settings_paused: bool,
+    /// a dialog is open: controls under it don't react
+    blocked: bool,
+    show_fps: bool,
+    fullscreen: bool,
+    /// anti-aliasing: 0 = 4x MSAA, 1 = off, 2 = compatible (no render target, painter's order)
+    aa: u8,
+    /// the 3D view's resolution in percent of the window
+    render_pct: u32,
+    /// the graphics settings changed: rebuild the scene's way of drawing
+    regfx: bool,
 }
 
 /// Colours of the co-op players' cursors, host first.
@@ -166,36 +187,11 @@ fn to_screen(m: &Mat4, p: Vec3) -> Option<Vec2> {
     (n.z <= 1.0).then(|| vec2((n.x + 1.0) / 2.0 * screen_width(), (1.0 - n.y) / 2.0 * screen_height()))
 }
 
-struct Pal {
-    panel: Color,
-    panel2: Color,
-    text: Color,
-    dim: Color,
-    accent: Color,
-}
-fn pal(dark: bool) -> Pal {
-    if dark {
-        Pal {
-            panel: rgba(24, 27, 33, 0.94),
-            panel2: rgba(40, 45, 54, 0.98),
-            text: rgb(232, 234, 237),
-            dim: rgb(150, 156, 166),
-            accent: rgb(138, 180, 248),
-        }
-    } else {
-        Pal {
-            panel: rgba(255, 255, 255, 0.96),
-            panel2: rgba(241, 243, 244, 1.0),
-            text: rgb(32, 33, 36),
-            dim: rgb(95, 99, 104),
-            accent: rgb(26, 115, 232),
-        }
-    }
-}
-
 impl App {
     pub fn new(steam: Option<net::Steam>) -> App {
         let st = storage::load_settings();
+        ui::set_user_scale(st.ui_scale);
+        ui::set_wide(st.hud_wide);
         App {
             screen: Screen::Menu,
             fonts: render::load_fonts(),
@@ -245,6 +241,15 @@ impl App {
             place_at: None,
             place_go: false,
             auto_place: ["PH_SHOT", "PH_NETTEST"].iter().any(|k| std::env::var(k).is_ok()) && std::env::var("PH_PLACE").is_err(),
+            drag: None,
+            settings_open: std::env::var("PH_SETTINGS").is_ok(),
+            settings_paused: false,
+            blocked: false,
+            show_fps: st.fps,
+            fullscreen: st.fullscreen,
+            aa: st.aa,
+            render_pct: st.render,
+            regfx: false,
         }
     }
 
@@ -263,21 +268,35 @@ impl App {
         self.tip = None;
         self.net_frame();
         self.music.ambience(self.screen == Screen::Play);
+        if is_key_pressed(KeyCode::F11) {
+            self.set_fullscreen(!self.fullscreen);
+        }
+        if self.screen == Screen::Play {
+            // the game draws its 3D view in pixels and switches to points for the HUD itself
+            self.play(dt);
+            return;
+        }
+        ui::begin();
+        self.blocked = self.settings_open;
         match self.screen {
-            Screen::Menu => {
-                self.menu();
-                if let Some(t) = self.tip.clone() {
-                    self.tooltip(&t);
-                }
-            }
+            Screen::Menu => self.menu(),
             Screen::Loading => self.loading(),
-            Screen::Play => self.play(dt),
-            Screen::Hub => {
-                self.hub();
-                if let Some(t) = self.tip.clone() {
-                    self.tooltip(&t);
-                }
-            }
+            Screen::Hub => self.hub(),
+            Screen::Play => {}
+        }
+        self.overlays();
+        ui::end();
+    }
+
+    /// What goes over any screen, in points: the settings dialog and the tooltip.
+    fn overlays(&mut self) {
+        self.blocked = false;
+        if self.settings_open {
+            self.tip = None;
+            self.settings();
+        }
+        if let Some(t) = self.tip.clone() {
+            self.tooltip(&t);
         }
     }
 
@@ -398,54 +417,41 @@ impl App {
     /// The waiting room a client sees until the host starts.
     fn client_lobby(&mut self) {
         let p = pal(self.dark);
-        let (sw, sh) = (screen_width(), screen_height());
-        let r = Rect::new(sw / 2.0 - 300.0, sh / 2.0 - 140.0, 600.0, 280.0);
+        let r = ui::hud().centered(620.0, 300.0);
         self.panel(r);
         let s = self.sess.as_ref().unwrap();
         let title = format!("{}'s co-op game", s.host_name());
-        let line = if let Some(f) = s.receiving() {
-            format!("Receiving the map  {:.0}%", f * 100.0)
+        let (line, recv) = if let Some(f) = s.receiving() {
+            (format!("Receiving the map  {:.0}%", f * 100.0), Some(f))
         } else if s.host_busy {
-            "The host is in the middle of a game. You will join the next one.".to_string()
+            ("The host is in the middle of a game. You will join the next one.".to_string(), None)
         } else {
-            "Waiting for the host to start the game".to_string()
+            ("Waiting for the host to start the game".to_string(), None)
         };
         let names: Vec<String> = s.players.iter().map(|p| p.name.clone()).collect();
-        text(&self.fonts.head, &title, r.x + 28.0, r.y + 52.0, 26.0, p.text);
-        text(&self.fonts.mono, &line, r.x + 28.0, r.y + 92.0, 15.0, p.dim);
-        text(&self.fonts.mono, &format!("Players: {}", names.join(", ")), r.x + 28.0, r.y + 126.0, 14.0, p.text);
-        text(&self.fonts.mono, "The host picks the faction, city and difficulty. You all share one base.", r.x + 28.0, r.y + 156.0, 13.0, p.dim);
-        for k in 0..12 {
-            let a = self.clock * 4.0 + k as f32 * 0.52;
-            let c = vec2(r.x + r.w - 50.0, r.y + 44.0) + vec2(a.cos(), a.sin()) * 14.0;
-            draw_circle(c.x, c.y, 2.0, alpha(p.accent, k as f32 / 12.0));
+        let mut a = r.pad(30.0, 28.0);
+        let t = a.cut_top(34.0, 10.0);
+        text(&self.fonts.head, &title, t.x, t.y + 28.0, 28.0, p.text);
+        ui::spinner(vec2(t.right() - 16.0, t.y + 16.0), 14.0, self.clock, p.accent);
+        let l = a.cut_top(20.0, 8.0);
+        text(&self.fonts.mono, &line, l.x, l.y + 15.0, 14.0, p.dim);
+        if let Some(f) = recv {
+            self.progress(a.cut_top(6.0, 10.0), f, p.accent);
         }
-        if self.button(Rect::new(r.x + 28.0, r.y + r.h - 62.0, 140.0, 38.0), "Leave", true, false) {
+        let y = self.heading("Players", a.x, a.y + 8.0);
+        text(&self.fonts.head, &names.join(", "), a.x, y + 14.0, 16.0, p.text);
+        text(&self.fonts.mono, "The host picks the faction, city and difficulty. You all share one base.", a.x, y + 42.0, 13.0, p.dim);
+        let b = a.cut_bottom(40.0, 0.0);
+        if self.button(Rect::new(b.x, b.y, 140.0, b.h), "Leave", true, false) {
             self.leave_coop();
+        }
+        if self.button(Rect::new(b.x + 150.0, b.y, 140.0, b.h), "Settings", true, false) {
+            self.open_settings();
         }
     }
 
     // ------------------------------------------------------------------------------------- widgets
 
-    fn mouse(&self) -> Vec2 {
-        let (x, y) = mouse_position();
-        vec2(x, y)
-    }
-    fn hot(&self, r: Rect) -> bool {
-        r.contains(self.mouse())
-    }
-    fn panel(&mut self, r: Rect) {
-        let p = pal(self.dark);
-        draw_rectangle(
-            r.x + 1.0,
-            r.y + 2.0,
-            r.w,
-            r.h,
-            Color::new(0.0, 0.0, 0.0, 0.18),
-        );
-        draw_rectangle(r.x, r.y, r.w, r.h, p.panel);
-        self.ui_rects.push(r);
-    }
     fn set_music(&mut self, v: u32) {
         if self.music_vol > 0 {
             self.music_prev = self.music_vol;
@@ -453,18 +459,6 @@ impl App {
         self.music_vol = v;
         self.music.set_volume(v);
         self.save_settings();
-    }
-    /// The music volume button: each click steps the volume down, from off back up to full.
-    fn music_button(&mut self, r: Rect) {
-        let v = self.music_vol;
-        let label = if v == 0 { "Music off".to_string() } else { format!("Music {}%", v) };
-        if self.button(r, &label, true, false) {
-            let next = [75, 50, 25, 0].into_iter().find(|s| *s < v).unwrap_or(100);
-            self.set_music(next);
-        }
-        if self.hot(r) {
-            self.tip = Some("Click to change the music volume. M mutes it during a game.".into());
-        }
     }
     /// Plays the sound cues the sim raised, louder near the middle of the view and panned to
     /// the side they happened on.
@@ -495,50 +489,9 @@ impl App {
             self.music.play(music::Play { snd, gain, pan, speed });
         }
     }
-    /// The effects volume button, stepping like the music one.
-    fn sfx_button(&mut self, r: Rect) {
-        let v = self.sfx_vol;
-        let label = if v == 0 { "Effects off".to_string() } else { format!("Effects {}%", v) };
-        if self.button(r, &label, true, false) {
-            self.sfx_vol = [75, 50, 25, 0].into_iter().find(|s| *s < v).unwrap_or(100);
-            self.music.set_sfx_volume(self.sfx_vol);
-            self.save_settings();
-        }
-        if self.hot(r) {
-            self.tip = Some("Click to change the volume of weapons, explosions and the battle ambience.".into());
-        }
-    }
-    /// A button; returns true when clicked.
-    fn button(&mut self, r: Rect, label: &str, enabled: bool, active: bool) -> bool {
-        let p = pal(self.dark);
-        let hot = self.hot(r);
-        let bg = if active {
-            p.accent
-        } else if hot && enabled {
-            mix(p.panel2, p.accent, 0.18)
-        } else {
-            p.panel2
-        };
-        draw_rectangle(r.x, r.y, r.w, r.h, bg);
-        let fc = if active {
-            WHITE
-        } else if enabled {
-            p.text
-        } else {
-            p.dim
-        };
-        let size = 16.0;
-        let tw = text_w(&self.fonts.head, label, size);
-        text(
-            &self.fonts.head,
-            label,
-            r.x + (r.w - tw) / 2.0,
-            r.y + r.h / 2.0 + 5.5,
-            size,
-            fc,
-        );
-        self.ui_rects.push(r);
-        hot && enabled && is_mouse_button_pressed(MouseButton::Left)
+    fn set_sfx(&mut self, v: u32) {
+        self.sfx_vol = v;
+        self.music.set_sfx_volume(v);
     }
 
     // ------------------------------------------------------------------------------------- menu
@@ -547,7 +500,7 @@ impl App {
         let th = self.theme();
         clear_background(th.bg);
         let p = pal(self.dark);
-        let (sw, sh) = (screen_width(), screen_height());
+        let s = ui::screen();
         // a faint street grid behind the menu
         let gc = if self.dark {
             rgba(255, 255, 255, 0.035)
@@ -555,13 +508,13 @@ impl App {
             rgba(255, 255, 255, 0.06)
         };
         let mut x = (self.clock * 6.0) % 60.0 - 60.0;
-        while x < sw {
-            draw_rectangle(x, 0.0, 10.0, sh, gc);
+        while x < s.w {
+            draw_rectangle(x, 0.0, 10.0, s.h, gc);
             x += 60.0;
         }
         let mut y = 0.0;
-        while y < sh {
-            draw_rectangle(0.0, y, sw, 10.0, gc);
+        while y < s.h {
+            draw_rectangle(0.0, y, s.w, 10.0, gc);
             y += 72.0;
         }
         if self.client() {
@@ -569,125 +522,79 @@ impl App {
             self.client_lobby();
             return;
         }
-        let w = 760.0f32.min(sw - 32.0);
-        let h = 650.0f32.min(sh - 32.0);
-        let r = Rect::new((sw - w) / 2.0, (sh - h) / 2.0, w, h);
+        // The menu is a column on the left of the HUD area, so the rest of the screen shows what's
+        // behind it. A window too narrow for that gets it centred.
+        let area = ui::hud();
+        let h = (area.h - 64.0).min(940.0);
+        let w = 548.0;
+        let r = if area.w < 1100.0 || area.w < area.h { area.centered(w, h) } else { Rect::new(area.x + 48.0, area.y + (area.h - h) / 2.0, w, h) };
         self.panel(r);
-        let (x0, mut y) = (r.x + 28.0, r.y + 52.0);
-        text(&self.fonts.head, "PIXEL HORDE", x0, y, 40.0, p.text);
-        y += 26.0;
-        text(
-            &self.fonts.mono,
-            "Hold the airport. Every pixel is an enemy.",
-            x0,
-            y,
-            15.0,
-            p.dim,
-        );
-        y += 34.0;
-        text(&self.fonts.head, "Faction", x0, y, 18.0, p.text);
-        y += 12.0;
-        let cw = (w - 56.0 - 24.0) / 3.0;
-        for (i, f) in FACTIONS.iter().enumerate() {
-            let cr = Rect::new(x0 + i as f32 * (cw + 12.0), y, cw, 104.0);
-            let active = self.fac == i;
-            let hot = self.hot(cr);
-            draw_rectangle(
-                cr.x,
-                cr.y,
-                cr.w,
-                cr.h,
-                if active {
-                    mix(p.panel2, p.accent, 0.22)
-                } else {
-                    p.panel2
-                },
-            );
-            if active {
-                draw_rectangle_lines(cr.x, cr.y, cr.w, cr.h, 2.0, p.accent);
+        // a strip in the three faction colours along the top
+        for (i, c) in Rect::new(r.x + R_PANEL, r.y, r.w - 2.0 * R_PANEL, 3.0).cols(3, 0.0).into_iter().enumerate() {
+            let f = FACTIONS[i].col;
+            draw_rectangle(c.x, c.y, c.w, c.h, Color::from_rgba(f[0], f[1], f[2], 255));
+        }
+        let mut a = r.pad(30.0, 26.0);
+        let t = a.cut_top(48.0, 2.0);
+        text(&self.fonts.head, "PIXEL HORDE", t.x, t.y + 40.0, 46.0, p.text);
+        let t = a.cut_top(18.0, 18.0);
+        text(&self.fonts.mono, "Hold the city. Every pixel is an enemy.", t.x, t.y + 13.0, 14.0, p.dim);
+
+        // pinned to the bottom: settings row, Start, co-op
+        let foot = a.cut_bottom(36.0, 14.0);
+        let start = a.cut_bottom(56.0, 20.0);
+        let coop = a.cut_bottom(38.0, 16.0);
+
+        // game mode
+        let y = self.heading("Game mode", a.x, a.y);
+        a.cut_top(y - a.y, 0.0);
+        let mode = if self.camp_mode { 2 } else if self.real { 1 } else { 0 };
+        match self.segmented(a.cut_top(40.0, 12.0), &["Random city", "Real city", "World campaign"], mode) {
+            Some(0) => {
+                self.real = false;
+                self.camp_mode = false;
             }
-            let c = Color::from_rgba(f.col[0], f.col[1], f.col[2], 255);
-            for k in 0..14 {
-                let q = vec2(
-                    cr.x + 14.0 + (k * 37 % 23) as f32,
-                    cr.y + 14.0 + (k * 13 % 11) as f32,
-                );
-                draw_rectangle(q.x, q.y, 3.0, 3.0, c);
+            Some(1) => {
+                self.real = true;
+                self.camp_mode = false;
             }
-            text(
-                &self.fonts.head,
-                f.name,
-                cr.x + 46.0,
-                cr.y + 26.0,
-                18.0,
-                p.text,
-            );
-            wrap(
-                &self.fonts.mono,
-                f.blurb,
-                cr.x + 12.0,
-                cr.y + 50.0,
-                cr.w - 22.0,
-                12.5,
-                p.dim,
-            );
-            if hot && is_mouse_button_pressed(MouseButton::Left) {
-                self.fac = i;
-            }
-            self.ui_rects.push(cr);
+            Some(2) => self.camp_mode = true,
+            _ => {}
         }
-        y += 128.0;
-        text(&self.fonts.head, "Map", x0, y, 18.0, p.text);
-        y += 12.0;
-        if self.button(
-            Rect::new(x0, y, 170.0, 36.0),
-            "Random city",
-            true,
-            !self.real && !self.camp_mode,
-        ) {
-            self.real = false;
-            self.camp_mode = false;
-        }
-        if self.button(
-            Rect::new(x0 + 180.0, y, 170.0, 36.0),
-            "Real city",
-            true,
-            self.real && !self.camp_mode,
-        ) {
-            self.real = true;
-            self.camp_mode = false;
-        }
-        if self.button(
-            Rect::new(x0 + 360.0, y, 190.0, 36.0),
-            "World campaign",
-            true,
-            self.camp_mode,
-        ) {
-            self.camp_mode = true;
-        }
-        y += 48.0;
         let saved_camp = if self.camp_mode { campaign::load() } else { None };
+        let detail_h = if self.camp_mode {
+            if saved_camp.is_some() { 150.0 } else { 104.0 }
+        } else if self.real {
+            if self.saved.is_empty() { 74.0 } else { 136.0 }
+        } else {
+            40.0
+        };
+        let mut d = a.cut_top(detail_h, 18.0);
         if self.camp_mode {
             while get_char_pressed().is_some() {}
-            text(&self.fonts.mono, "Start in New York, then pick cities on the globe. Near-fallen cities have bigger hordes.", x0, y + 6.0, 13.0, p.dim);
-            text(&self.fonts.mono, "Civilians flown out of held cities buy research and troops. Survivors march on.", x0, y + 24.0, 13.0, p.dim);
-            text(&self.fonts.mono, "A lost city pays nothing. Lose three and the world's governments fire you.", x0, y + 42.0, 13.0, p.dim);
+            let blurb = "Start in New York, then pick cities on the globe. Near-fallen cities have bigger hordes. Civilians flown out of held cities buy research and troops; survivors march on. A lost city pays nothing. Lose three and the world's governments fire you.";
+            let lines = wrap_lines(&self.fonts.mono, blurb, d.w, 13.0);
+            for (i, l) in lines.iter().enumerate() {
+                text(&self.fonts.mono, l, d.x, d.y + 13.0 + i as f32 * 18.0, 13.0, p.dim);
+            }
+            d.cut_top(lines.len() as f32 * 18.0 + 8.0, 0.0);
             let ready = self.pack.ready();
-            let maps = match self.pack.get() {
-                campaign::PackState::Fetching(i) if ready < CITIES.len() => format!("City maps: {}/{} ready, getting {}…", ready, CITIES.len(), CITIES[i].name),
-                campaign::PackState::Failed(_) if ready < CITIES.len() => format!("City maps: {}/{} ready. The rest download when you reach them.", ready, CITIES.len()),
-                _ => format!("City maps: all {} ready", CITIES.len()),
+            let (maps, f) = match self.pack.get() {
+                campaign::PackState::Fetching(i) if ready < CITIES.len() => (format!("City maps {}/{} · getting {}…", ready, CITIES.len(), CITIES[i].name), ready as f32 / CITIES.len() as f32),
+                campaign::PackState::Failed(_) if ready < CITIES.len() => (format!("City maps {}/{} · the rest download when you reach them", ready, CITIES.len()), ready as f32 / CITIES.len() as f32),
+                _ => (format!("City maps: all {} ready", CITIES.len()), 1.0),
             };
-            text(&self.fonts.mono, &maps, x0, y + 66.0, 13.0, p.text);
-            y += 76.0;
+            let m = d.cut_top(30.0, 6.0);
+            text(&self.fonts.mono, &maps, m.x, m.y + 13.0, 12.5, p.text);
+            self.progress(Rect::new(m.x, m.y + 21.0, m.w, 4.0), f, if f >= 1.0 { p.good } else { p.accent });
             if let Some(c) = &saved_camp {
                 let line = if c.fired() {
-                    format!("Saved campaign: fired after {} lost cities ({})", c.lost, FACTIONS[c.fac].name)
+                    format!("fired after {} lost cities ({})", c.lost, FACTIONS[c.fac].name)
                 } else if c.finished() {
-                    format!("Saved campaign: over, {} cities held ({})", c.held(), FACTIONS[c.fac].name)
+                    format!("over, {} cities held ({})", c.held(), FACTIONS[c.fac].name)
                 } else {
                     format!(
-                        "Saved campaign: day {} · next {} · {} · {} · {} civilians to spend",
+                        "day {} · next {} · {} · {} · {} civilians to spend",
                         c.fought as f32 * campaign::DAYS_PER_CITY,
                         c.city().name,
                         FACTIONS[c.fac].name,
@@ -695,8 +602,13 @@ impl App {
                         c.points
                     )
                 };
-                text(&self.fonts.mono, &line, x0, y + 22.0, 13.0, p.accent);
-                let nr = Rect::new(x0 + w - 56.0 - 150.0, y + 2.0, 150.0, 30.0);
+                let sr = d.cut_top(42.0, 0.0);
+                rrect(sr, R_CTRL, alpha(p.accent, 0.1));
+                let mut sr2 = sr.pad(12.0, 6.0);
+                let nr = sr2.cut_right(132.0, 10.0);
+                text(&self.fonts.mono, "SAVED CAMPAIGN", sr2.x, sr2.y + 11.0, 10.5, p.accent);
+                let line = fit(&self.fonts.mono, &line, sr2.w, 12.5);
+                text(&self.fonts.mono, &line, sr2.x, sr2.y + 27.0, 12.5, p.text);
                 if self.button(nr, "New campaign", true, false) {
                     self.open_campaign(Some(Campaign::new(self.fac, self.diff)));
                     return;
@@ -704,30 +616,15 @@ impl App {
                 if self.hot(nr) {
                     self.tip = Some("Starts over in New York with the faction and difficulty picked here. The saved campaign is lost.".into());
                 }
-                y += 40.0;
             }
         } else if self.real {
-            let fr = Rect::new(x0, y, w - 56.0, 38.0);
-            draw_rectangle(fr.x, fr.y, fr.w, fr.h, p.panel2);
-            draw_rectangle_lines(fr.x, fr.y, fr.w, fr.h, 1.5, p.accent);
-            let show = if self.city.is_empty() {
-                "Type a city, e.g. Rotterdam or Denver, CO"
-            } else {
-                &self.city
-            };
-            let caret = if (self.clock * 2.0) as i32 % 2 == 0 && !self.city.is_empty() {
-                "|"
-            } else {
-                ""
-            };
-            text(
-                &self.fonts.mono,
-                &format!("{}{}", show, caret),
-                fr.x + 12.0,
-                fr.y + 25.0,
-                16.0,
-                if self.city.is_empty() { p.dim } else { p.text },
-            );
+            let fr = d.cut_top(40.0, 8.0);
+            rrect(fr, R_CTRL, p.panel2);
+            rrect_lines(fr, R_CTRL, 1.5, alpha(p.accent, 0.8));
+            let show = if self.city.is_empty() { "Type a city, e.g. Rotterdam or Denver, CO" } else { &self.city };
+            let caret = if (self.clock * 2.0) as i32 % 2 == 0 && !self.city.is_empty() { "|" } else { "" };
+            text(&self.fonts.mono, &format!("{}{}", show, caret), fr.x + 14.0, fr.y + 26.0, 16.0, if self.city.is_empty() { p.dim } else { p.text });
+            self.ui_rects.push(fr);
             while let Some(ch) = get_char_pressed() {
                 if !ch.is_control() && self.city.len() < 60 {
                     self.city.push(ch);
@@ -736,43 +633,40 @@ impl App {
             if is_key_pressed(KeyCode::Backspace) {
                 self.city.pop();
             }
-            y += 50.0;
-            text(&self.fonts.mono, "Streets and buildings come from OpenStreetMap. Your HQ goes at the nearest airport.", x0, y, 13.0, p.dim);
-            y += 18.0;
+            let n = d.cut_top(18.0, 10.0);
+            text(&self.fonts.mono, "Streets and buildings come from OpenStreetMap. Your HQ goes at the nearest airport.", n.x, n.y + 12.0, 12.0, p.dim);
             // cities downloaded before: one click to play again, no download
             if !self.saved.is_empty() {
-                y += 6.0;
-                text(&self.fonts.mono, "Played before:", x0, y + 16.0, 13.0, p.dim);
-                let mut x = x0 + 112.0;
+                let y = self.heading("Played before", d.x, d.y);
+                let mut flow = Flow::new(Rect::new(d.x, y, d.w, d.bottom() - y), 6.0);
                 let mut pick = None;
                 let mut del = None;
-                for (i, m) in self.saved.iter().take(8).enumerate() {
-                    let label = m.query.clone();
-                    let bw = text_w(&self.fonts.head, &label, 16.0) + 24.0;
-                    if x + bw + 26.0 > x0 + w - 56.0 {
-                        break;
+                for (i, m) in self.saved.iter().take(12).enumerate() {
+                    let bw = text_w(&self.fonts.head, &m.query, 14.0) + 22.0;
+                    let Some(cr) = flow.next(bw + 24.0, 26.0) else { break };
+                    let r = Rect::new(cr.x, cr.y, bw, cr.h);
+                    let rx = Rect::new(cr.x + bw, cr.y, 24.0, cr.h);
+                    let (hot, hx) = (self.hot(r), self.hot(rx));
+                    rrect(cr, 13.0, if hot { mix(p.panel2, p.text, 0.1) } else { p.panel2 });
+                    if hx {
+                        rrect(rx, 13.0, p.bad);
                     }
-                    let r = Rect::new(x, y, bw, 26.0);
-                    let rx = Rect::new(x + bw, y, 22.0, 26.0);
-                    let hot = self.hot(r);
-                    draw_rectangle(r.x, r.y, r.w, r.h, if hot { mix(p.panel2, p.accent, 0.2) } else { p.panel2 });
-                    text(&self.fonts.head, &label, r.x + 12.0, r.y + 18.0, 15.0, p.text);
-                    let hx = self.hot(rx);
-                    draw_rectangle(rx.x, rx.y, rx.w, rx.h, if hx { rgb(201, 42, 42) } else { p.panel2 });
-                    text(&self.fonts.mono, "x", rx.x + 7.0, rx.y + 17.0, 13.0, if hx { WHITE } else { p.dim });
-                    self.ui_rects.push(r);
-                    self.ui_rects.push(rx);
+                    text(&self.fonts.head, &m.query, r.x + 12.0, r.y + 18.0, 14.0, p.text);
+                    text(&self.fonts.mono, "×", rx.x + 7.0, rx.y + 18.0, 14.0, if hx { WHITE } else { p.dim });
+                    self.ui_rects.push(cr);
                     if hot {
                         self.tip = Some(format!("{}: play again without downloading", m.name));
                     }
-                    if is_mouse_button_pressed(MouseButton::Left) {
+                    if hx {
+                        self.tip = Some("Delete this downloaded city".into());
+                    }
+                    if is_mouse_button_pressed(MouseButton::Left) && !self.blocked {
                         if hot {
                             pick = Some(i);
                         } else if hx {
                             del = Some(i);
                         }
                     }
-                    x += bw + 30.0;
                 }
                 if let Some(i) = del {
                     storage::delete_map(&self.saved[i].path);
@@ -782,51 +676,71 @@ impl App {
                     self.start();
                     return;
                 }
-                y += 34.0;
             }
         } else {
             while get_char_pressed().is_some() {}
-            text(&self.fonts.mono, "A new random city every game: river, airport, avenues and downtown all move around.", x0, y + 6.0, 13.0, p.dim);
-            y += 24.0;
+            wrap(&self.fonts.mono, "A new random city every game: river, airport, avenues and downtown all move around.", d.x, d.y + 13.0, d.w, 13.0, p.dim);
         }
-        y += 14.0;
-        text(&self.fonts.head, "Difficulty", x0, y, 18.0, p.text);
-        y += 12.0;
-        for (i, (n, _)) in DIFFS.iter().enumerate() {
-            if self.button(
-                Rect::new(x0 + i as f32 * 110.0, y, 100.0, 34.0),
-                n,
-                true,
-                self.diff == i,
-            ) {
-                self.diff = i;
+
+        // faction
+        let y = self.heading("Faction", a.x, a.y);
+        a.cut_top(y - a.y, 0.0);
+        let rows = a.cut_top(3.0 * 60.0 + 2.0 * 8.0, 18.0).rows(3, 8.0);
+        for (i, f) in FACTIONS.iter().enumerate() {
+            let cr = rows[i];
+            let active = self.fac == i;
+            let hot = self.hot(cr);
+            let c = Color::from_rgba(f.col[0], f.col[1], f.col[2], 255);
+            rrect(cr, R_CTRL, if active { mix(p.panel2, c, 0.16) } else if hot { mix(p.panel2, p.text, 0.06) } else { p.panel2 });
+            rrect_lines(cr, R_CTRL, if active { 2.0 } else { 1.0 }, if active { c } else { p.line });
+            // a little swarm of the faction's pixels
+            for k in 0..16 {
+                let q = vec2(cr.x + 14.0 + (k * 37 % 27) as f32, cr.y + 16.0 + (k * 13 % 29) as f32);
+                draw_rectangle(q.x, q.y, 3.0, 3.0, c);
             }
+            text(&self.fonts.head, f.name, cr.x + 56.0, cr.y + 22.0, 17.0, p.text);
+            let lines = wrap_lines(&self.fonts.mono, f.blurb, cr.w - 70.0, 11.5);
+            for (k, l) in lines.iter().take(2).enumerate() {
+                text(&self.fonts.mono, l, cr.x + 56.0, cr.y + 39.0 + k as f32 * 14.0, 11.5, p.dim);
+            }
+            if hot && !self.blocked && is_mouse_button_pressed(MouseButton::Left) {
+                self.fac = i;
+            }
+            self.ui_rects.push(cr);
         }
-        let by = r.y + r.h - 64.0;
+
+        // difficulty
+        let y = self.heading("Difficulty", a.x, a.y);
+        a.cut_top(y - a.y, 0.0);
+        let names: Vec<&str> = DIFFS.iter().map(|d| d.0).collect();
+        if let Some(i) = self.segmented(a.cut_top(38.0, 0.0), &names, self.diff) {
+            self.diff = i;
+        }
+
         // co-op with Steam friends
-        let cy = by - 50.0;
         if let Some(s) = &self.sess {
             let names: Vec<String> = s.players.iter().map(|p| p.name.clone()).collect();
             let line = format!("Co-op ({}/4): {}", names.len(), names.join(", "));
-            if self.button(Rect::new(x0, cy, 150.0, 34.0), "Invite friends", true, true) {
+            let mut c = coop;
+            if self.button(c.cut_left(150.0, 8.0), "Invite friends", true, true) {
                 if let Some(s) = &self.sess {
                     s.invite();
                 }
             }
-            if self.button(Rect::new(x0 + 160.0, cy, 110.0, 34.0), "Leave co-op", true, false) {
+            if self.button(c.cut_left(120.0, 12.0), "Leave co-op", true, false) {
                 self.leave_coop();
             }
-            text(&self.fonts.mono, &line, x0 + 284.0, cy + 22.0, 13.0, p.text);
+            let line = fit(&self.fonts.mono, &line, c.w, 13.0);
+            text(&self.fonts.mono, &line, c.x, c.y + 24.0, 13.0, p.text);
         } else {
             let have = self.steam.is_some();
-            let br = Rect::new(x0, cy, 250.0, 34.0);
-            if self.button(br, "Play co-op with Steam friends", have, false) {
+            if self.button(coop, "Play co-op with Steam friends", have, false) {
                 if let Some(st) = &self.steam {
                     st.create();
                     self.status = "Opening a Steam lobby".into();
                 }
             }
-            if self.hot(br) {
+            if self.hot(coop) {
                 self.tip = Some(if have {
                     "Opens a lobby and the Steam invite window. Friends who accept join your base; you pick the map and press Start.".into()
                 } else {
@@ -834,54 +748,33 @@ impl App {
                 });
             }
         }
+        if !self.status.is_empty() {
+            let line = fit(&self.fonts.mono, &self.status, start.w, 13.0);
+            text(&self.fonts.mono, &line, start.x, start.y - 6.0, 13.0, p.bad);
+        }
         let can = if self.camp_mode { self.sess.is_none() } else { !self.real || self.city.trim().len() > 1 };
-        let label = if self.camp_mode && saved_camp.is_some() { "Continue" } else { "Start" };
-        let sr = Rect::new(r.x + r.w - 228.0, by, 200.0, 44.0);
-        if self.button(sr, label, can, false) || (can && is_key_pressed(KeyCode::Enter)) {
+        let label = if self.camp_mode && saved_camp.is_some() { "Continue campaign" } else { "Start" };
+        if self.button_primary(start, label, can) || (can && !self.blocked && is_key_pressed(KeyCode::Enter)) {
             self.start();
         }
-        if self.camp_mode && self.sess.is_some() && self.hot(sr) {
+        if self.camp_mode && self.sess.is_some() && self.hot(start) {
             self.tip = Some("The campaign is single player for now. Leave co-op to play it.".into());
         }
-        if self.button(
-            Rect::new(x0, by + 6.0, 130.0, 32.0),
-            if self.dark { "Light map" } else { "Dark map" },
-            true,
-            false,
-        ) {
-            self.dark = !self.dark;
+        let fc = foot.cols(2, 10.0);
+        if self.button(fc[0], "Settings", true, false) {
+            self.open_settings();
         }
-        self.music_button(Rect::new(x0 + 138.0, by + 6.0, 120.0, 32.0));
-        self.sfx_button(Rect::new(x0 + 264.0, by + 6.0, 128.0, 32.0));
-        // updater line
+        if self.button(fc[1], if self.dark { "Light map" } else { "Dark map" }, true, false) {
+            self.dark = !self.dark;
+            self.save_settings();
+        }
+        // updater line, under the panel
         let st = self.updater.get();
-        text(
-            &self.fonts.mono,
-            &self.updater.label(),
-            r.x + 12.0,
-            r.y + r.h + 22.0,
-            13.0,
-            p.dim,
-        );
+        text(&self.fonts.mono, &self.updater.label(), r.x + 6.0, r.bottom() + 22.0, 12.5, p.dim);
         if let UpState::Ready(_) = st {
-            if self.button(
-                Rect::new(r.x + r.w - 160.0, r.y + r.h + 6.0, 160.0, 28.0),
-                "Restart now",
-                true,
-                true,
-            ) {
+            if self.button_primary(Rect::new(r.right() - 150.0, r.bottom() + 6.0, 150.0, 28.0), "Restart now", true) {
                 Updater::restart();
             }
-        }
-        if !self.status.is_empty() {
-            text(
-                &self.fonts.mono,
-                &self.status,
-                x0 + 404.0,
-                by + 28.0,
-                13.0,
-                rgb(250, 82, 82),
-            );
         }
     }
 
@@ -921,7 +814,7 @@ impl App {
     /// Between cities: the globe to pick the next city on, unlocks, recruits and the way in.
     fn hub(&mut self) {
         let p = pal(self.dark);
-        let (sw, sh) = (screen_width(), screen_height());
+        let (sw, sh) = (ui::sw(), ui::sh());
         let Some(mut c) = self.camp.clone() else {
             self.screen = Screen::Menu;
             return;
@@ -1233,7 +1126,22 @@ impl App {
     }
 
     fn save_settings(&self) {
-        storage::save_settings(&storage::Settings { dark: self.dark, fac: self.fac, diff: self.diff, real: self.real, city: self.city.clone(), campaign: self.camp_mode, music: self.music_vol, sfx: self.sfx_vol });
+        storage::save_settings(&storage::Settings {
+            dark: self.dark,
+            fac: self.fac,
+            diff: self.diff,
+            real: self.real,
+            city: self.city.clone(),
+            campaign: self.camp_mode,
+            music: self.music_vol,
+            sfx: self.sfx_vol,
+            ui_scale: ui::user_scale(),
+            hud_wide: ui::wide(),
+            fullscreen: self.fullscreen,
+            fps: self.show_fps,
+            aa: self.aa,
+            render: self.render_pct,
+        });
     }
 
     fn start(&mut self) {
@@ -1292,7 +1200,8 @@ impl App {
             self.cam = Orbit { t: g.world.hq, dist: 0.0, yaw: 0.0, pitch: 0.95 };
             self.cam.set_scale((screen_height() / 260.0).max(1.5));
         }
-        let painter = *self.depth.get_or_insert_with(pick_depth) == render::DepthMode::Painter;
+        let aa = self.aa;
+        let painter = *self.depth.get_or_insert_with(|| pick_depth(aa)) == render::DepthMode::Painter;
         self.scene = Some(Scene::new(&g, self.theme(), painter));
         self.game = Some(g);
         self.tool = Tool::None;
@@ -1350,30 +1259,43 @@ impl App {
     /// The banner while choosing the HQ spot. Returns nothing; the clicks set `place_go`.
     fn place_hud(&mut self) {
         let p = pal(self.dark);
-        let sw = screen_width();
-        let r = Rect::new(sw / 2.0 - 360.0, 16.0, 720.0, 108.0);
+        let area = ui::hud();
+        let r = Rect::new(area.x + (area.w - 760.0) / 2.0, 14.0, 760.0, 112.0);
         self.panel(r);
-        text(&self.fonts.head, "Choose your HQ location", r.x + 22.0, r.y + 36.0, 22.0, p.text);
-        let line = match &self.sess {
-            Some(_) => "Click the map to move the HQ. Your co-op team starts there too.",
-            None => "Click the map to move the HQ. The horde comes once you start.",
-        };
-        text(&self.fonts.mono, line, r.x + 22.0, r.y + 64.0, 13.0, p.dim);
-        text(&self.fonts.mono, "Drag to look around, wheel to zoom, F for the whole map.", r.x + 22.0, r.y + 86.0, 13.0, p.dim);
-        if self.button(Rect::new(r.x + r.w - 160.0, r.y + 60.0, 140.0, 34.0), "Start here", true, true) || is_key_pressed(KeyCode::Enter) {
-            self.place_go = true;
-        }
-        if self.button(Rect::new(r.x + r.w - 160.0, r.y + 16.0, 140.0, 34.0), "Back", true, false) {
+        let mut a = r.pad(24.0, 18.0);
+        let mut b = a.cut_right(150.0, 20.0);
+        if self.button(b.cut_top(34.0, 8.0), "Back", true, false) {
             self.placing = None;
             self.screen = if self.in_camp { Screen::Hub } else { Screen::Menu };
             self.in_camp = false;
         }
+        if self.button_primary(b.cut_top(36.0, 0.0), "Start here", true) || (!self.blocked && is_key_pressed(KeyCode::Enter)) {
+            self.place_go = true;
+        }
+        text(&self.fonts.head, "Choose your HQ location", a.x, a.y + 24.0, 24.0, p.text);
+        let line = match &self.sess {
+            Some(_) => "Click the map to move the HQ. Your co-op team starts there too.",
+            None => "Click the map to move the HQ. The horde comes once you start.",
+        };
+        text(&self.fonts.mono, line, a.x, a.y + 50.0, 13.0, p.dim);
+        text(&self.fonts.mono, "Drag to look around, wheel to zoom, F for the whole map.", a.x, a.y + 70.0, 13.0, p.dim);
         self.msg.1 -= get_frame_time();
         if self.msg.1 > 0.0 && !self.msg.0.is_empty() {
-            let tw = text_w(&self.fonts.head, &self.msg.0, 16.0);
-            draw_rectangle((sw - tw) / 2.0 - 14.0, r.y + r.h + 10.0, tw + 28.0, 30.0, Color::new(0.0, 0.0, 0.0, 0.7));
-            text(&self.fonts.head, &self.msg.0, (sw - tw) / 2.0, r.y + r.h + 30.0, 16.0, rgb(255, 170, 170));
+            let m = self.msg.0.clone();
+            self.toast(r.bottom() + 12.0, &m, p.bad, 1.0);
         }
+    }
+
+    /// A message in a pill, centred in the HUD area with its top at `y`.
+    fn toast(&self, y: f32, m: &str, c: Color, a: f32) {
+        let p = pal(self.dark);
+        let area = ui::hud();
+        let tw = text_w(&self.fonts.head, m, 17.0);
+        let r = Rect::new(area.x + (area.w - tw) / 2.0 - 20.0, y, tw + 40.0, 36.0);
+        ui::shadow(r, 18.0, alpha(p.shadow, p.shadow.a * a));
+        rrect(r, 18.0, alpha(Color::new(0.06, 0.07, 0.09, 1.0), 0.86 * a));
+        draw_circle(r.x + 16.0, r.y + 18.0, 3.5, alpha(c, a));
+        text(&self.fonts.head, m, r.x + 26.0, r.y + 24.0, 17.0, Color::new(1.0, 1.0, 1.0, a));
     }
 
     fn loading(&mut self) {
@@ -1420,40 +1342,20 @@ impl App {
                 }
             }
         }
-        let (sw, sh) = (screen_width(), screen_height());
-        let r = Rect::new(sw / 2.0 - 260.0, sh / 2.0 - 80.0, 520.0, 160.0);
+        let r = ui::hud().centered(560.0, 176.0);
         self.panel(r);
         let what = match (&self.camp, self.in_camp) {
             (Some(c), true) => c.city().name.to_string(),
             _ => self.city.trim().to_string(),
         };
-        text(
-            &self.fonts.head,
-            &format!("Loading {}", what),
-            r.x + 24.0,
-            r.y + 44.0,
-            22.0,
-            p.text,
-        );
-        text(
-            &self.fonts.mono,
-            &self.status,
-            r.x + 24.0,
-            r.y + 78.0,
-            14.0,
-            p.dim,
-        );
-        for k in 0..12 {
-            let a = self.clock * 4.0 + k as f32 * 0.52;
-            let c = vec2(r.x + r.w - 50.0, r.y + 42.0) + vec2(a.cos(), a.sin()) * 14.0;
-            draw_circle(c.x, c.y, 2.0, alpha(p.accent, k as f32 / 12.0));
-        }
-        if self.button(
-            Rect::new(r.x + 24.0, r.y + 104.0, 120.0, 34.0),
-            "Cancel",
-            true,
-            false,
-        ) {
+        let mut a = r.pad(28.0, 24.0);
+        let t = a.cut_top(30.0, 10.0);
+        text(&self.fonts.head, &format!("Loading {}", what), t.x, t.y + 24.0, 24.0, p.text);
+        ui::spinner(vec2(t.right() - 16.0, t.y + 14.0), 14.0, self.clock, p.accent);
+        let l = a.cut_top(20.0, 0.0);
+        let st = fit(&self.fonts.mono, &self.status, l.w, 14.0);
+        text(&self.fonts.mono, &st, l.x, l.y + 14.0, 14.0, p.dim);
+        if self.button(Rect::new(a.x, a.bottom() - 38.0, 130.0, 38.0), "Cancel", true, false) {
             self.loader = None;
             self.wait_pack = false;
             self.status.clear();
@@ -1517,6 +1419,11 @@ impl App {
         };
         let mut sc = self.scene.take().unwrap();
         let th = self.theme();
+        if std::mem::take(&mut self.regfx) {
+            let aa = self.aa;
+            let painter = *self.depth.get_or_insert_with(|| pick_depth(aa)) == render::DepthMode::Painter;
+            sc = Scene::new(&g, th, painter);
+        }
         if sc.dark != self.dark {
             sc.retheme(&g, th);
         }
@@ -1597,13 +1504,16 @@ impl App {
 
         // camera
         let (sw, sh) = (screen_width(), screen_height());
-        let (rw, rh) = (sw.max(1.0) as u32, sh.max(1.0) as u32);
-        let depth = *self.depth.get_or_insert_with(pick_depth);
+        // the 3D view can be drawn at a lower resolution than the window (Settings > Graphics)
+        let k = self.render_pct as f32 / 100.0;
+        let (rw, rh) = ((sw * k).max(1.0) as u32, (sh * k).max(1.0) as u32);
+        let aa = self.aa;
+        let depth = *self.depth.get_or_insert_with(|| pick_depth(aa));
         match depth {
             render::DepthMode::Target(sample_count) => {
                 if self.rt.as_ref().map(|r| (r.texture.width() as u32, r.texture.height() as u32)) != Some((rw, rh)) {
                     let rt = render_target_ex(rw, rh, RenderTargetParams { sample_count, depth: true });
-                    rt.texture.set_filter(FilterMode::Nearest);
+                    rt.texture.set_filter(if self.render_pct < 100 { FilterMode::Linear } else { FilterMode::Nearest });
                     self.rt = Some(rt);
                 }
             }
@@ -1633,7 +1543,7 @@ impl App {
             },
             &mut labels,
         );
-        let mw = self.pick(&g, self.mouse());
+        let mw = self.pick(&g, self.px_mouse());
         // the other co-op players' cursors
         if let (Some(s), None) = (self.sess.as_mut(), &self.placing) {
             s.cursor(mw, dt);
@@ -1668,26 +1578,23 @@ impl App {
             text(&self.fonts.head, s, q.x - tw / 2.0, q.y, *size, *c);
         }
 
+        // the HUD is in points
+        ui::begin();
+        self.blocked = self.settings_open;
         if self.placing.is_some() {
             self.place_hud();
         } else {
             self.hud(&mut g);
         }
-        if let Some((s, c)) = cursor_label {
+        if let (Some((s, c)), false) = (cursor_label, self.settings_open || self.over_ui()) {
             let m = self.mouse();
             let tw = text_w(&self.fonts.mono, &s, 14.0);
-            draw_rectangle(
-                m.x + 16.0,
-                m.y + 14.0,
-                tw + 14.0,
-                24.0,
-                Color::new(0.0, 0.0, 0.0, 0.75),
-            );
-            text(&self.fonts.mono, &s, m.x + 23.0, m.y + 31.0, 14.0, c);
+            let r = Rect::new(m.x + 18.0, m.y + 16.0, tw + 20.0, 26.0);
+            rrect(r, 6.0, Color::new(0.04, 0.05, 0.07, 0.82));
+            text(&self.fonts.mono, &s, r.x + 10.0, r.y + 18.0, 14.0, c);
         }
-        if let Some(t) = self.tip.clone() {
-            self.tooltip(&t);
-        }
+        self.overlays();
+        ui::end();
         self.input(&mut g, &mut sc, mw, dt);
         if self.screen == Screen::Play {
             self.game = Some(g);
@@ -1916,137 +1823,118 @@ impl App {
         }
     }
 
-    fn tooltip(&self, t: &str) {
-        let p = pal(self.dark);
-        let m = self.mouse();
-        let w = 320.0;
-        let lines = wrap_lines(&self.fonts.mono, t, w - 20.0, 13.0);
-        let h = 14.0 + lines.len() as f32 * 17.0;
-        let x = (m.x - w / 2.0).clamp(8.0, screen_width() - w - 8.0);
-        let y = (m.y - h - 16.0).max(8.0);
-        draw_rectangle(x, y, w, h, p.panel2);
-        draw_rectangle_lines(x, y, w, h, 1.0, p.accent);
-        for (i, l) in lines.iter().enumerate() {
-            text(
-                &self.fonts.mono,
-                l,
-                x + 10.0,
-                y + 20.0 + i as f32 * 17.0,
-                13.0,
-                p.text,
-            );
-        }
-    }
-
+    /// The in-game HUD. Everything sits inside `ui::hud()`: the top bar along its top, the build
+    /// bar along its bottom, abilities down its right side.
     fn hud(&mut self, g: &mut Game) {
         let p = pal(self.dark);
-        let (sw, sh) = (screen_width(), screen_height());
-        // top bar
-        self.panel(Rect::new(0.0, 0.0, sw, 40.0));
-        let f = g.faction();
-        let fc = Color::from_rgba(f.col[0], f.col[1], f.col[2], 255);
-        draw_rectangle(12.0, 14.0, 12.0, 12.0, fc);
-        text(&self.fonts.head, f.name, 32.0, 26.0, 17.0, p.text);
-        let mut stats = vec![
-            ("Scrap", format!("{:.0}", g.scrap)),
-            ("Ammo", format!("{:.0}", g.ammo)),
-            ("Score", format!("{:.0}", g.score)),
-            ("Hostiles", fmt_n(g.hostiles())),
-            ("Civilians", fmt_n(g.alive_civs())),
-            ("Rescued", format!("{}", g.rescued)),
-            ("Waiting", format!("{}", g.waiting)),
-            ("Flown out", format!("{}", g.extracted)),
-        ];
-        if g.goal > 0.0 {
-            stats.push(("Evac in", mmss((g.goal - g.time).max(0.0))));
+        let area = ui::hud();
+        let scr = ui::screen();
+
+        // ---- top bar: faction and stats on the left, controls on the right
+        let top = Rect::new(area.x + 12.0, 10.0, area.w - 24.0, 52.0);
+        self.panel(top);
+        let mut row = top.pad(16.0, 0.0);
+        let bs = row.cut_right(4.0 * 90.0 + 3.0 * 6.0, 16.0);
+        let b = Rect::new(bs.x, top.y + 10.0, bs.w, 32.0).cols(4, 6.0);
+        if self.button(b[0], "Settings", true, false) {
+            self.open_settings();
         }
-        let mut x = 150.0;
-        for (k, v) in stats.iter() {
-            text(&self.fonts.mono, k, x, 17.0, 11.0, p.dim);
-            text(&self.fonts.head, v, x, 34.0, 16.0, p.text);
-            x += (text_w(&self.fonts.head, v, 16.0).max(text_w(&self.fonts.mono, k, 11.0)) + 22.0)
-                .max(64.0);
-        }
-        if g.income_mult < 0.999 {
-            text(&self.fonts.mono, "Income", x, 17.0, 11.0, p.dim);
-            text(
-                &self.fonts.head,
-                &format!("×{:.2}", g.income_mult),
-                x,
-                34.0,
-                16.0,
-                rgb(250, 82, 82),
-            );
-            if self.hot(Rect::new(x, 0.0, 60.0, 40.0)) {
-                self.tip = Some("Too many rescued civilians are waiting in the base. Build more extraction pads to fly them out faster.".into());
-            }
-        }
-        let bx = sw - 330.0;
-        self.music_button(Rect::new(bx - 226.0, 6.0, 104.0, 28.0));
-        self.sfx_button(Rect::new(bx - 116.0, 6.0, 110.0, 28.0));
-        if self.button(
-            Rect::new(bx, 6.0, 74.0, 28.0),
-            if self.dark { "Light" } else { "Dark" },
-            true,
-            false,
-        ) {
-            self.dark = !self.dark;
-        }
-        if self.button(
-            Rect::new(bx + 80.0, 6.0, 74.0, 28.0),
-            if self.cam.top() { "3D view" } else { "Top view" },
-            true,
-            false,
-        ) {
+        if self.button(b[1], if self.cam.top() { "3D view" } else { "Top view" }, true, false) {
             self.toggle_top();
         }
-        if self.button(
-            Rect::new(bx + 160.0, 6.0, 74.0, 28.0),
-            if self.paused_now() { "Resume" } else { "Pause" },
-            true,
-            self.paused_now(),
-        ) {
+        if self.hot(b[1]) {
+            self.tip = Some("Switch between the tilted 3D view and straight down [T]".into());
+        }
+        let paused = self.paused_now();
+        if self.button(b[2], if paused { "Resume" } else { "Pause" }, true, paused) {
             self.toggle_pause();
         }
-        if self.button(Rect::new(bx + 240.0, 6.0, 80.0, 28.0), "Menu", true, false) {
+        if self.button(b[3], "Menu", true, false) {
             self.leave_game();
             return;
         }
-        text(
-            &self.fonts.mono,
-            &format!("{:.0} fps · sim {:.1} ms", get_fps(), g.sim_ms),
-            sw - 190.0,
-            56.0,
-            12.0,
-            p.dim,
-        );
+        let f = g.faction();
+        let fc = Color::from_rgba(f.col[0], f.col[1], f.col[2], 255);
+        let fw = text_w(&self.fonts.head, f.name, 17.0) + 26.0;
+        let fr = row.cut_left(fw, 14.0);
+        rrect(Rect::new(fr.x, top.y + 20.0, 12.0, 12.0), 3.0, fc);
+        text(&self.fonts.head, f.name, fr.x + 22.0, top.y + 32.0, 17.0, p.text);
+        draw_rectangle(row.x - 8.0, top.y + 12.0, 1.0, top.h - 24.0, p.line);
+        // stats, most important first; what doesn't fit is left out
+        let evac = g.goal > 0.0;
+        let mut stats: Vec<(&str, String, Color, Option<&str>)> = vec![
+            ("SCRAP", format!("{:.0}", g.scrap), p.accent, None),
+            ("AMMO", format!("{:.0}", g.ammo), if g.ammo < 20.0 { p.bad } else { p.text }, None),
+            ("HOSTILES", fmt_n(g.hostiles()), p.text, None),
+            ("CIVILIANS", fmt_n(g.alive_civs()), p.text, None),
+        ];
+        if evac {
+            stats.push(("EVAC IN", mmss((g.goal - g.time).max(0.0)), p.warn, Some("Hold out until the evac flies everyone out")));
+        }
+        if g.income_mult < 0.999 {
+            stats.push(("INCOME", format!("×{:.2}", g.income_mult), p.bad, Some("Too many rescued civilians are waiting in the base. Build more extraction pads to fly them out faster.")));
+        }
+        stats.extend([
+            ("RESCUED", format!("{}", g.rescued), p.text, None),
+            ("WAITING", format!("{}", g.waiting), p.text, None),
+            ("FLOWN OUT", format!("{}", g.extracted), p.text, None),
+            ("SCORE", format!("{:.0}", g.score), p.text, None),
+        ]);
+        let mut x = row.x;
+        for (k, v, c, tip) in stats {
+            let w = (text_w(&self.fonts.head, &v, 18.0).max(text_w(&self.fonts.mono, k, 10.0)) + 22.0).max(70.0);
+            if x + w > row.right() + 22.0 {
+                break;
+            }
+            text(&self.fonts.mono, k, x, top.y + 20.0, 10.0, p.dim);
+            text(&self.fonts.head, &v, x, top.y + 40.0, 18.0, c);
+            if let (Some(t), true) = (tip, self.hot(Rect::new(x, top.y, w, top.h))) {
+                self.tip = Some(t.into());
+            }
+            x += w;
+        }
+        if self.show_fps {
+            let s = format!("{:.0} fps · sim {:.1} ms", get_fps(), g.sim_ms);
+            let tw = text_w(&self.fonts.mono, &s, 11.0);
+            text(&self.fonts.mono, &s, scr.right() - tw - 10.0, scr.bottom() - 8.0, 11.0, alpha(p.dim, 0.8));
+        }
+        if let Some(s) = &self.sess {
+            let names: Vec<String> = s.players.iter().map(|p| p.name.clone()).collect();
+            text(&self.fonts.mono, &format!("Co-op: {}", names.join(", ")), top.x + 4.0, top.bottom() + 20.0, 12.0, p.dim);
+        }
 
-        // build bar
+        // ---- build bar, centred along the bottom; wraps to two rows when the HUD is too narrow
         let items: Vec<Tool> = BUILD_ORDER
             .iter()
             .filter(|s| !(g.campaign && **s == S::Lab))
             .map(|s| Tool::Build(*s))
             .chain([Tool::Unit(U::Rifle), Tool::Unit(U::Tank)])
             .collect();
-        let bw = 92.0;
-        let rows = if items.len() as f32 * (bw + 6.0) + 6.0 > sw - 8.0 { 2 } else { 1 };
-        let per = items.len().div_ceil(rows);
-        let total = per as f32 * (bw + 6.0) + 6.0;
-        let x0 = ((sw - total) / 2.0).max(4.0);
-        self.bar_h = 6.0 + rows as f32 * 64.0;
-        let y0 = sh - self.bar_h;
-        self.panel(Rect::new(x0, y0, total, self.bar_h));
+        let (gap, ch) = (6.0, 60.0);
+        let room = area.w - 24.0 - 16.0;
+        let mut bw = 100.0f32;
+        let n = items.len().max(1);
+        if n as f32 * (bw + gap) - gap > room {
+            bw = ((room + gap) / n as f32 - gap).max(98.0);
+        }
+        // as many rows as it takes, with the items shared evenly between them
+        let nrows = n.div_ceil((((room + gap) / (bw + gap)).floor() as usize).clamp(1, n));
+        let per_row = n.div_ceil(nrows);
+        let bar_w = per_row as f32 * (bw + gap) - gap + 16.0;
+        let bar_h = nrows as f32 * (ch + gap) - gap + 16.0;
+        let bar = Rect::new(area.x + (area.w - bar_w) / 2.0, area.bottom() - bar_h - 12.0, bar_w, bar_h);
+        self.panel(bar);
+        self.bar_h = area.bottom() - bar.y;
         for (i, it) in items.iter().enumerate() {
-            let (col_i, row_i) = (i % per, i / per);
-            let r = Rect::new(x0 + 6.0 + col_i as f32 * (bw + 6.0), y0 + 6.0 + row_i as f32 * 64.0, bw, 58.0);
+            let (ri, ci) = (i / per_row, i % per_row);
+            // the last row is centred
+            let in_row = if ri + 1 == nrows { n - ri * per_row } else { per_row };
+            let off = (per_row - in_row) as f32 * (bw + gap) / 2.0;
+            let r = Rect::new(bar.x + 8.0 + off + ci as f32 * (bw + gap), bar.y + 8.0 + ri as f32 * (ch + gap), bw, ch);
             let (key, name, cost, col, tip, ok) = match it {
                 Tool::Build(s) => {
                     let d = def(*s);
-                    let c = if *s == S::Extractor {
-                        g.cost_at(*s, g.world.hq)
-                    } else {
-                        d.cost
-                    };
+                    let c = if *s == S::Extractor { g.cost_at(*s, g.world.hq) } else { d.cost };
                     (d.key, d.name, c, d.top, d.tip, g.scrap >= c)
                 }
                 Tool::Unit(u) => {
@@ -2057,28 +1945,12 @@ impl App {
             };
             let active = self.tool == *it;
             let hot = self.hot(r);
-            draw_rectangle(
-                r.x,
-                r.y,
-                r.w,
-                r.h,
-                if active {
-                    mix(p.panel2, p.accent, 0.3)
-                } else if hot {
-                    mix(p.panel2, p.accent, 0.12)
-                } else {
-                    p.panel2
-                },
-            );
-            draw_rectangle(r.x, r.y, 4.0, r.h, col);
-            text(
-                &self.fonts.mono,
-                &key.to_string(),
-                r.x + r.w - 14.0,
-                r.y + 13.0,
-                11.0,
-                p.dim,
-            );
+            rrect(r, R_CTRL, if active { mix(p.panel2, p.accent, 0.28) } else if hot { mix(p.panel2, p.text, 0.08) } else { p.panel2 });
+            if active {
+                rrect_lines(r, R_CTRL, 2.0, p.accent);
+            }
+            rrect(Rect::new(r.x + 7.0, r.y + 9.0, 4.0, r.h - 18.0), 2.0, col);
+            self.keycap(r.right() - 21.0, r.y + 5.0, key);
             let nm = match it {
                 Tool::Build(S::Gun) => "Gun turret",
                 Tool::Build(S::Extractor) => "Extractor",
@@ -2092,101 +1964,60 @@ impl App {
                 Tool::Unit(U::Rifle) => "Rifles",
                 _ => name,
             };
-            text(
-                &self.fonts.head,
-                nm,
-                r.x + 10.0,
-                r.y + 30.0,
-                14.0,
-                if ok { p.text } else { p.dim },
-            );
-            text(
-                &self.fonts.mono,
-                &format!("${:.0}", cost),
-                r.x + 10.0,
-                r.y + 49.0,
-                13.0,
-                if ok { p.accent } else { rgb(250, 82, 82) },
-            );
+            let nm = fit(&self.fonts.head, nm, r.w - 20.0, 14.0);
+            text(&self.fonts.head, &nm, r.x + 17.0, r.y + 33.0, 14.0, if ok { p.text } else { p.dim });
+            text(&self.fonts.mono, &format!("${:.0}", cost), r.x + 17.0, r.y + 51.0, 12.5, if ok { p.accent } else { p.bad });
             self.ui_rects.push(r);
             if hot {
-                self.tip = Some(format!("{} [{}]: {}", name, key, tip));
+                self.tip = Some(format!("{} [{}]: {}", name, key.to_ascii_uppercase(), tip));
                 if is_mouse_button_pressed(MouseButton::Left) {
                     self.tool = if active { Tool::None } else { *it };
                 }
             }
         }
 
-        // ability panel
-        let aw = 236.0;
-        let ax = sw - aw - 10.0;
-        let mut ay = 70.0;
+        // ---- abilities and research down the right side
+        let aw = 248.0;
+        let ax = area.right() - aw - 12.0;
+        let mut ay = top.bottom() + 12.0;
+        // cards get shorter when the screen is short
+        let lab = !g.campaign && g.has(S::Lab);
+        let lab_h = if lab { 44.0 + LAB_ONLY.len() as f32 * 30.0 } else { 0.0 };
+        let room = bar.y - 12.0 - ay - lab_h;
+        let card_h = ((room - 8.0 * (ABILITIES.len() as f32 - 1.0)) / ABILITIES.len() as f32).clamp(64.0, 88.0);
         for a in ABILITIES {
             let d = adef(a);
-            let r = Rect::new(ax, ay, aw, 84.0);
+            let r = Rect::new(ax, ay, aw, card_h);
             self.panel(r);
             let usable = g.can_use(a);
             let active = self.tool == Tool::Ability(a);
-            let hot = self.hot(Rect::new(r.x, r.y, r.w, 50.0));
+            let head = Rect::new(r.x, r.y, r.w, card_h - 30.0);
+            let hot = self.hot(head);
             if active {
-                draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, p.accent);
+                rrect_lines(r, R_PANEL, 2.0, p.accent);
+            } else if hot && usable {
+                rrect(head.inset(3.0), R_CTRL, alpha(p.text, 0.05));
             }
             let fc = if usable { p.text } else { p.dim };
-            text(
-                &self.fonts.head,
-                &format!(
-                    "{}{}",
-                    d.name,
-                    if g.upgraded(a) && a != A::Gunship {
-                        " +"
-                    } else {
-                        ""
-                    }
-                ),
-                r.x + 12.0,
-                r.y + 22.0,
-                16.0,
-                fc,
-            );
-            text(
-                &self.fonts.mono,
-                &d.key.to_string(),
-                r.x + r.w - 18.0,
-                r.y + 20.0,
-                12.0,
-                p.dim,
-            );
+            let name = format!("{}{}", d.name, if g.upgraded(a) && a != A::Gunship { " +" } else { "" });
+            text(&self.fonts.head, &name, r.x + 14.0, r.y + 23.0, 16.0, fc);
+            self.keycap(r.right() - 26.0, r.y + 9.0, d.key);
             let mut line = format!("${:.0}", d.cost);
             if d.ammo > 0.0 {
                 line.push_str(&format!(" + {:.0} ammo", d.ammo));
             }
-            let cd = g.cooldown(a);
             if a == A::Icbm {
                 let (rdy, tot) = g.silos_ready();
-                line = if tot == 0 {
-                    "Needs a missile silo".into()
-                } else {
-                    format!("Silos ready {}/{}", rdy, tot)
-                };
+                line = if tot == 0 { "Needs a missile silo".into() } else { format!("Silos ready {}/{}", rdy, tot) };
             }
-            text(&self.fonts.mono, &line, r.x + 12.0, r.y + 42.0, 12.0, p.dim);
+            text(&self.fonts.mono, &line, r.x + 14.0, r.y + 41.0, 12.0, p.dim);
+            let cd = g.cooldown(a);
             if cd > 0.0 {
-                let full = d.cd;
-                draw_rectangle(
-                    r.x,
-                    r.y + 48.0,
-                    r.w * (1.0 - cd / full).clamp(0.0, 1.0),
-                    3.0,
-                    p.accent,
-                );
-                text(
-                    &self.fonts.mono,
-                    &format!("{:.0}s", cd),
-                    r.x + r.w - 44.0,
-                    r.y + 42.0,
-                    12.0,
-                    p.accent,
-                );
+                let pr = Rect::new(r.x + 14.0, r.y + 47.0, r.w - 28.0, 3.0);
+                self.progress(pr, 1.0 - cd / d.cd, p.accent);
+                let s = format!("{:.0}s", cd);
+                let tw = text_w(&self.fonts.mono, &s, 12.0);
+                text(&self.fonts.mono, &s, r.right() - 14.0 - tw, r.y + 41.0, 12.0, p.accent);
             }
             if hot {
                 self.tip = Some(d.tip.to_string());
@@ -2194,35 +2025,26 @@ impl App {
                     self.tool = if active { Tool::None } else { Tool::Ability(a) };
                 }
             }
-            // research
-            let ur = Rect::new(r.x + 8.0, r.y + 54.0, r.w - 16.0, 24.0);
+            let ur = Rect::new(r.x + 8.0, r.bottom() - 30.0, r.w - 16.0, 24.0);
             if let Some(rs) = ability_research(a) {
                 self.research_button(g, rs, ur, "Upgrade");
             } else {
-                text(
-                    &self.fonts.mono,
-                    "Hovers and fires for 20 s",
-                    ur.x + 8.0,
-                    ur.y + 16.0,
-                    11.5,
-                    p.dim,
-                );
+                text(&self.fonts.mono, "Hovers and fires for 20 s", ur.x + 8.0, ur.y + 16.0, 11.5, p.dim);
             }
-            ay += 92.0;
+            ay += card_h + 8.0;
         }
-
         // lab research that isn't tied to an ability
-        if !g.campaign && g.has(S::Lab) {
-            let r = Rect::new(ax, ay, aw, 30.0 + LAB_ONLY.len() as f32 * 30.0);
+        if lab {
+            let r = Rect::new(ax, ay, aw, lab_h - 8.0);
             self.panel(r);
-            text(&self.fonts.head, "Research lab", r.x + 12.0, r.y + 20.0, 15.0, p.text);
+            text(&self.fonts.head, "Research lab", r.x + 14.0, r.y + 22.0, 15.0, p.text);
             for (i, rs) in LAB_ONLY.iter().enumerate() {
-                let ur = Rect::new(r.x + 8.0, r.y + 28.0 + i as f32 * 30.0, r.w - 16.0, 24.0);
+                let ur = Rect::new(r.x + 8.0, r.y + 30.0 + i as f32 * 30.0, r.w - 16.0, 24.0);
                 self.research_button(g, *rs, ur, "Research");
             }
         }
 
-        // selection info
+        // ---- selection, bottom left above the build bar
         if let Some(gi) = self.selected {
             let gr = &g.groups[gi];
             let n = gr.m.iter().filter(|m| m.alive).count();
@@ -2230,25 +2052,13 @@ impl App {
                 "{} · {} alive{} · right-click to move{}",
                 udef(gr.kind).name,
                 n,
-                if gr.state == GState::Garrison {
-                    " · garrisoned"
-                } else {
-                    ""
-                },
-                if gr.kind == U::Rifle {
-                    " (click a building to garrison)"
-                } else {
-                    ""
-                }
+                if gr.state == GState::Garrison { " · garrisoned" } else { "" },
+                if gr.kind == U::Rifle { " (click a building to garrison)" } else { "" }
             );
-            let r = Rect::new(
-                10.0,
-                sh - self.bar_h - 40.0,
-                text_w(&self.fonts.mono, &s, 13.0) + 24.0,
-                30.0,
-            );
+            let r = Rect::new(area.x + 12.0, bar.y - 46.0, text_w(&self.fonts.mono, &s, 13.0) + 32.0, 34.0);
             self.panel(r);
-            text(&self.fonts.mono, &s, r.x + 12.0, r.y + 20.0, 13.0, p.text);
+            draw_circle(r.x + 14.0, r.y + 17.0, 3.5, udef(gr.kind).col);
+            text(&self.fonts.mono, &s, r.x + 24.0, r.y + 22.0, 13.0, p.text);
         }
 
         if let Some(si) = self.sel_struct {
@@ -2273,82 +2083,46 @@ impl App {
                 ),
             };
             let tw = text_w(&self.fonts.mono, &line, 13.0) + 24.0;
-            let r = Rect::new(10.0, sh - self.bar_h - 40.0, tw + if cease { 110.0 } else { 0.0 }, 30.0);
+            let r = Rect::new(area.x + 12.0, bar.y - 46.0, tw + if cease { 110.0 } else { 0.0 }, 34.0);
             self.panel(r);
-            text(&self.fonts.mono, &line, r.x + 12.0, r.y + 20.0, 13.0, p.text);
-            if cease && self.button(Rect::new(r.x + tw, r.y + 3.0, 100.0, 24.0), "Cease fire", true, false) {
+            text(&self.fonts.mono, &line, r.x + 12.0, r.y + 22.0, 13.0, p.text);
+            if cease && self.button(Rect::new(r.x + tw, r.y + 4.0, 100.0, 26.0), "Cease fire", true, false) {
                 self.act(g, Cmd::Cease(si as u32));
             }
         }
 
-        // banners
-        let (msg, t) = if g.banner.1 > 0.0 {
-            (g.banner.0.clone(), g.banner.1)
-        } else {
-            (self.msg.0.clone(), self.msg.1)
-        };
+        // ---- banners, under the top bar
+        let (msg, t) = if g.banner.1 > 0.0 { (g.banner.0.clone(), g.banner.1) } else { (self.msg.0.clone(), self.msg.1) };
         self.msg.1 -= get_frame_time();
         if t > 0.0 && !msg.is_empty() {
-            let tw = text_w(&self.fonts.head, &msg, 18.0);
-            let r = Rect::new((sw - tw) / 2.0 - 16.0, 54.0, tw + 32.0, 34.0);
-            draw_rectangle(
-                r.x,
-                r.y,
-                r.w,
-                r.h,
-                Color::new(0.0, 0.0, 0.0, 0.7 * t.min(1.0)),
-            );
-            text(
-                &self.fonts.head,
-                &msg,
-                r.x + 16.0,
-                r.y + 23.0,
-                18.0,
-                Color::new(1.0, 1.0, 1.0, t.min(1.0)),
-            );
+            self.toast(top.bottom() + 14.0, &msg, p.accent, t.min(1.0));
         }
-        if let Some(s) = &self.sess {
-            let names: Vec<String> = s.players.iter().map(|p| p.name.clone()).collect();
-            text(&self.fonts.mono, &format!("Co-op: {}", names.join(", ")), 12.0, 58.0, 12.0, p.dim);
-        }
-        if self.paused_now() {
-            let s = "PAUSED";
-            let tw = text_w(&self.fonts.head, s, 30.0);
-            text(&self.fonts.head, s, (sw - tw) / 2.0, sh / 2.0, 30.0, WHITE);
+        if self.paused_now() && !g.over && !self.settings_open {
+            let r = area.centered(260.0, 76.0);
+            ui::shadow(r, R_PANEL, p.shadow);
+            rrect(r, R_PANEL, Color::new(0.04, 0.05, 0.07, 0.8));
+            self.label_in(Rect::new(r.x, r.y + 8.0, r.w, 36.0), "PAUSED", 30.0, WHITE);
+            self.label_in(Rect::new(r.x, r.y + 44.0, r.w, 20.0), "Space or P to resume", 12.0, rgb(200, 205, 214));
         }
         if g.over && self.in_camp {
             self.campaign_over(g);
         } else if g.over {
-            let r = Rect::new(sw / 2.0 - 220.0, sh / 2.0 - 90.0, 440.0, 180.0);
+            self.backdrop();
+            let r = area.centered(480.0, 210.0);
             self.panel(r);
-            text(
-                &self.fonts.head,
-                "The HQ has fallen",
-                r.x + 24.0,
-                r.y + 46.0,
-                26.0,
-                p.text,
-            );
+            let mut a = r.pad(28.0, 26.0);
+            let t = a.cut_top(32.0, 12.0);
+            text(&self.fonts.head, "The HQ has fallen", t.x, t.y + 28.0, 30.0, p.text);
+            let l = a.cut_top(18.0, 0.0);
             text(
                 &self.fonts.mono,
-                &format!(
-                    "Score {:.0} · {} kills · {} flown out · {:.0} min",
-                    g.score,
-                    fmt_n(g.kills as usize),
-                    g.extracted,
-                    g.time / 60.0
-                ),
-                r.x + 24.0,
-                r.y + 80.0,
+                &format!("Score {:.0} · {} kills · {} flown out · {:.0} min", g.score, fmt_n(g.kills as usize), g.extracted, g.time / 60.0),
+                l.x,
+                l.y + 13.0,
                 13.0,
                 p.dim,
             );
-            if self.button(
-                Rect::new(r.x + 24.0, r.y + 112.0, 180.0, 40.0),
-                "Back to menu",
-                true,
-                true,
-            ) {
+            if self.button_primary(Rect::new(a.x, a.bottom() - 44.0, 200.0, 44.0), "Back to menu", true) {
                 self.leave_game();
             }
         }
@@ -2357,10 +2131,13 @@ impl App {
     /// The end of a campaign city: held (bank civilians, carry the army on) or lost (try again).
     fn campaign_over(&mut self, g: &mut Game) {
         let p = pal(self.dark);
-        let (sw, sh) = (screen_width(), screen_height());
         let Some(c) = self.camp.clone() else { return };
-        let r = Rect::new(sw / 2.0 - 280.0, sh / 2.0 - 120.0, 560.0, 240.0);
+        self.backdrop();
+        let r = ui::hud().centered(560.0, 240.0);
         self.panel(r);
+        let mut a = r.pad(28.0, 26.0);
+        let t = a.cut_top(32.0, 14.0);
+        let mut b = a.cut_bottom(44.0, 0.0);
         let squads = g.groups.iter().filter(|gr| !gr.dead).count();
         // what the campaign looks like after this city
         let mut next = c.clone();
@@ -2371,27 +2148,35 @@ impl App {
             format!("{} squad{} march on.", squads, if squads == 1 { "" } else { "s" })
         };
         if g.won {
-            text(&self.fonts.head, &format!("{} held", c.city().name), r.x + 24.0, r.y + 46.0, 26.0, p.text);
-            text(&self.fonts.mono, &format!("{} civilians flown out: +{} to spend", g.extracted, g.extracted), r.x + 24.0, r.y + 82.0, 14.0, p.accent);
+            text(&self.fonts.head, &format!("{} held", c.city().name), t.x, t.y + 28.0, 30.0, p.text);
+            let l = a.cut_top(22.0, 4.0);
+            text(&self.fonts.mono, &format!("{} civilians flown out: +{} to spend", g.extracted, g.extracted), l.x, l.y + 14.0, 14.0, p.accent);
         } else {
-            text(&self.fonts.head, &format!("{} is lost", c.city().name), r.x + 24.0, r.y + 46.0, 26.0, p.text);
+            text(&self.fonts.head, &format!("{} is lost", c.city().name), t.x, t.y + 28.0, 30.0, p.text);
             let left = campaign::MAX_LOST.saturating_sub(next.lost);
             let line = match left {
                 0 => "That's three cities. The world's governments are letting you go.".to_string(),
                 1 => "The HQ was overrun. Nothing to spend from here. One more lost city and you're fired.".to_string(),
                 n => format!("The HQ was overrun. Nothing to spend from here. {} more lost cities and you're fired.", n),
             };
-            wrap(&self.fonts.mono, &line, r.x + 24.0, r.y + 80.0, r.w - 48.0, 13.0, rgb(250, 120, 110));
+            let lines = wrap_lines(&self.fonts.mono, &line, a.w, 13.0);
+            let l = a.cut_top(lines.len() as f32 * 17.0 + 4.0, 4.0);
+            for (i, s) in lines.iter().enumerate() {
+                text(&self.fonts.mono, s, l.x, l.y + 13.0 + i as f32 * 17.0, 13.0, p.bad);
+            }
         }
-        text(&self.fonts.mono, &army, r.x + 24.0, r.y + 124.0, 14.0, p.text);
+        let l = a.cut_top(22.0, 2.0);
+        text(&self.fonts.mono, &army, l.x, l.y + 14.0, 14.0, p.text);
         let fell: Vec<&str> = (0..CITIES.len()).filter(|i| c.cities[*i].fate == Fate::Open && next.cities[*i].fate == Fate::Fallen).map(|i| CITIES[i].name).collect();
         let world = if fell.is_empty() {
             format!("{} days pass. {} kills · score {:.0}", campaign::DAYS_PER_CITY, fmt_n(g.kills as usize), g.score)
         } else {
             format!("{} days pass. Fallen meanwhile: {}.", campaign::DAYS_PER_CITY, fell.join(", "))
         };
-        text(&self.fonts.mono, &world, r.x + 24.0, r.y + 148.0, 13.0, p.dim);
-        if self.button(Rect::new(r.x + 24.0, r.y + 174.0, 200.0, 42.0), "Continue", true, true) {
+        let l = a.cut_top(20.0, 0.0);
+        let world = fit(&self.fonts.mono, &world, l.w, 13.0);
+        text(&self.fonts.mono, &world, l.x, l.y + 13.0, 13.0, p.dim);
+        if self.button_primary(b.cut_left(200.0, 0.0), "Continue", true) {
             campaign::save(&next);
             self.camp = Some(next);
             self.in_camp = false;
@@ -2403,12 +2188,14 @@ impl App {
     fn research_button(&mut self, g: &mut Game, rs: R, ur: Rect, verb: &str) {
         let p = pal(self.dark);
         let d = rdef(rs);
+        let mut prog = None;
         let (label, en) = if g.research.has(rs) {
             (format!("Done: {}", d.name), false)
         } else if g.campaign {
             ("Unlock between cities".to_string(), false)
         } else if let Some((busy, t)) = g.research.busy {
             if busy == rs {
+                prog = Some(t);
                 (format!("Researching… {:.0}s", t), false)
             } else {
                 (format!("{}: {} ${:.0}", verb, d.name, d.cost), false)
@@ -2419,8 +2206,17 @@ impl App {
             (format!("{}: {} ${:.0}", verb, d.name, d.cost), g.can_research(rs))
         };
         let hot = self.hot(ur);
-        draw_rectangle(ur.x, ur.y, ur.w, ur.h, if hot && en { mix(p.panel2, p.accent, 0.2) } else { p.panel2 });
-        text(&self.fonts.mono, &label, ur.x + 8.0, ur.y + 16.0, 11.5, if en { p.accent } else { p.dim });
+        let done = g.research.has(rs);
+        rrect(ur, 6.0, if hot && en { mix(p.panel2, p.accent, 0.22) } else { p.panel2 });
+        if en {
+            rrect_lines(ur, 6.0, 1.0, alpha(p.accent, 0.5));
+        }
+        if prog.is_some() {
+            let k = 0.5 + 0.5 * (self.clock * 4.0).sin();
+            rrect(Rect::new(ur.x, ur.bottom() - 3.0, ur.w, 3.0), 1.5, alpha(p.accent, 0.3 + 0.4 * k));
+        }
+        let label = fit(&self.fonts.mono, &label, ur.w - 16.0, 11.5);
+        text(&self.fonts.mono, &label, ur.x + 8.0, ur.y + 16.0, 11.5, if en { p.accent } else if done { p.good } else { p.dim });
         if hot {
             self.tip = Some(format!("{}: {}", d.name, d.tip));
             if en && is_mouse_button_pressed(MouseButton::Left) {
@@ -2430,6 +2226,10 @@ impl App {
     }
 
     fn input(&mut self, g: &mut Game, sc: &mut Scene, mw: Vec2, dt: f32) {
+        if self.settings_open {
+            while get_char_pressed().is_some() {}
+            return;
+        }
         let ui = self.over_ui();
         // keyboard
         while let Some(ch) = get_char_pressed() {
@@ -2504,15 +2304,15 @@ impl App {
         let (_, wy) = mouse_wheel();
         if wy != 0.0 && !ui {
             // zoom towards the point under the cursor
-            let before = self.ground_at(self.mouse());
+            let before = self.ground_at(self.px_mouse());
             let k = if wy > 0.0 { 1.0 / 1.15 } else { 1.15 };
             self.cam.dist = (self.cam.dist * k).clamp(20.0, 2600.0);
-            let after = self.ground_at(self.mouse());
+            let after = self.ground_at(self.px_mouse());
             self.cam.t += before - after;
         }
-        let md = self.mouse() - self.last_m;
+        let md = self.px_mouse() - self.last_m;
         let last = self.last_m;
-        self.last_m = self.mouse();
+        self.last_m = self.px_mouse();
         // middle drag (or Alt + left drag) orbits: sideways turns, up and down tilts
         let alt = is_key_down(KeyCode::LeftAlt) || is_key_down(KeyCode::RightAlt);
         if is_mouse_button_down(MouseButton::Middle) || (alt && is_mouse_button_down(MouseButton::Left) && self.press.is_some()) {
@@ -2538,17 +2338,17 @@ impl App {
             }
         }
         if is_mouse_button_pressed(MouseButton::Left) && !ui {
-            self.press = Some((self.mouse(), mw));
+            self.press = Some((self.px_mouse(), mw));
             self.panning = false;
         }
         if is_mouse_button_down(MouseButton::Left) {
             if let Some((s0, _)) = self.press {
-                if self.tool == Tool::None && (self.mouse() - s0).length() > 6.0 {
+                if self.tool == Tool::None && (self.px_mouse() - s0).length() > 6.0 {
                     self.panning = true;
                 }
                 if self.panning && !alt {
                     // grab the ground: the point under the cursor stays under the cursor
-                    self.cam.t += self.ground_at(last) - self.ground_at(self.mouse());
+                    self.cam.t += self.ground_at(last) - self.ground_at(self.px_mouse());
                 }
             }
         }
@@ -2602,20 +2402,9 @@ impl App {
     }
 }
 
-fn mix(a: Color, b: Color, t: f32) -> Color {
-    Color::new(
-        a.r + (b.r - a.r) * t,
-        a.g + (b.g - a.g) * t,
-        a.b + (b.b - a.b) * t,
-        a.a + (b.a - a.a) * t,
-    )
-}
-fn alpha(c: Color, a: f32) -> Color {
-    Color::new(c.r, c.g, c.b, a)
-}
 /// Finds a way of drawing the 3D view whose depth test works on this GPU (see `render::check_depth`)
 /// and notes the result in data/gpu.txt. `PH_DEPTH=4|1|window` forces one.
-fn pick_depth() -> render::DepthMode {
+fn pick_depth(aa: u8) -> render::DepthMode {
     use render::DepthMode::*;
     let forced = match std::env::var("PH_DEPTH").ok().as_deref() {
         Some("window" | "painter") => Some(Painter),
@@ -2625,7 +2414,10 @@ fn pick_depth() -> render::DepthMode {
     if let Some(m) = forced {
         return m;
     }
-    let tries: &[i32] = if std::env::var("PH_SHOT").is_ok() && std::env::var("PH_MSAA").is_err() { &[1] } else { &[4, 1] };
+    if aa == 2 {
+        return Painter;
+    }
+    let tries: &[i32] = if aa == 1 || (std::env::var("PH_SHOT").is_ok() && std::env::var("PH_MSAA").is_err()) { &[1] } else { &[4, 1] };
     let mut log = gl_info();
     let mut pick = Painter;
     for &n in tries {
@@ -2694,6 +2486,17 @@ fn wrap_lines(f: &Font, s: &str, w: f32, size: f32) -> Vec<String> {
         out.push(line);
     }
     out
+}
+/// `s` cut short with an ellipsis to fit in `w`.
+fn fit(f: &Font, s: &str, w: f32, size: f32) -> String {
+    if text_w(f, s, size) <= w {
+        return s.to_string();
+    }
+    let mut t: String = s.to_string();
+    while !t.is_empty() && text_w(f, &format!("{}…", t), size) > w {
+        t.pop();
+    }
+    format!("{}…", t.trim_end())
 }
 fn wrap(f: &Font, s: &str, x: f32, y: f32, w: f32, size: f32, c: Color) {
     for (i, l) in wrap_lines(f, s, w, size).iter().enumerate() {
