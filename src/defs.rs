@@ -253,7 +253,7 @@ pub struct UDef {
 }
 pub fn udef(u: U) -> &'static UDef {
     static RIFLE: UDef = UDef { key: '8', name: "Rifle squad", cost: 60.0, n: 6, hp: 30.0, spd: 14.0, range: 24.0, rate: 0.5, dmg: 9.0, rad: 1.0, ammo: 0.0, bdmg: 0.0, col: rgb(28, 126, 214), tip: "Six soldiers march from the HQ and hold where you click, spread out in a line. They need no ammo. Click a building or a bunker to garrison it (+60% range). Select units with left click, send them with right click." };
-    static TANK: UDef = UDef { key: '9', name: "Tank", cost: 300.0, n: 1, hp: 600.0, spd: 18.0, range: 44.0, rate: 1.1, dmg: 45.0, rad: 3.5, ammo: 0.0, bdmg: 4.0, col: rgb(24, 100, 171), tip: "Drives from the HQ and shells the thickest part of the horde. Tough, and needs no ammo. Left click to select, right click to move." };
+    static TANK: UDef = UDef { key: '9', name: "Tank", cost: 300.0, n: 1, hp: 600.0, spd: 18.0, range: 44.0, rate: 1.1, dmg: 45.0, rad: 3.5, ammo: 2.0, bdmg: 4.0, col: rgb(24, 100, 171), tip: "Drives from the HQ and shells the thickest part of the horde. Tough, but each shell costs 2 ammo. Left click to select, right click to move." };
     match u {
         U::Rifle => &RIFLE,
         U::Tank => &TANK,
