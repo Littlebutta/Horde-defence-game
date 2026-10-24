@@ -291,6 +291,8 @@ const M_END: u32 = 12;
 const M_BUSY: u32 = 13;
 const M_REJECT: u32 = 14;
 const M_LOBBY: u32 = 15;
+const M_HUB: u32 = 16;
+const M_VOTE: u32 = 17;
 
 /// What the host has picked in the co-op lobby, shown to everybody waiting there.
 #[derive(Clone, Default, PartialEq)]
@@ -304,6 +306,15 @@ pub struct Lobby {
     /// what the host is doing right now
     pub line: String,
 }
+/// The campaign screen as the host has it, shown to guests so they can vote on it.
+#[derive(Clone, Default, PartialEq)]
+pub struct Hub {
+    /// the campaign as saved text
+    pub camp: String,
+    /// (player, what they voted for, encoded by the app)
+    pub votes: Vec<(u32, u32)>,
+}
+
 pub const MODE_RANDOM: u32 = 0;
 pub const MODE_REAL: u32 = 1;
 pub const MODE_CAMPAIGN: u32 = 2;
@@ -324,6 +335,8 @@ pub enum Note {
     /// the session is over (host left, or we were turned away)
     Closed(String),
     Msg(String),
+    /// host: a guest voted on the campaign screen
+    Vote { player: usize, act: u32 },
 }
 
 struct Incoming {
@@ -354,6 +367,8 @@ pub struct Session {
     pub lobby: Lobby,
     /// players in the game being played (each has an HQ)
     pub game_players: usize,
+    /// the host's campaign screen (guests: as last received; None while the host isn't on it)
+    pub hub: Option<Hub>,
     frames: BTreeMap<u64, Vec<(u8, Cmd)>>,
     pending: Vec<(u8, Cmd)>,
     hashes: BTreeMap<u64, u64>,
@@ -400,6 +415,7 @@ impl Session {
             exec: 0,
             lobby: Lobby::default(),
             game_players: 1,
+            hub: None,
             frames: BTreeMap::new(),
             pending: Vec::new(),
             hashes: BTreeMap::new(),
@@ -477,6 +493,7 @@ impl Session {
             self.queue(id, w.0);
         }
         self.send_lobby();
+        self.send_hub();
     }
     fn send_lobby(&mut self) {
         let mut w = msg(M_LOBBY);
@@ -487,6 +504,37 @@ impl Session {
         w.str(&self.lobby.line);
         self.to_clients(&w.0);
     }
+    fn send_hub(&mut self) {
+        let mut w = msg(M_HUB);
+        match &self.hub {
+            Some(h) => {
+                w.u32(1);
+                w.str(&h.camp);
+                w.u32(h.votes.len() as u32);
+                for (p, a) in &h.votes {
+                    w.u32(*p);
+                    w.u32(*a);
+                }
+            }
+            None => w.u32(0),
+        }
+        self.to_clients(&w.0);
+    }
+    /// Host: shares the campaign screen (or that it closed), when it changed.
+    pub fn set_hub(&mut self, h: Option<Hub>) {
+        if h != self.hub {
+            self.hub = h;
+            self.send_hub();
+        }
+    }
+    /// Guest: a vote on the host's campaign screen.
+    pub fn vote(&mut self, act: u32) {
+        let mut w = msg(M_VOTE);
+        w.u32(act);
+        let h = self.link.host();
+        self.queue(h, w.0);
+    }
+
     /// Host: tells everybody in the lobby what has been picked, when it changed.
     pub fn set_lobby(&mut self, l: Lobby) {
         if l != self.lobby {
@@ -576,6 +624,11 @@ impl Session {
                     }
                 }
                 M_PAUSE_REQ => self.toggle_pause(),
+                M_VOTE => {
+                    if let (Some(i), Some(act)) = (pidx, r.u32()) {
+                        self.notes.push(Note::Vote { player: i, act });
+                    }
+                }
                 _ => {}
             }
             return;
@@ -597,6 +650,16 @@ impl Session {
                 }
             }
             M_BUSY => self.host_busy = true,
+            M_HUB => {
+                self.hub = match r.u32() {
+                    Some(1) => {
+                        let (Some(camp), Some(n)) = (r.str(), r.u32()) else { return };
+                        let votes: Option<Vec<(u32, u32)>> = (0..n.min(64)).map(|_| Some((r.u32()?, r.u32()?))).collect();
+                        Some(Hub { camp, votes: votes.unwrap_or_default() })
+                    }
+                    _ => None,
+                };
+            }
             M_LOBBY => {
                 let (Some(mode), Some(fac), Some(diff), Some(city), Some(line)) = (r.u32(), r.u32(), r.u32(), r.str(), r.str()) else { return };
                 self.lobby = Lobby { mode, fac, diff, city, line };

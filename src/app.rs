@@ -28,6 +28,44 @@ enum Tool {
     Ability(A),
 }
 
+/// Something done on the campaign screen. In co-op each one is a vote, and a majority of the
+/// players makes the host carry it out.
+#[derive(Clone, Copy, PartialEq)]
+enum HubAct {
+    Tech(campaign::Tech),
+    Recruit(U),
+    City(usize),
+    Go,
+}
+impl HubAct {
+    fn code(self) -> u32 {
+        match self {
+            HubAct::Tech(t) => campaign::TECH.iter().position(|x| *x == t).unwrap_or(0) as u32,
+            HubAct::Recruit(u) => 1000 + (u == U::Tank) as u32,
+            HubAct::City(i) => 2000 + i as u32,
+            HubAct::Go => 3000,
+        }
+    }
+    fn from_code(v: u32) -> Option<HubAct> {
+        Some(match v {
+            0..=999 => HubAct::Tech(*campaign::TECH.get(v as usize)?),
+            1000 => HubAct::Recruit(U::Rifle),
+            1001 => HubAct::Recruit(U::Tank),
+            2000..=2999 => HubAct::City((v - 2000) as usize),
+            3000 => HubAct::Go,
+            _ => return None,
+        })
+    }
+    /// A player has one vote of each kind at a time: something to buy, a city, ready to go.
+    fn kind(self) -> u8 {
+        match self {
+            HubAct::Tech(_) | HubAct::Recruit(_) => 0,
+            HubAct::City(_) => 1,
+            HubAct::Go => 2,
+        }
+    }
+}
+
 #[derive(PartialEq)]
 enum Screen {
     Menu,
@@ -71,6 +109,13 @@ pub struct App {
     globe_city: Option<usize>,
     /// which part of the campaign's tech tree is showing
     tech_tab: usize,
+    /// co-op campaign screen, on the host: who voted for what, and for how many players
+    votes: Vec<(usize, HubAct)>,
+    vote_n: usize,
+    /// a guest's copy of the host's campaign screen, as last parsed
+    hub_text: String,
+    /// headless co-op campaign screen test (`PH_NETHUB`): how far it got
+    hub_test: u32,
     /// loading screen is waiting for the city pack instead of OpenStreetMap
     wait_pack: bool,
     status: String,
@@ -229,6 +274,10 @@ impl App {
             globe: None,
             globe_city: None,
             tech_tab: 0,
+            votes: Vec::new(),
+            vote_n: 0,
+            hub_text: String::new(),
+            hub_test: 0,
             wait_pack: false,
             saved: storage::list_maps(),
             status: String::new(),
@@ -295,6 +344,7 @@ impl App {
         self.net_frame();
         self.music.ambience(self.screen == Screen::Play);
         self.sync_lobby();
+        self.sync_hub();
         if is_key_pressed(KeyCode::F11) {
             self.set_fullscreen(!self.fullscreen);
         }
@@ -390,6 +440,11 @@ impl App {
                     }
                     self.status = why;
                     self.screen = Screen::Menu;
+                }
+                net::Note::Vote { player, act } => {
+                    if let (Some(a), Screen::Hub) = (HubAct::from_code(act), &self.screen) {
+                        self.cast(player, a);
+                    }
                 }
                 net::Note::Msg(m) => {
                     if self.screen != Screen::Play {
@@ -609,6 +664,114 @@ impl App {
         }
         if let Some(pr) = pr {
             self.players_panel(pr);
+        }
+    }
+
+    /// Co-op campaign screen: the host shares it (with the votes) while on it; a guest follows the
+    /// host onto it and back off.
+    fn sync_hub(&mut self) {
+        let Some(s) = self.sess.as_mut() else { return };
+        if s.is_host() {
+            let h = match (&self.screen, &self.camp) {
+                (Screen::Hub, Some(c)) => Some(net::Hub { camp: campaign::to_text(c), votes: self.votes.iter().map(|(p, a)| (*p as u32, a.code())).collect() }),
+                _ => None,
+            };
+            s.set_hub(h);
+            return;
+        }
+        match (&s.hub, &self.screen) {
+            (Some(h), Screen::Menu | Screen::Hub) => {
+                if self.screen == Screen::Menu || h.camp != self.hub_text || self.camp.is_none() {
+                    self.hub_text = h.camp.clone();
+                    self.camp = Some(campaign::from_text(&h.camp));
+                }
+                self.screen = Screen::Hub;
+            }
+            (None, Screen::Hub) => {
+                self.screen = Screen::Menu;
+                self.camp = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// The campaign screen is shared with other players, so its actions are votes.
+    fn hub_votes(&self) -> bool {
+        self.sess.as_ref().is_some_and(|s| s.players.len() > 1)
+    }
+    /// The votes as everybody sees them.
+    fn current_votes(&self) -> Vec<(usize, HubAct)> {
+        match &self.sess {
+            Some(s) if !s.is_host() => s.hub.iter().flat_map(|h| h.votes.iter()).filter_map(|(p, a)| Some((*p as usize, HubAct::from_code(*a)?))).collect(),
+            _ => self.votes.clone(),
+        }
+    }
+    /// Host: player `p` votes for `a` (voting for it again takes the vote back).
+    fn cast(&mut self, p: usize, a: HubAct) {
+        if let Some(i) = self.votes.iter().position(|v| *v == (p, a)) {
+            self.votes.remove(i);
+            return;
+        }
+        self.votes.retain(|(q, b)| !(*q == p && b.kind() == a.kind()));
+        self.votes.push((p, a));
+    }
+    /// A campaign screen action: done right away alone, a vote in co-op. True when it's time to
+    /// go and defend the picked city.
+    fn hub_act(&mut self, c: &mut Campaign, a: HubAct) -> bool {
+        if !self.hub_votes() {
+            return Self::do_act(c, a);
+        }
+        if self.client() {
+            if let Some(s) = self.sess.as_mut() {
+                s.vote(a.code());
+            }
+            return false;
+        }
+        self.cast(0, a);
+        false
+    }
+    fn do_act(c: &mut Campaign, a: HubAct) -> bool {
+        match a {
+            HubAct::Tech(t) => {
+                c.buy(t);
+            }
+            HubAct::Recruit(u) => {
+                c.recruit(u);
+            }
+            HubAct::City(i) => c.select(i),
+            HubAct::Go => return true,
+        }
+        false
+    }
+    /// Host: carries out whatever more than half the players voted for. True for "go".
+    fn tally(&mut self, c: &mut Campaign) -> bool {
+        let n = self.sess.as_ref().map(|s| s.players.len()).unwrap_or(1);
+        if n != self.vote_n {
+            // somebody joined or left: the old votes no longer add up
+            self.votes.clear();
+            self.vote_n = n;
+        }
+        let win = self.votes.iter().map(|v| v.1).find(|a| self.votes.iter().filter(|v| v.1 == *a).count() * 2 > n);
+        let Some(a) = win else { return false };
+        self.votes.retain(|v| v.1.kind() != a.kind() && !(a.kind() == 1 && v.1 == HubAct::Go));
+        match a {
+            HubAct::Tech(t) if !c.can_buy(t) => false,
+            _ => Self::do_act(c, a),
+        }
+    }
+    /// The coloured dots of the players voting for `a`, in the top right of `r`.
+    fn vote_marks(&self, r: Rect, a: HubAct) {
+        if !self.hub_votes() {
+            return;
+        }
+        let mut k = 0;
+        for (p, b) in self.current_votes() {
+            if b == a {
+                let c = vec2(r.right() - 8.0 - k as f32 * 10.0, r.y + 7.0);
+                draw_circle(c.x, c.y, 3.6, PLAYER_COLS[p % 4]);
+                draw_circle_lines(c.x, c.y, 3.6, 1.0, WHITE);
+                k += 1;
+            }
         }
     }
 
@@ -993,7 +1156,8 @@ impl App {
         let city = c.city();
         self.in_camp = true;
         self.status.clear();
-        if let Some(d) = campaign::load_map(city) {
+        let test = std::env::var("PH_NETHUB").is_ok().then(|| crate::citygen::generate(42));
+        if let Some(d) = campaign::load_map(city).or(test) {
             self.begin(d, c.seed.wrapping_mul(31).wrapping_add(c.fought as u64 * 16 + c.current as u64));
             return;
         }
@@ -1020,6 +1184,15 @@ impl App {
         let want: Vec<&City> = std::iter::once(c.city()).chain(c.all()).collect();
         self.pack.want(&want);
         let before = (c.points, c.tech.len(), c.units.len(), c.current);
+        // co-op: a guest sees the host's campaign and votes; the host carries out what wins
+        let guest = self.client();
+        if !guest && self.hub_votes() && self.tally(&mut c) {
+            campaign::save(&c);
+            self.camp = Some(c);
+            self.votes.clear();
+            self.start_city();
+            return;
+        }
         // space
         clear_background(rgb(6, 9, 16));
         for k in 0..220u32 {
@@ -1068,7 +1241,7 @@ impl App {
         let over_globe = !left.contains(m) && !right.contains(m);
         let (hover, clicked) = globe.draw(gc, gr, &marks, &self.fonts.head, over_globe, get_frame_time());
         if let Some(i) = clicked {
-            c.select(i);
+            self.hub_act(&mut c, HubAct::City(i));
         }
         if let Some(i) = hover {
             self.tip = Some(self.city_tip(&c, i));
@@ -1077,7 +1250,9 @@ impl App {
         text(&self.fonts.head, title, sw / 2.0 - text_w(&self.fonts.head, title, 28.0) / 2.0, 44.0, 28.0, p.text);
         let sub = format!("Day {} · {} cities held · {} lost of {} allowed", c.fought as f32 * campaign::DAYS_PER_CITY, c.held(), c.lost, campaign::MAX_LOST);
         text(&self.fonts.mono, &sub, sw / 2.0 - text_w(&self.fonts.mono, &sub, 13.0) / 2.0, 66.0, 13.0, p.dim);
-        let hint = "Drag to turn the globe, scroll to zoom, click a city to pick it";
+        let n = self.sess.as_ref().map(|s| s.players.len()).unwrap_or(1);
+        let vote_hint = format!("Co-op: every pick here is a vote. {} of {} players carry it.", n / 2 + 1, n);
+        let hint = if self.hub_votes() { vote_hint.as_str() } else { "Drag to turn the globe, scroll to zoom, click a city to pick it" };
         text(&self.fonts.mono, hint, sw / 2.0 - text_w(&self.fonts.mono, hint, 12.0) / 2.0, sh - 22.0, 12.0, p.dim);
 
         // ---- left: the campaign and the picked city
@@ -1153,10 +1328,11 @@ impl App {
                 let ty = rr.y + rh / 2.0 + 4.0;
                 text(&self.fonts.mono, c.info(j).name, rr.x + 10.0, ty, 12.5, col);
                 text(&self.fonts.mono, &right_s, rr.x + rr.w - 10.0 - text_w(&self.fonts.mono, &right_s, 12.0), ty, 12.0, if st.fate == Fate::Open { p.dim } else { col });
+                self.vote_marks(rr, HubAct::City(j));
                 if hot {
                     self.tip = Some(self.city_tip(&c, j));
                     if is_mouse_button_pressed(MouseButton::Left) {
-                        c.select(j);
+                        self.hub_act(&mut c, HubAct::City(j));
                     }
                 }
                 y += rh;
@@ -1164,7 +1340,10 @@ impl App {
             if !self.status.is_empty() {
                 wrap(&self.fonts.mono, &self.status, x0, by + 6.0, w, 12.0, rgb(250, 82, 82));
             }
-            let go = self.button(Rect::new(x0, by + 30.0, w, 46.0), &format!("Defend {}", city.name), true, true) || is_key_pressed(KeyCode::Enter);
+            let gr = Rect::new(x0, by + 30.0, w, 46.0);
+            let label = if self.hub_votes() { format!("Ready to defend {}", city.name) } else { format!("Defend {}", city.name) };
+            let go = (self.button(gr, &label, true, true) || is_key_pressed(KeyCode::Enter)) && self.hub_act(&mut c, HubAct::Go);
+            self.vote_marks(gr, HubAct::Go);
             if go {
                 campaign::save(&c);
                 self.camp = Some(c);
@@ -1172,7 +1351,15 @@ impl App {
                 return;
             }
         }
-        if self.button(Rect::new(x0, left.y + left.h - 38.0, 130.0, 30.0), if self.sess.is_some() { "Lobby" } else { "Main menu" }, true, false) {
+        if guest {
+            if self.button(Rect::new(x0, left.y + left.h - 38.0, 130.0, 30.0), "Leave co-op", true, false) {
+                self.leave_coop();
+                self.camp = None;
+                self.screen = Screen::Menu;
+                return;
+            }
+        } else if self.button(Rect::new(x0, left.y + left.h - 38.0, 130.0, 30.0), if self.sess.is_some() { "Lobby" } else { "Main menu" }, true, false) {
+            self.votes.clear();
             campaign::save(&c);
             self.camp = Some(c);
             self.screen = Screen::Menu;
@@ -1213,8 +1400,9 @@ impl App {
                     self.tip = Some(format!("{}: {} Needs {} first.", t.name(), t.tip(), n.name()));
                 }
             } else if self.button(br, &format!("{} RP", t.cost()), c.can_buy(t) && !c.finished(), false) {
-                c.buy(t);
+                self.hub_act(&mut c, HubAct::Tech(t));
             }
+            self.vote_marks(br, HubAct::Tech(t));
             if self.hot(rr) && need.is_none() {
                 self.tip = Some(format!("{}: {}", t.name(), t.tip()));
             }
@@ -1238,11 +1426,12 @@ impl App {
             let open = u == U::Rifle || c.has_tech(campaign::Tech::Unit(u));
             let label = if open { format!("+{} · {} RP", udef(u).name.to_lowercase(), cost) } else { format!("{}: locked", udef(u).name) };
             if self.button(br, &label, open && c.points >= cost && !c.finished(), false) {
-                c.recruit(u);
+                self.hub_act(&mut c, HubAct::Recruit(u));
             }
+            self.vote_marks(br, HubAct::Recruit(u));
         }
 
-        if (c.points, c.tech.len(), c.units.len(), c.current) != before {
+        if (c.points, c.tech.len(), c.units.len(), c.current) != before && !guest {
             campaign::save(&c);
         }
         if c.current != before.3 {
@@ -1289,7 +1478,7 @@ impl App {
         };
         text(&self.fonts.head, head, x0, y + 30.0, 24.0, p.text);
         wrap(&self.fonts.mono, &body, x0, y + 60.0, w, 13.0, p.dim);
-        if self.button(Rect::new(x0, y + 150.0, w, 46.0), "New campaign", true, true) {
+        if self.button(Rect::new(x0, y + 150.0, w, 46.0), "New campaign", !self.client(), true) {
             self.open_campaign(Some(Campaign::new(c.fac, c.diff)));
         }
     }
@@ -2858,6 +3047,43 @@ impl App {
     pub fn net_test(&mut self, until: u64) -> bool {
         let Some(s) = self.sess.as_ref() else { return true };
         let host = s.is_host();
+        // PH_NETHUB=1: both players vote on the campaign screen (city 5, a tech, then go)
+        let in_game = s.in_game;
+        if std::env::var("PH_NETHUB").is_ok() && !in_game {
+            if host && s.players.len() >= 2 && self.screen == Screen::Menu && self.hub_test == 0 {
+                let _ = s;
+                self.test_campaign(3, false);
+                self.hub_test = 1;
+                return false;
+            }
+            if self.screen == Screen::Hub {
+                let Some(c) = self.camp.clone() else { return false };
+                let tech = campaign::TECH.into_iter().find(|t| c.can_buy(*t));
+                self.hub_test += 1;
+                let me = self.sess.as_ref().unwrap().me;
+                let vote = |app: &mut App, a: HubAct| {
+                    if host {
+                        app.cast(me, a);
+                    } else if let Some(s) = app.sess.as_mut() {
+                        s.vote(a.code());
+                    }
+                };
+                if self.hub_test == 20 {
+                    vote(self, HubAct::City(5));
+                    if let Some(t) = tech {
+                        vote(self, HubAct::Tech(t));
+                    }
+                }
+                if self.hub_test > 60 && c.current == 5 && self.hub_test % 60 == 0 {
+                    eprintln!("{} hub: city {} tech {} points {}", if host { "host" } else { "guest" }, c.current, c.tech.len(), c.points);
+                    vote(self, HubAct::Go);
+                }
+            }
+            if self.screen != Screen::Play {
+                return false;
+            }
+        }
+        let s = self.sess.as_ref().unwrap();
         if host && !s.in_game && s.players.len() >= 2 && self.screen == Screen::Menu {
             self.fac = 0;
             // PH_NETCAMP=<city>: a co-op campaign city instead
