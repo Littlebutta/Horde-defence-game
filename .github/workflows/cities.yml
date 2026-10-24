@@ -1,0 +1,63 @@
+name: Download campaign cities
+
+# Downloads the ten campaign cities from OpenStreetMap once and publishes them as the `cities`
+# release. The game fetches that pack from GitHub when it starts, so players never wait on
+# OpenStreetMap. Run it again (Actions tab > Run workflow) to refresh the maps; `only` limits it to
+# some cities, e.g. "Tokyo, Delhi".
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Only these cities (comma separated, blank = all ten)"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths: [".github/workflows/cities.yml"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cities
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev
+      - name: Build
+        run: cargo build --release --no-default-features
+      - name: Download the cities
+        id: fetch
+        continue-on-error: true
+        env:
+          PH_FETCH: cities
+          PH_FETCH_ONLY: ${{ github.event.inputs.only }}
+        run: ./target/release/PixelHorde
+      - name: Publish the cities release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          ls -la cities
+          if ! ls cities/*.phmap.z >/dev/null 2>&1; then
+            echo "No city downloaded"; exit 1
+          fi
+          # never marked latest: the game's self-updater reads the latest release
+          gh release view cities >/dev/null 2>&1 || gh release create cities \
+            --title "Campaign city maps" \
+            --notes "The ten world campaign cities, downloaded from OpenStreetMap (c) OpenStreetMap contributors, ODbL. The game downloads these by itself; there is nothing to do here." \
+            --prerelease --latest=false
+          gh release upload cities cities/*.phmap.z --clobber
+      - name: Report missing cities
+        if: steps.fetch.outcome == 'failure'
+        run: |
+          echo "Some cities failed to download; the ones that worked were published. Run the workflow again with only the missing ones."
+          exit 1
