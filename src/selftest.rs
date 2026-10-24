@@ -241,10 +241,10 @@ pub fn units(g: &mut Game) {
     };
     let bc = g.structs[bi].center();
     eprintln!("mount before research {}", g.place_mount(S::Gun, bi));
-    g.complete_research(R::Mounts);
+    g.complete_research(0, R::Mounts);
     eprintln!("mount {} second mount {}", g.place_mount(S::Gun, bi), g.place_mount(S::Cannon, bi));
     let gun = g.structs.len() - 1;
-    eprintln!("gun on bunker: base {:.1} range {:.0} occupies ground {}", g.struct_base(gun), g.turret_range(S::Gun, g.structs[gun].up()), !g.structs[gun].up());
+    eprintln!("gun on bunker: base {:.1} range {:.0} occupies ground {}", g.struct_base(gun), g.turret_range(S::Gun, g.structs[gun].up(), 0), !g.structs[gun].up());
     let n0 = g.groups.len();
     eprintln!("rifles to bunker {} {}", g.deploy(U::Rifle, bc), g.deploy(U::Rifle, bc));
     // a squad to open ground, and one into a city building

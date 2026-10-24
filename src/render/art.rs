@@ -231,7 +231,7 @@ pub fn structure(mb: &mut MB, g: &Game, i: usize, s: &Structure, base: f32, t: f
             top
         }
         S::Outpost => outpost(mb, d, c, w, h, base, t),
-        S::Lab => lab(mb, d, c, w, h, base, g.research.busy.is_some(), t),
+        S::Lab => lab(mb, d, c, w, h, base, g.perks.iter().any(|k| k.research.busy.is_some()), t),
         S::Hq => {
             let top = hq(mb, d, c, w, h, base, t);
             labels.items.push((p3(c, top + 3.0), "HQ".into(), WHITE, 14.0));

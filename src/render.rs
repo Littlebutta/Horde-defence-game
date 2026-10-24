@@ -1281,7 +1281,7 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
         let c = s.center();
         match s.t {
             S::Helium if inview(c, 60.0) => {
-                let r = g.turret_range(S::Helium, s.up());
+                let r = g.turret_range(S::Helium, s.up(), s.owner as usize);
                 mb.disc(c, r, rgba(165, 216, 255, 0.10 + 0.03 * (t * 1.3).sin()));
                 ring(&mut mb, c, r, 0.5, rgba(200, 235, 255, 0.55));
                 for k in 0..10 {
@@ -1296,7 +1296,7 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
                 if let Some(tg) = s.target {
                     let f = 1.0 - s.charge / RAIL_CHARGE;
                     let dir = (tg - c).normalize_or_zero();
-                    let end = c + dir * g.turret_range(S::Rail, s.up());
+                    let end = c + dir * g.turret_range(S::Rail, s.up(), s.owner as usize);
                     mb.dashed(&[c, end], 0.3 + 0.5 * f, 3.0, 2.0, Color::new(0.6, 0.9, 1.0, 0.25 + 0.5 * f));
                 }
             }

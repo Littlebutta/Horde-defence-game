@@ -40,6 +40,8 @@ pub struct Structure {
     pub charge: f32,
     /// last time this structure raised a sound cue
     pub snd: f32,
+    /// co-op: the player who built it (their upgrades are the ones it gets)
+    pub owner: u8,
 }
 impl Structure {
     /// Up on a roof or a bunker: no footprint on the ground, and the rooftop range bonus.
@@ -112,6 +114,8 @@ pub struct Squad {
     pub found: u32,
     /// the rescue station that sent it (-1: the Rescue squad ability)
     pub from: i32,
+    /// co-op: the player it belongs to
+    pub own: u8,
 }
 
 pub const C_ROAM: u8 = 0;
@@ -224,6 +228,8 @@ pub struct Napalm {
     pub p: Vec2,
     pub r: f32,
     pub t: f32,
+    /// damage per tick, with the bunker owner's upgrades
+    pub dmg: f32,
 }
 /// An artillery shell in the air.
 pub struct Shell {
@@ -231,6 +237,8 @@ pub struct Shell {
     pub to: Vec2,
     pub t: f32,
     pub dur: f32,
+    /// the owner of the gun that fired it
+    pub own: u8,
 }
 pub struct Tracer {
     pub a: Vec2,
@@ -291,6 +299,19 @@ struct SpawnQ {
     rate: f32,
     fl: u8,
     aux: f32,
+}
+
+/// One player's own upgrades. In co-op each player researches and unlocks for themselves, and
+/// everything they build, send or call in uses theirs.
+#[derive(Clone, Default)]
+pub struct Perks {
+    pub research: Research,
+    /// campaign turret upgrades bought
+    pub ups: Vec<Up>,
+    /// campaign tech tree: what they may build, recruit and use (None: everything, a normal game)
+    pub allowed: Option<Allowed>,
+    /// civilians flown out from their evac points: their research points in a campaign
+    pub flown: u32,
 }
 
 /// What a campaign's tech tree has unlocked so far.
@@ -410,7 +431,10 @@ pub struct Game {
     /// simulation ticks so far
     pub ticks: u64,
     pub cds: [f32; 4],
-    pub research: Research,
+    /// co-op: each player's own research and upgrades, host first (one entry when playing alone)
+    pub perks: Vec<Perks>,
+    /// the player whose command is being carried out (what they build is theirs)
+    pub actor: usize,
     pub rush: bool,
     pub rush_t: f32,
     pub rush_left: f32,
@@ -427,10 +451,6 @@ pub struct Game {
     pub won: bool,
     /// campaign game: research is unlocked between cities, not at the lab
     pub campaign: bool,
-    /// campaign tech tree: what may be built, recruited and used (None: everything, a normal game)
-    pub allowed: Option<Allowed>,
-    /// campaign turret upgrades bought
-    pub ups: Vec<Up>,
     pub income_mult: f32,
     pub banner: (String, f32),
     pub dirty_buildings: Vec<usize>,
@@ -522,7 +542,8 @@ impl Game {
             time: 0.0,
             ticks: 0,
             cds: [0.0; 4],
-            research: Research::default(),
+            perks: vec![Perks::default()],
+            actor: 0,
             rush: false,
             rush_t: 150.0,
             rush_left: 0.0,
@@ -537,8 +558,6 @@ impl Game {
             goal: 0.0,
             won: false,
             campaign: false,
-            allowed: None,
-            ups: Vec::new(),
             income_mult: 1.0,
             banner: (String::new(), 0.0),
             dirty_buildings: Vec::new(),
@@ -643,9 +662,11 @@ impl Game {
     /// stay deterministic.
     pub fn add_player_hqs(&mut self, players: usize) {
         let main = self.world.hq;
+        self.perks.resize(players.clamp(1, 4), Perks::default());
         for k in 1..players.min(4) {
             let ang = -std::f32::consts::FRAC_PI_2 + k as f32 * std::f32::consts::TAU / players.min(4) as f32;
             let Some(c) = self.hq_spot(main, ang) else { continue };
+            self.actor = k;
             let z = &mut self.base_zone;
             fill_disc(c, OUTPOST_R, |q| z[q] = 1);
             self.world.add_outpost(c);
@@ -657,7 +678,13 @@ impl Game {
                     self.add_struct(t, x, y, -1);
                 }
             }
+            // an evac point of their own, so they earn research points from the start
+            let pads = [(11, -5), (-5, 22), (-5, -32), (11, 10), (11, -20), (-24, 10), (-24, -20), (24, -5)];
+            if let Some((x, y)) = pads.into_iter().map(|(dx, dy)| (x0 + dx, y0 + dy)).find(|&(x, y)| self.can_place(S::Pad, x, y)) {
+                self.add_struct(S::Pad, x, y, -1);
+            }
         }
+        self.actor = 0;
         if self.hqs.len() > 1 {
             self.zone_dirty = true;
             let obj = Arc::new(self.build_obj());
@@ -962,9 +989,6 @@ impl Game {
 
     pub fn can_place(&self, t: S, x: i32, y: i32) -> bool {
         let d = def(t);
-        if !self.build_ok(t) {
-            return false;
-        }
         if x < 1 || y < 1 || x + d.w >= W as i32 || y + d.h >= H as i32 {
             return false;
         }
@@ -1031,7 +1055,7 @@ impl Game {
     fn add_struct_on(&mut self, t: S, x: i32, y: i32, roof: i32, on: i32) -> usize {
         let d = def(t);
         let idx = self.structs.len();
-        let hp = d.hp * self.armour(t);
+        let hp = d.hp * self.armour(t, self.actor);
         let mut s = Structure {
             t,
             x,
@@ -1050,6 +1074,7 @@ impl Game {
             target: None,
             charge: 0.0,
             snd: -100.0,
+            owner: self.actor as u8,
         };
         if !s.up() {
             for yy in y..y + d.h {
@@ -1088,19 +1113,27 @@ impl Game {
         idx
     }
 
-    /// Health multiplier from Reinforced armour (walls and turrets only).
-    pub fn armour(&self, t: S) -> f32 {
-        let hull = if t == S::Helium && self.has_up(Up::HeliumHull) { 2.0 } else { 1.0 };
-        hull * if self.research.armour && (t == S::Wall || def(t).turret) { 1.75 } else { 1.0 }
+    /// Player `o`'s upgrades (the host's for anyone past the last player).
+    pub fn pk(&self, o: usize) -> &Perks {
+        &self.perks[o.min(self.perks.len() - 1)]
     }
-    /// A turret's reach, with rooftop and Long barrels bonuses.
-    pub fn turret_range(&self, t: S, roof: bool) -> f32 {
+    /// Player `o`'s research.
+    pub fn res(&self, o: usize) -> &Research {
+        &self.pk(o).research
+    }
+    /// Health multiplier from Reinforced armour (walls and turrets only), for player `o`'s.
+    pub fn armour(&self, t: S, o: usize) -> f32 {
+        let hull = if t == S::Helium && self.has_up(o, Up::HeliumHull) { 2.0 } else { 1.0 };
+        hull * if self.res(o).armour && (t == S::Wall || def(t).turret) { 1.75 } else { 1.0 }
+    }
+    /// A turret's reach, with rooftop and its owner's Long barrels bonuses.
+    pub fn turret_range(&self, t: S, roof: bool, o: usize) -> f32 {
         let up = match t {
-            S::Flame if self.has_up(Up::FlameReach) => 1.3,
-            S::Helium if self.has_up(Up::HeliumReach) => 1.35,
+            S::Flame if self.has_up(o, Up::FlameReach) => 1.3,
+            S::Helium if self.has_up(o, Up::HeliumReach) => 1.35,
             _ => 1.0,
         };
-        def(t).range * if roof { 1.6 } else { 1.0 } * if self.research.barrels { 1.25 } else { 1.0 } * up
+        def(t).range * if roof { 1.6 } else { 1.0 } * if self.res(o).barrels { 1.25 } else { 1.0 } * up
     }
     /// Height a structure stands at: a building's roof, a bunker's top, or the ground.
     pub fn struct_base(&self, i: usize) -> f32 {
@@ -1123,11 +1156,11 @@ impl Game {
     pub fn can_mount(&self, t: S, b: usize) -> bool {
         let d = def(t);
         let Some(bs) = self.structs.get(b) else { return false };
-        self.research.mounts
+        self.res(self.actor).mounts
             && d.turret
             && !d.ground
             && d.w <= bs.w
-            && self.build_ok(t)
+            && self.build_ok(self.actor, t)
             && !bs.dead
             && !bs.pending
             && bs.t == S::Bunker
@@ -1148,47 +1181,47 @@ impl Game {
         self.add_struct_on(t, (c.x - d.w as f32 / 2.0) as i32, (c.y - d.h as f32 / 2.0) as i32, -1, b as i32);
         true
     }
-    pub fn has_up(&self, u: Up) -> bool {
-        self.ups.contains(&u)
+    pub fn has_up(&self, o: usize, u: Up) -> bool {
+        self.pk(o).ups.contains(&u)
     }
-    /// Damage multiplier from campaign upgrades.
-    pub fn dmg_mult(&self, t: S) -> f32 {
+    /// Damage multiplier from player `o`'s campaign upgrades.
+    pub fn dmg_mult(&self, t: S, o: usize) -> f32 {
         match t {
-            S::Gun if self.has_up(Up::GunAp) => 1.5,
-            S::Flame if self.has_up(Up::FlameNapalm) => 1.5,
-            S::Artillery if self.has_up(Up::ArtyHe) => 1.3,
+            S::Gun if self.has_up(o, Up::GunAp) => 1.5,
+            S::Flame if self.has_up(o, Up::FlameNapalm) => 1.5,
+            S::Artillery if self.has_up(o, Up::ArtyHe) => 1.3,
             _ => 1.0,
         }
     }
-    /// Blast or beam width multiplier from campaign upgrades.
-    pub fn rad_mult(&self, t: S) -> f32 {
+    /// Blast or beam width multiplier from player `o`'s campaign upgrades.
+    pub fn rad_mult(&self, t: S, o: usize) -> f32 {
         match t {
-            S::Cannon if self.has_up(Up::CannonSplash) => 1.4,
-            S::Rail if self.has_up(Up::RailWide) => 1.5,
-            S::Artillery if self.has_up(Up::ArtyHe) => 1.4,
+            S::Cannon if self.has_up(o, Up::CannonSplash) => 1.4,
+            S::Rail if self.has_up(o, Up::RailWide) => 1.5,
+            S::Artillery if self.has_up(o, Up::ArtyHe) => 1.4,
             _ => 1.0,
         }
     }
-    /// Time between shots, with campaign upgrades.
-    pub fn reload(&self, t: S) -> f32 {
+    /// Time between shots, with player `o`'s campaign upgrades.
+    pub fn reload(&self, t: S, o: usize) -> f32 {
         def(t).rate
             * match t {
-                S::Gun if self.has_up(Up::GunRapid) => 1.0 / 1.4,
-                S::Cannon if self.has_up(Up::CannonAuto) => 0.7,
-                S::Rail if self.has_up(Up::RailCaps) => 0.65,
-                S::Artillery if self.has_up(Up::ArtyRapid) => 0.7,
+                S::Gun if self.has_up(o, Up::GunRapid) => 1.0 / 1.4,
+                S::Cannon if self.has_up(o, Up::CannonAuto) => 0.7,
+                S::Rail if self.has_up(o, Up::RailCaps) => 0.65,
+                S::Artillery if self.has_up(o, Up::ArtyRapid) => 0.7,
                 _ => 1.0,
             }
     }
-    /// Whether the campaign's tech tree lets this be built (always, outside a campaign).
-    pub fn build_ok(&self, t: S) -> bool {
-        t == S::Hq || self.allowed.as_ref().is_none_or(|a| a.builds.contains(&t))
+    /// Whether player `o`'s campaign tech tree lets them build this (always, outside a campaign).
+    pub fn build_ok(&self, o: usize, t: S) -> bool {
+        t == S::Hq || self.pk(o).allowed.as_ref().is_none_or(|a| a.builds.contains(&t))
     }
-    pub fn unit_ok(&self, u: U) -> bool {
-        self.allowed.as_ref().is_none_or(|a| a.units.contains(&u))
+    pub fn unit_ok(&self, o: usize, u: U) -> bool {
+        self.pk(o).allowed.as_ref().is_none_or(|a| a.units.contains(&u))
     }
-    pub fn ability_ok(&self, a: A) -> bool {
-        self.allowed.as_ref().is_none_or(|al| al.abilities.contains(&a))
+    pub fn ability_ok(&self, o: usize, a: A) -> bool {
+        self.pk(o).allowed.as_ref().is_none_or(|al| al.abilities.contains(&a))
     }
 
     /// Buys and places a structure on the ground. Returns false if it can't go there or you can't afford it.
@@ -1196,7 +1229,7 @@ impl Game {
         let d = def(t);
         let c = vec2(x as f32 + d.w as f32 / 2.0, y as f32 + d.h as f32 / 2.0);
         let cost = self.cost_at(t, c);
-        if self.scrap < cost || !self.can_place(t, x, y) {
+        if self.scrap < cost || !self.build_ok(self.actor, t) || !self.can_place(t, x, y) {
             return false;
         }
         self.scrap -= cost;
@@ -1207,7 +1240,7 @@ impl Game {
     pub fn place_roof(&mut self, t: S, b: usize, p: Vec2) -> bool {
         let d = def(t);
         let cost = self.cost_at(t, p);
-        if !d.turret || d.ground || self.scrap < cost || !self.can_place_roof(t, b, p) || !self.build_ok(t) {
+        if !d.turret || d.ground || self.scrap < cost || !self.can_place_roof(t, b, p) || !self.build_ok(self.actor, t) {
             return false;
         }
         self.scrap -= cost;
@@ -1865,21 +1898,23 @@ impl Game {
                     // a full ammo store idles the plants instead of burning scrap
                     if self.scrap >= 3.0 * DT && self.ammo < self.ammo_cap {
                         self.scrap -= 3.0 * DT;
-                        let rate = if self.research.presses { 10.0 } else { 6.0 };
+                        let rate = if self.res(s.owner as usize).presses { 10.0 } else { 6.0 };
                         self.gain_ammo(rate * DT * im);
                     }
                 }
                 _ => {}
             }
         }
-        if let Some((r, t)) = self.research.busy {
-            let t = t - DT;
-            if t <= 0.0 {
-                self.research.busy = None;
-                self.complete_research(r);
-                self.show(format!("Research complete: {}", rdef(r).name), 3.0);
-            } else {
-                self.research.busy = Some((r, t));
+        for o in 0..self.perks.len() {
+            if let Some((r, t)) = self.perks[o].research.busy {
+                let t = t - DT;
+                if t <= 0.0 {
+                    self.perks[o].research.busy = None;
+                    self.complete_research(o, r);
+                    self.show(format!("Research complete: {}", rdef(r).name), 3.0);
+                } else {
+                    self.perks[o].research.busy = Some((r, t));
+                }
             }
         }
     }
@@ -2205,11 +2240,12 @@ impl Game {
                 (s.t, s.center(), s.up())
             };
             let d = def(t);
+            let o = self.structs[i].owner as usize;
             self.structs[i].cd -= DT;
             if self.structs[i].cd > 0.0 || self.ammo < d.ammo {
                 continue;
             }
-            let range = self.turret_range(t, up);
+            let range = self.turret_range(t, up, o);
             let tg = if t == S::Gun {
                 let cell = self.target_cell(center, range, &claimed, |_| false);
                 if let Some(k) = cell {
@@ -2217,7 +2253,7 @@ impl Game {
                 }
                 cell.map(Self::cell_pos)
             } else {
-                let rad = d.rad * self.rad_mult(t);
+                let rad = d.rad * self.rad_mult(t, o);
                 let tg = self.cluster_target(center, range, rad, &shells);
                 if let Some(p) = tg {
                     shells.push((p, rad));
@@ -2226,9 +2262,9 @@ impl Game {
             };
             if let Some(tg) = tg {
                 let src = self.rev_src(RevKey::Struct(i));
-                self.blast(tg, d.rad * self.rad_mult(t), d.dmg * self.dmg_mult(t), d.bdmg, src, 0.0);
+                self.blast(tg, d.rad * self.rad_mult(t, o), d.dmg * self.dmg_mult(t, o), d.bdmg, src, 0.0);
                 self.ammo -= d.ammo;
-                self.structs[i].cd = self.reload(t);
+                self.structs[i].cd = self.reload(t, o);
                 self.structs[i].last_fire = self.time;
                 self.structs[i].aim = libm::atan2f(tg.y - center.y, tg.x - center.x);
                 let base = self.struct_base(i);
@@ -2395,7 +2431,7 @@ impl Game {
 
     /// The railgun's aim: of the directions through the biggest groups in range, the one whose
     /// whole beam crosses the most hostiles once they have moved on for the length of the charge.
-    fn rail_target(&self, c: Vec2, range: f32) -> Option<Vec2> {
+    fn rail_target(&self, c: Vec2, range: f32, o: usize) -> Option<Vec2> {
         let st = self.faction().stats;
         let hq = self.world.hq;
         // most hordes walk for the HQ; lead them by how far they get while the slug charges
@@ -2409,7 +2445,7 @@ impl Game {
             .collect();
         cand.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         cand.truncate(40);
-        let rad = def(S::Rail).rad * self.rad_mult(S::Rail);
+        let rad = def(S::Rail).rad * self.rad_mult(S::Rail, o);
         let mut best = None;
         let mut bs = 5;
         let mut seen: Vec<usize> = Vec::new();
@@ -2510,9 +2546,10 @@ impl Game {
                 (s.t, s.center(), s.up())
             };
             let d = def(t);
+            let o = self.structs[i].owner as usize;
             match t {
                 S::Flame => {
-                    let range = self.turret_range(t, false);
+                    let range = self.turret_range(t, false, o);
                     if self.structs[i].charge > 0.0 {
                         // spraying: a cone of fire from the walls out to the target, leaving napalm
                         self.structs[i].charge -= DT;
@@ -2526,16 +2563,16 @@ impl Game {
                             let f = k as f32 / 4.0;
                             let p = c + dir * (start + (reach - start) * f);
                             let r = d.rad * (0.55 + f * 0.75);
-                            self.swarm.add_damage(p.x, p.y, r, d.dmg * self.dmg_mult(t), src);
+                            self.swarm.add_damage(p.x, p.y, r, d.dmg * self.dmg_mult(t, o), src);
                             self.damage_hives(p, r, 1.0);
                             if (self.ticks + k) % 2 == 0 {
                                 self.booms.push(Boom { p, r, t: 0.3, life: 0.3, kind: 3 });
                             }
                             if lay && k > 0 {
-                                self.napalm.push(Napalm { p, r: r * 0.8, t: NAPALM_LIFE });
+                                self.napalm.push(Napalm { p, r: r * 0.8, t: NAPALM_LIFE, dmg: NAPALM_DPS * DT * self.dmg_mult(S::Flame, o) });
                             }
                         }
-                        let cd = self.reload(t);
+                        let cd = self.reload(t, o);
                         let s = &mut self.structs[i];
                         s.last_fire = self.time;
                         if s.charge <= 0.0 {
@@ -2560,7 +2597,7 @@ impl Game {
                     self.sfx.push((Sfx::Flame, c));
                 }
                 S::Rail => {
-                    let range = self.turret_range(t, up);
+                    let range = self.turret_range(t, up, o);
                     if self.structs[i].charge > 0.0 {
                         self.structs[i].charge -= DT;
                         if self.structs[i].charge > 0.0 {
@@ -2578,7 +2615,7 @@ impl Game {
                             if p.x < 1.0 || p.y < 1.0 || p.x >= W as f32 - 1.0 || p.y >= H as f32 - 1.0 {
                                 break;
                             }
-                            self.swarm.add_damage(p.x, p.y, d.rad * self.rad_mult(t), d.dmg, src);
+                            self.swarm.add_damage(p.x, p.y, d.rad * self.rad_mult(t, o), d.dmg, src);
                         }
                         for k in 1..=8 {
                             self.damage_hives(c + dir * range * k as f32 / 8.0, d.rad, 40.0);
@@ -2595,9 +2632,9 @@ impl Game {
                         continue;
                     }
                     // wait for a line worth the slug
-                    if let Some(tg) = self.rail_target(c, range) {
+                    if let Some(tg) = self.rail_target(c, range, o) {
                         self.ammo -= d.ammo;
-                        let cd = self.reload(t);
+                        let cd = self.reload(t, o);
                         let s = &mut self.structs[i];
                         s.target = Some(tg);
                         s.charge = RAIL_CHARGE;
@@ -2606,7 +2643,7 @@ impl Game {
                     }
                 }
                 S::Helium => {
-                    let r = self.turret_range(t, up);
+                    let r = self.turret_range(t, up, o);
                     let rr = r / CG as f32;
                     let (cx, cy) = (c.x / CG as f32, c.y / CG as f32);
                     let (x0, x1) = ((cx - rr).floor().max(0.0) as usize, ((cx + rr).ceil() as usize).min(CW - 1));
@@ -2631,9 +2668,9 @@ impl Game {
                     let r = self.rng.f().sqrt() * spread;
                     let hit = (to + vec2(libm::cosf(a), libm::sinf(a)) * r)
                         .clamp(vec2(1.0, 1.0), vec2(W as f32 - 2.0, H as f32 - 2.0));
-                    self.shells.push(Shell { from: c, to: hit, t: 0.0, dur: 1.5 + dist / 260.0 });
+                    self.shells.push(Shell { from: c, to: hit, t: 0.0, dur: 1.5 + dist / 260.0, own: o as u8 });
                     self.ammo -= d.ammo;
-                    let cd = self.reload(t);
+                    let cd = self.reload(t, o);
                     let s = &mut self.structs[i];
                     s.cd = cd;
                     s.last_fire = self.time;
@@ -2659,7 +2696,7 @@ impl Game {
                         Some(at) => {
                             let s = &self.structs[i];
                             let base = vec2(c.x, (s.y + s.h + 1) as f32);
-                            let n = if self.research.rescue { 12 } else { 8 };
+                            let n = if self.res(s.owner as usize).rescue { 12 } else { 8 };
                             if self.send_squad_from(base, at, n, i as i32) {
                                 RESCUE_EVERY
                             } else {
@@ -2673,10 +2710,9 @@ impl Game {
             }
         }
         // burning napalm
-        let burn = NAPALM_DPS * DT * self.dmg_mult(S::Flame);
         for n in &mut self.napalm {
             n.t -= DT;
-            self.swarm.add_damage(n.p.x, n.p.y, n.r, burn, 0);
+            self.swarm.add_damage(n.p.x, n.p.y, n.r, n.dmg, 0);
         }
         self.napalm.retain(|n| n.t > 0.0);
         // shells in the air
@@ -2684,13 +2720,13 @@ impl Game {
         for sh in &mut self.shells {
             sh.t += DT;
             if sh.t >= sh.dur {
-                landed.push(sh.to);
+                landed.push((sh.to, sh.own as usize));
             }
         }
         self.shells.retain(|s| s.t < s.dur);
         let d = def(S::Artillery);
-        let (rad, dmg) = (d.rad * self.rad_mult(S::Artillery), d.dmg * self.dmg_mult(S::Artillery));
-        for p in landed {
+        for (p, o) in landed {
+            let (rad, dmg) = (d.rad * self.rad_mult(S::Artillery, o), d.dmg * self.dmg_mult(S::Artillery, o));
             self.blast(p, rad, dmg, d.bdmg, 0, 60.0);
             self.booms.push(Boom { p, r: rad, t: 0.7, life: 0.7, kind: 0 });
             self.sfx.push((Sfx::ArtilleryHit, p));
@@ -2743,12 +2779,13 @@ impl Game {
 
     // ----------------------------------------------------------------------------- abilities
 
-    pub fn ability_locked(&self, a: A) -> bool {
-        (a == A::Icbm && !self.has(S::Silo)) || !self.ability_ok(a)
+    pub fn ability_locked(&self, o: usize, a: A) -> bool {
+        (a == A::Icbm && !self.has(S::Silo)) || !self.ability_ok(o, a)
     }
-    pub fn can_use(&self, a: A) -> bool {
+    /// Whether player `o` can call this in right now.
+    pub fn can_use(&self, o: usize, a: A) -> bool {
         let d = adef(a);
-        !self.ability_locked(a)
+        !self.ability_locked(o, a)
             && self.cooldown(a) <= 0.0
             && self.scrap >= d.cost
             && self.ammo >= d.ammo
@@ -2776,34 +2813,40 @@ impl Game {
             .collect();
         (s.iter().filter(|s| s.cd <= 0.0).count(), s.len())
     }
-    pub fn upgraded(&self, a: A) -> bool {
+    /// Whether player `o` has the research that upgrades this ability.
+    pub fn upgraded(&self, o: usize, a: A) -> bool {
+        let r = self.res(o);
         match a {
-            A::Rescue => self.research.rescue,
-            A::Air => self.research.air,
-            A::Icbm => self.research.nuke,
+            A::Rescue => r.rescue,
+            A::Air => r.air,
+            A::Icbm => r.nuke,
             A::Gunship => true,
         }
     }
-    pub fn can_research(&self, r: R) -> bool {
+    /// Whether player `o` can start researching this at the lab (each player researches for themselves).
+    pub fn can_research(&self, o: usize, r: R) -> bool {
         !self.campaign
-            && !self.research.has(r)
-            && self.research.busy.is_none()
+            && !self.res(o).has(r)
+            && self.res(o).busy.is_none()
             && self.has(S::Lab)
             && self.scrap >= rdef(r).cost
     }
+    /// The acting player starts researching this.
     pub fn start_research(&mut self, r: R) {
-        if self.can_research(r) {
+        let o = self.actor.min(self.perks.len() - 1);
+        if self.can_research(o, r) {
             self.scrap -= rdef(r).cost;
-            self.research.busy = Some((r, 30.0));
+            self.perks[o].research.busy = Some((r, 30.0));
             self.show(format!("Researching {} (30 s)", rdef(r).name), 2.5);
         }
     }
-    /// Turns a research topic on, including for what's already built.
-    pub fn complete_research(&mut self, r: R) {
-        self.research.set(r);
+    /// Turns a research topic on for player `o`, including for what they've already built.
+    pub fn complete_research(&mut self, o: usize, r: R) {
+        let o = o.min(self.perks.len() - 1);
+        self.perks[o].research.set(r);
         if r == R::Armour {
             for s in &mut self.structs {
-                if s.t == S::Wall || def(s.t).turret {
+                if s.owner as usize == o && (s.t == S::Wall || def(s.t).turret) {
                     s.hp *= 1.75;
                     s.max *= 1.75;
                 }
@@ -2820,7 +2863,8 @@ impl Game {
     }
 
     pub fn use_ability(&mut self, a: A, from: Vec2, to: Vec2) -> bool {
-        if !self.can_use(a) {
+        let o = self.actor;
+        if !self.can_use(o, a) {
             return false;
         }
         match a {
@@ -2830,7 +2874,7 @@ impl Game {
                 }
             }
             A::Air => {
-                let upgraded = self.research.air;
+                let upgraded = self.res(o).air;
                 // the run is drawn from `from` to `to`; a plain click gets a short run through it
                 let (start, end) = if from.distance(to) > 8.0 {
                     (from, from + (to - from).clamp_length_max(AIR_RUN_MAX))
@@ -2898,10 +2942,10 @@ impl Game {
                     to,
                     t: 0.0,
                     dur: 5.0,
-                    nuke: self.research.nuke,
+                    nuke: self.res(o).nuke,
                 });
                 self.show(
-                    if self.research.nuke {
+                    if self.res(o).nuke {
                         "Nuclear launch detected"
                     } else {
                         "ICBM launched"
@@ -3112,6 +3156,8 @@ impl Game {
                 continue;
             }
             self.extracted += n;
+            let o = (self.structs[pi].owner as usize).min(self.perks.len() - 1);
+            self.perks[o].flown += n;
             self.score += 100.0 * n as f32;
             self.gain_scrap(EVAC_SCRAP * n as f32);
             self.gain_ammo(EVAC_AMMO * n as f32);
@@ -3596,7 +3642,7 @@ impl Game {
     }
 
     pub fn send_squad(&mut self, at: Vec2) -> bool {
-        let n = if self.research.rescue { 18 } else { 10 };
+        let n = if self.res(self.actor).rescue { 18 } else { 10 };
         let near = self.hq_near(at);
         let hq = self.hqs.iter().map(|&i| &self.structs[i]).find(|s| !s.dead && s.center() == near).unwrap_or(&self.structs[self.hq_idx]);
         let base = vec2(hq.center().x, (hq.y + hq.h + 2) as f32);
@@ -3645,6 +3691,7 @@ impl Game {
             gt: 0.0,
             found: 0,
             from,
+            own: if from >= 0 { self.structs[from as usize].owner } else { self.actor as u8 },
         });
         true
     }
@@ -3652,15 +3699,16 @@ impl Game {
     fn squads_tick(&mut self) {
         let obj = self.obj.clone();
         let hqd = self.hq_dist.clone();
-        let (max_pick, pick_r) = if self.research.rescue {
-            (120usize, 90.0)
-        } else {
-            (50usize, 60.0)
-        };
         for si in 0..self.squads.len() {
             if self.squads[si].done {
                 continue;
             }
+            // bigger pick-ups with the owner's Rescue research
+            let (max_pick, pick_r) = if self.res(self.squads[si].own as usize).rescue {
+                (120usize, 90.0)
+            } else {
+                (50usize, 60.0)
+            };
             let n = self.squads[si].m.len();
             let cap = max_pick.div_ceil(n.max(1)) as u8;
             let mut live = 0;
@@ -3844,7 +3892,7 @@ impl Game {
 
     pub fn deploy(&mut self, kind: U, at: Vec2) -> bool {
         let d = udef(kind);
-        if self.scrap < d.cost || self.world.irradiated_at(at) || !self.unit_ok(kind) {
+        if self.scrap < d.cost || self.world.irradiated_at(at) || !self.unit_ok(self.actor, kind) {
             return false;
         }
         if !self.spawn_group(kind, d.n, at) {

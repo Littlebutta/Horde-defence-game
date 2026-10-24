@@ -203,8 +203,15 @@ pub fn plan(t: S, a: Vec2, b: Vec2) -> Vec<(i32, i32)> {
 
 pub const BAD_TARGET: &str = "Can't target that";
 
-/// Carries out one command. Returns a line to show the player who gave it, if any.
-pub fn apply(g: &mut Game, c: Cmd) -> Option<&'static str> {
+/// Carries out one command from player `p` (what they build is theirs and gets their upgrades).
+/// Returns a line to show the player who gave it, if any.
+pub fn apply(g: &mut Game, p: usize, c: Cmd) -> Option<&'static str> {
+    g.actor = p.min(g.perks.len() - 1);
+    let r = apply_as(g, c);
+    g.actor = 0;
+    r
+}
+fn apply_as(g: &mut Game, c: Cmd) -> Option<&'static str> {
     match c {
         Cmd::Build { t, a, b } => {
             let placed = plan(t, a, b).into_iter().filter(|(x, y)| g.place(t, *x, *y)).count();
@@ -880,7 +887,7 @@ impl Session {
 pub fn run_tick(g: &mut Game, cmds: &[(u8, Cmd)], me: usize) -> Vec<&'static str> {
     let mut out = Vec::new();
     for (p, c) in cmds {
-        let r = apply(g, *c);
+        let r = apply(g, *p as usize, *c);
         if std::env::var("PH_NETTEST").is_ok() {
             eprintln!("tick {} player {} {:?} -> {:?}", g.ticks, p, c, r);
         }

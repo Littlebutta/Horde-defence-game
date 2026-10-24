@@ -17,6 +17,7 @@ use macroquad::prelude::*;
 
 mod invite;
 mod settings;
+mod techtree;
 mod widgets;
 use widgets::{R_CTRL, R_PANEL};
 
@@ -28,8 +29,9 @@ enum Tool {
     Ability(A),
 }
 
-/// Something done on the campaign screen. In co-op each one is a vote, and a majority of the
-/// players makes the host carry it out.
+/// Something done on the campaign screen. In co-op, picking the city and going in are votes, and a
+/// majority of the players makes the host carry them out; buying tech and recruiting are each
+/// player's own, paid from their own research points.
 #[derive(Clone, Copy, PartialEq)]
 enum HubAct {
     Tech(campaign::Tech),
@@ -56,7 +58,7 @@ impl HubAct {
             _ => return None,
         })
     }
-    /// A player has one vote of each kind at a time: something to buy, a city, ready to go.
+    /// A player has one vote of each kind at a time: a city, ready to go. (Kind 0, buying, is no vote.)
     fn kind(self) -> u8 {
         match self {
             HubAct::Tech(_) | HubAct::Recruit(_) => 0,
@@ -120,8 +122,8 @@ pub struct App {
     globe: Option<globe::Globe>,
     /// the city the globe last turned to
     globe_city: Option<usize>,
-    /// which part of the campaign's tech tree is showing
-    tech_tab: usize,
+    /// the campaign's tech tree is open over the campaign screen
+    tree_open: bool,
     /// co-op campaign screen, on the host: who voted for what, and for how many players
     votes: Vec<(usize, HubAct)>,
     vote_n: usize,
@@ -288,7 +290,7 @@ impl App {
             pack: campaign::Pack::start(),
             globe: None,
             globe_city: None,
-            tech_tab: 0,
+            tree_open: false,
             votes: Vec::new(),
             vote_n: 0,
             hub_text: String::new(),
@@ -464,7 +466,15 @@ impl App {
                 }
                 net::Note::Vote { player, act } => {
                     if let (Some(a), Screen::Hub) = (HubAct::from_code(act), &self.screen) {
-                        self.cast(player, a);
+                        if a.kind() == 0 {
+                            // a guest buying with their own points: done straight away
+                            if let Some(c) = self.camp.as_mut() {
+                                Self::do_act(c, player, a);
+                                campaign::save(c);
+                            }
+                        } else {
+                            self.cast(player, a);
+                        }
                     }
                 }
                 net::Note::Msg(m) => {
@@ -525,7 +535,7 @@ impl App {
             s.issue(c);
             return None;
         }
-        let m = net::apply(g, c);
+        let m = net::apply(g, 0, c);
         if let Some(m) = m {
             self.msg = (m.into(), 1.5);
         }
@@ -731,6 +741,9 @@ impl App {
     }
     /// Host: player `p` votes for `a` (voting for it again takes the vote back).
     fn cast(&mut self, p: usize, a: HubAct) {
+        if a.kind() == 0 {
+            return;
+        }
         if let Some(i) = self.votes.iter().position(|v| *v == (p, a)) {
             self.votes.remove(i);
             return;
@@ -741,25 +754,27 @@ impl App {
     /// A campaign screen action: done right away alone, a vote in co-op. True when it's time to
     /// go and defend the picked city.
     fn hub_act(&mut self, c: &mut Campaign, a: HubAct) -> bool {
-        if !self.hub_votes() {
-            return Self::do_act(c, a);
-        }
+        // a guest's purchases and votes go to the host, who keeps the campaign
         if self.client() {
             if let Some(s) = self.sess.as_mut() {
                 s.vote(a.code());
             }
             return false;
         }
+        if !self.hub_votes() || a.kind() == 0 {
+            return Self::do_act(c, self.me(), a);
+        }
         self.cast(0, a);
         false
     }
-    fn do_act(c: &mut Campaign, a: HubAct) -> bool {
+    /// Carries out a campaign screen action for player `p`.
+    fn do_act(c: &mut Campaign, p: usize, a: HubAct) -> bool {
         match a {
             HubAct::Tech(t) => {
-                c.buy(t);
+                c.buy(p, t);
             }
             HubAct::Recruit(u) => {
-                c.recruit(u);
+                c.recruit(p, u);
             }
             HubAct::City(i) => c.select(i),
             HubAct::Go => return true,
@@ -777,10 +792,7 @@ impl App {
         let win = self.votes.iter().map(|v| v.1).find(|a| self.votes.iter().filter(|v| v.1 == *a).count() * 2 > n);
         let Some(a) = win else { return false };
         self.votes.retain(|v| v.1.kind() != a.kind() && !(a.kind() == 1 && v.1 == HubAct::Go));
-        match a {
-            HubAct::Tech(t) if !c.can_buy(t) => false,
-            _ => Self::do_act(c, a),
-        }
+        Self::do_act(c, 0, a)
     }
     /// The coloured dots of the players voting for `a`, in the top right of `r`.
     fn vote_marks(&self, r: Rect, a: HubAct) {
@@ -980,7 +992,7 @@ impl App {
                         c.city().name,
                         FACTIONS[c.fac].name,
                         DIFFS[c.diff].0,
-                        c.points
+                        c.points(0)
                     )
                 };
                 let sr = d.cut_top(42.0, 0.0);
@@ -1209,7 +1221,12 @@ impl App {
         // this campaign's maps, the city picked first
         let want: Vec<&City> = std::iter::once(c.city()).chain(c.all()).collect();
         self.pack.want(&want);
-        let before = (c.points, c.tech.len(), c.units.len(), c.current);
+        let before = (c.crew.clone(), c.units.len(), c.current);
+        // the tech tree covers the screen: nothing under it reacts
+        let tree = self.tree_open && !c.finished();
+        if tree {
+            self.blocked = true;
+        }
         // co-op: a guest sees the host's campaign and votes; the host carries out what wins
         let guest = self.client();
         if !guest && self.hub_votes() && self.tally(&mut c) {
@@ -1264,7 +1281,7 @@ impl App {
                 globe::Mark { lat: city.lat, lon: city.lon, col, label, picked: i == c.current && !c.finished() }
             })
             .collect();
-        let over_globe = !left.contains(m) && !right.contains(m);
+        let over_globe = !left.contains(m) && !right.contains(m) && !self.blocked;
         let (hover, clicked) = globe.draw(gc, gr, &marks, &self.fonts.head, over_globe, get_frame_time());
         if let Some(i) = clicked {
             self.hub_act(&mut c, HubAct::City(i));
@@ -1277,7 +1294,7 @@ impl App {
         let sub = format!("Day {} · {} cities held · {} lost of {} allowed", c.fought as f32 * campaign::DAYS_PER_CITY, c.held(), c.lost, campaign::MAX_LOST);
         text(&self.fonts.mono, &sub, sw / 2.0 - text_w(&self.fonts.mono, &sub, 13.0) / 2.0, 66.0, 13.0, p.dim);
         let n = self.sess.as_ref().map(|s| s.players.len()).unwrap_or(1);
-        let vote_hint = format!("Co-op: every pick here is a vote. {} of {} players carry it.", n / 2 + 1, n);
+        let vote_hint = format!("Co-op: the next city and going in are votes ({} of {} players carry them). Research is each player's own.", n / 2 + 1, n);
         let hint = if self.hub_votes() { vote_hint.as_str() } else { "Drag to turn the globe, scroll to zoom, click a city to pick it" };
         text(&self.fonts.mono, hint, sw / 2.0 - text_w(&self.fonts.mono, hint, 12.0) / 2.0, sh - 22.0, 12.0, p.dim);
 
@@ -1368,7 +1385,7 @@ impl App {
             }
             let gr = Rect::new(x0, by + 30.0, w, 46.0);
             let label = if self.hub_votes() { format!("Ready to defend {}", city.name) } else { format!("Defend {}", city.name) };
-            let go = (self.button(gr, &label, true, true) || is_key_pressed(KeyCode::Enter)) && self.hub_act(&mut c, HubAct::Go);
+            let go = (self.button(gr, &label, true, true) || (!self.blocked && is_key_pressed(KeyCode::Enter))) && self.hub_act(&mut c, HubAct::Go);
             self.vote_marks(gr, HubAct::Go);
             if go {
                 campaign::save(&c);
@@ -1392,75 +1409,17 @@ impl App {
             return;
         }
 
-        // ---- right: the tech tree and the army
-        self.panel(right);
-        let (x0, w) = (right.x + 20.0, right.w - 40.0);
-        let mut y = right.y + 34.0;
-        text(&self.fonts.head, "Tech tree", x0, y, 20.0, p.text);
-        let pts = format!("{} RP", c.points);
-        text(&self.fonts.head, &pts, x0 + w - text_w(&self.fonts.head, &pts, 22.0), y, 22.0, p.accent);
-        y += 18.0;
-        text(&self.fonts.mono, "Every civilian flown out is a research point.", x0, y, 11.5, p.dim);
-        y += 12.0;
-        const GROUPS: [&str; 5] = ["Turrets", "Support", "Abilities", "Research", "Turret upgrades"];
-        const SHORT: [&str; 5] = ["Turrets", "Support", "Abilities", "Research", "Upgrades"];
-        if let Some(k) = self.segmented(Rect::new(right.x + 10.0, y, right.w - 20.0, 30.0), &SHORT, self.tech_tab) {
-            self.tech_tab = k;
-        }
-        y += 40.0;
-        let list: Vec<campaign::Tech> = campaign::TECH.into_iter().filter(|t| t.group() == GROUPS[self.tech_tab.min(4)]).collect();
-        let army_h = 150.0;
-        let rh = ((right.y + right.h - army_h - y) / list.len().max(6) as f32).clamp(30.0, 50.0);
-        for t in list {
-            let rr = Rect::new(right.x + 10.0, y, right.w - 20.0, rh - 4.0);
-            draw_rectangle(rr.x, rr.y, rr.w, rr.h, p.panel2);
-            let fs = if rh < 38.0 { 12.5 } else { 14.0 };
-            text(&self.fonts.head, t.name(), rr.x + 10.0, rr.y + rr.h / 2.0 + fs * 0.35, fs, if c.has_tech(t) { p.text } else { p.dim });
-            let br = Rect::new(rr.x + rr.w - 112.0, rr.y + (rr.h - 26.0).max(0.0) / 2.0, 104.0, rr.h.min(26.0));
-            let need = t.needs().filter(|n| !c.has_tech(*n));
-            if c.has_tech(t) {
-                self.button(br, "Unlocked", false, true);
-            } else if let Some(n) = need {
-                self.button(br, "Locked", false, false);
-                if self.hot(rr) {
-                    self.tip = Some(format!("{}: {} Needs {} first.", t.name(), t.tip(), n.name()));
-                }
-            } else if self.button(br, &format!("{} RP", t.cost()), c.can_buy(t) && !c.finished(), false) {
-                self.hub_act(&mut c, HubAct::Tech(t));
-            }
-            self.vote_marks(br, HubAct::Tech(t));
-            if self.hot(rr) && need.is_none() {
-                self.tip = Some(format!("{}: {}", t.name(), t.tip()));
-            }
-            y += rh;
-        }
-        // the army, at the bottom
-        let mut y = right.y + right.h - army_h + 14.0;
-        text(&self.fonts.head, "Your army", x0, y, 16.0, p.text);
-        y += 10.0;
-        let (rs, rn) = c.army(U::Rifle);
-        let (ts, _) = c.army(U::Tank);
-        let ar = Rect::new(right.x + 10.0, y, right.w - 20.0, 52.0);
-        draw_rectangle(ar.x, ar.y, ar.w, ar.h, p.panel2);
-        text(&self.fonts.mono, &format!("{} rifle squads ({} soldiers) · {} tanks", rs, rn, ts), x0, ar.y + 22.0, 12.5, p.text);
-        text(&self.fonts.mono, "Survivors march on to the next city.", x0, ar.y + 40.0, 11.0, p.dim);
-        y += ar.h + 8.0;
-        let half = (right.w - 28.0) / 2.0;
-        for (k, u) in [U::Rifle, U::Tank].into_iter().enumerate() {
-            let cost = campaign::recruit_cost(u);
-            let br = Rect::new(right.x + 10.0 + k as f32 * (half + 8.0), y, half, 34.0);
-            let open = u == U::Rifle || c.has_tech(campaign::Tech::Unit(u));
-            let label = if open { format!("+{} · {} RP", udef(u).name.to_lowercase(), cost) } else { format!("{}: locked", udef(u).name) };
-            if self.button(br, &label, open && c.points >= cost && !c.finished(), false) {
-                self.hub_act(&mut c, HubAct::Recruit(u));
-            }
-            self.vote_marks(br, HubAct::Recruit(u));
+        // ---- right: research and the army
+        self.research_column(&mut c, right);
+        if tree {
+            self.blocked = self.settings_open || self.invite_open;
+            self.tech_tree(&mut c);
         }
 
-        if (c.points, c.tech.len(), c.units.len(), c.current) != before && !guest {
+        if (&c.crew, c.units.len(), c.current) != (&before.0, before.1, before.2) && !guest {
             campaign::save(&c);
         }
-        if c.current != before.3 {
+        if c.current != before.2 {
             self.status.clear();
         }
         self.camp = Some(c);
@@ -1521,10 +1480,14 @@ impl App {
         c.cities[7].fate = Fate::Fallen;
         c.cities[7].days = 0.0;
         c.cities[c.current].fate = Fate::Open;
-        c.points = 260;
+        c.crew_mut(0).points = 260;
+        // a co-op partner's own points
+        c.crew_mut(1).points = 180;
         c.flown = 640;
         c.kills = 182_000;
-        c.tech = vec![campaign::Tech::Build(S::Gun), campaign::Tech::Ability(A::Rescue), campaign::Tech::Research(R::Rescue), campaign::Tech::Research(R::Armour)];
+        c.crew_mut(0).tech = vec![campaign::Tech::Build(S::Gun), campaign::Tech::Ability(A::Rescue), campaign::Tech::Research(R::Rescue), campaign::Tech::Research(R::Armour)];
+        // PH_TREE=1: the tech tree open
+        self.tree_open = std::env::var("PH_TREE").is_ok();
         c.units = vec![(U::Rifle, 6), (U::Rifle, 4), (U::Tank, 1), (U::Rifle, 6)];
         let c_city = c.city();
         self.camp = Some(c);
@@ -1618,6 +1581,10 @@ impl App {
     }
 
     /// Where the local player's own HQ is (in co-op each player has one).
+    /// This player's index in co-op (0: the host, or playing alone).
+    fn me(&self) -> usize {
+        self.sess.as_ref().map(|s| s.me).unwrap_or(0)
+    }
     fn my_hq(&self, g: &Game) -> Vec2 {
         let me = self.sess.as_ref().map(|s| s.me).unwrap_or(0);
         match g.hqs.get(me).map(|&i| &g.structs[i]) {
@@ -2180,12 +2147,12 @@ impl App {
                         let cost = g.cost_at(t, c);
                         let afford = g.scrap >= cost;
                         ghost(c.x - d.w as f32 / 2.0, c.y - d.h as f32 / 2.0, d.w as f32, d.h as f32, def(S::Bunker).ht, can && afford);
-                        let s = if !g.research.mounts {
+                        let s = if !g.res(self.me()).mounts {
                             "Research turret mounts to build on bunkers".to_string()
                         } else if !can {
                             "This bunker already has a turret".to_string()
                         } else {
-                            draw_circle_lines(c.x, c.y, g.turret_range(t, true), 0.4, rgba(255, 212, 59, 0.6));
+                            draw_circle_lines(c.x, c.y, g.turret_range(t, true, self.me()), 0.4, rgba(255, 212, 59, 0.6));
                             format!("On the bunker  ${:.0}  +60% range", cost)
                         };
                         return Some((s, if can && afford { WHITE } else { rgb(255, 140, 140) }));
@@ -2199,7 +2166,7 @@ impl App {
                         let cost = g.cost_at(t, p);
                         let afford = g.scrap >= cost;
                         ghost(q.x - d.w as f32 / 2.0, q.y - d.h as f32 / 2.0, d.w as f32, d.h as f32, g.world.buildings[b].h, can && afford);
-                        draw_circle_lines(q.x, q.y, g.turret_range(t, true), 0.4, rgba(255, 212, 59, 0.6));
+                        draw_circle_lines(q.x, q.y, g.turret_range(t, true, self.me()), 0.4, rgba(255, 212, 59, 0.6));
                         let extra = cost - d.cost;
                         let s = if !can {
                             "Rooftop full".to_string()
@@ -2260,7 +2227,7 @@ impl App {
                         spots[0].1 as f32 + d.h as f32 / 2.0,
                     );
                     if d.turret && d.range > 0.0 {
-                        draw_circle_lines(c.x, c.y, g.turret_range(t, false), 0.4, rgba(255, 212, 59, 0.6));
+                        draw_circle_lines(c.x, c.y, g.turret_range(t, false, self.me()), 0.4, rgba(255, 212, 59, 0.6));
                     }
                     if t == S::Rescue {
                         draw_circle_lines(c.x, c.y, RESCUE_REACH, 0.8, rgba(64, 192, 87, 0.7));
@@ -2318,7 +2285,7 @@ impl App {
                 let blue = rgba(66, 133, 244, 0.8);
                 match a {
                     A::Icbm => {
-                        let r = if g.research.nuke { 190.0 } else { 120.0 };
+                        let r = if g.res(self.me()).nuke { 190.0 } else { 120.0 };
                         draw_circle(mw.x, mw.y, r, rgba(234, 67, 53, 0.08));
                         draw_circle_lines(mw.x, mw.y, r, 1.0, rgba(234, 67, 53, 0.8));
                         // the core where nothing survives; the blast weakens out to the edge
@@ -2326,13 +2293,13 @@ impl App {
                         draw_circle_lines(mw.x, mw.y, r * NUKE_CORE, 0.6, rgba(234, 67, 53, 0.6));
                     }
                     A::Rescue => {
-                        let r = if g.research.rescue { 90.0 } else { 60.0 };
+                        let r = if g.res(self.me()).rescue { 90.0 } else { 60.0 };
                         draw_circle_lines(mw.x, mw.y, r, 0.6, rgba(64, 192, 87, 0.8));
                     }
                     A::Gunship => draw_circle_lines(mw.x, mw.y, 25.0 + 34.0, 0.6, blue),
                     A::Air => {
                         let start = self.rpress.or(self.press.map(|p| p.1)).filter(|w| w.distance(mw) > 8.0);
-                        let n = if g.research.air { 12 } else { 5 };
+                        let n = if g.res(self.me()).air { 12 } else { 5 };
                         match start {
                             Some(s) => {
                                 // the run as it will fly: a line from the start, a ring where each bomb lands
@@ -2464,9 +2431,9 @@ impl App {
         // ---- build bar, centred along the bottom; wraps to two rows when the HUD is too narrow
         let items: Vec<Tool> = BUILD_ORDER
             .iter()
-            .filter(|s| !(g.campaign && **s == S::Lab) && g.build_ok(**s))
+            .filter(|s| !(g.campaign && **s == S::Lab) && g.build_ok(self.me(), **s))
             .map(|s| Tool::Build(*s))
-            .chain([U::Rifle, U::Tank].into_iter().filter(|u| g.unit_ok(*u)).map(Tool::Unit))
+            .chain([U::Rifle, U::Tank].into_iter().filter(|u| g.unit_ok(self.me(), *u)).map(Tool::Unit))
             .collect();
         let (gap, ch) = (6.0, 60.0);
         let room = area.w - 24.0 - 16.0;
@@ -2545,13 +2512,13 @@ impl App {
         let lab_h = if lab { 44.0 + LAB_ONLY.len() as f32 * 30.0 } else { 0.0 };
         let room = bar.y - 12.0 - ay - lab_h;
         // campaign: only what the tech tree has unlocked
-        let abilities: Vec<A> = ABILITIES.into_iter().filter(|a| g.ability_ok(*a)).collect();
+        let abilities: Vec<A> = ABILITIES.into_iter().filter(|a| g.ability_ok(self.me(), *a)).collect();
         let card_h = ((room - 8.0 * (abilities.len().max(1) as f32 - 1.0)) / abilities.len().max(1) as f32).clamp(64.0, 88.0);
         for a in abilities {
             let d = adef(a);
             let r = Rect::new(ax, ay, aw, card_h);
             self.panel(r);
-            let usable = g.can_use(a);
+            let usable = g.can_use(self.me(), a);
             let active = self.tool == Tool::Ability(a);
             let head = Rect::new(r.x, r.y, r.w, card_h - 30.0);
             let hot = self.hot(head);
@@ -2561,7 +2528,7 @@ impl App {
                 rrect(head.inset(3.0), R_CTRL, alpha(p.text, 0.05));
             }
             let fc = if usable { p.text } else { p.dim };
-            let name = format!("{}{}", d.name, if g.upgraded(a) && a != A::Gunship { " +" } else { "" });
+            let name = format!("{}{}", d.name, if g.upgraded(self.me(), a) && a != A::Gunship { " +" } else { "" });
             text(&self.fonts.head, &name, r.x + 14.0, r.y + 23.0, 16.0, fc);
             self.keycap(r.right() - 26.0, r.y + 9.0, d.key);
             let mut line = format!("${:.0}", d.cost);
@@ -2769,11 +2736,11 @@ impl App {
         let p = pal(self.dark);
         let d = rdef(rs);
         let mut prog = None;
-        let (label, en) = if g.research.has(rs) {
+        let (label, en) = if g.res(self.me()).has(rs) {
             (format!("Done: {}", d.name), false)
         } else if g.campaign {
             ("Unlock between cities".to_string(), false)
-        } else if let Some((busy, t)) = g.research.busy {
+        } else if let Some((busy, t)) = g.res(self.me()).busy {
             if busy == rs {
                 prog = Some(t);
                 (format!("Researching… {:.0}s", t), false)
@@ -2783,10 +2750,10 @@ impl App {
         } else if !g.has(S::Lab) {
             (format!("{}: needs research lab", verb), false)
         } else {
-            (format!("{}: {} ${:.0}", verb, d.name, d.cost), g.can_research(rs))
+            (format!("{}: {} ${:.0}", verb, d.name, d.cost), g.can_research(self.me(), rs))
         };
         let hot = self.hot(ur);
-        let done = g.research.has(rs);
+        let done = g.res(self.me()).has(rs);
         rrect(ur, 6.0, if hot && en { mix(p.panel2, p.accent, 0.22) } else { p.panel2 });
         if en {
             rrect_lines(ur, 6.0, 1.0, alpha(p.accent, 0.5));
@@ -2814,17 +2781,17 @@ impl App {
         // keyboard
         while let Some(ch) = get_char_pressed() {
             let ch = ch.to_ascii_lowercase();
-            if let Some(s) = BUILD_ORDER.iter().find(|s| def(**s).key == ch && !(g.campaign && **s == S::Lab) && g.build_ok(**s) && self.placing.is_none()) {
+            if let Some(s) = BUILD_ORDER.iter().find(|s| def(**s).key == ch && !(g.campaign && **s == S::Lab) && g.build_ok(self.me(), **s) && self.placing.is_none()) {
                 self.tool = if self.tool == Tool::Build(*s) {
                     Tool::None
                 } else {
                     Tool::Build(*s)
                 };
             } else if self.placing.is_some() && !"tkmfh".contains(ch) {
-            } else if let Some(u) = [U::Rifle, U::Tank].iter().find(|u| udef(**u).key == ch && g.unit_ok(**u)) {
+            } else if let Some(u) = [U::Rifle, U::Tank].iter().find(|u| udef(**u).key == ch && g.unit_ok(self.me(), **u)) {
                 self.tool = Tool::Unit(*u);
             } else if let Some(a) = ABILITIES.iter().find(|a| adef(**a).key == ch) {
-                if g.can_use(*a) {
+                if g.can_use(self.me(), *a) {
                     self.tool = Tool::Ability(*a);
                 }
             } else {
@@ -3135,11 +3102,15 @@ impl App {
             }
             if self.screen == Screen::Hub {
                 let Some(c) = self.camp.clone() else { return false };
-                let tech = campaign::TECH.into_iter().find(|t| c.can_buy(*t));
-                self.hub_test += 1;
                 let me = self.sess.as_ref().unwrap().me;
+                let tech = campaign::TECH.into_iter().find(|t| c.can_buy(me, *t));
+                self.hub_test += 1;
                 let vote = |app: &mut App, a: HubAct| {
-                    if host {
+                    if host && a.kind() == 0 {
+                        if let Some(c) = app.camp.as_mut() {
+                            App::do_act(c, me, a);
+                        }
+                    } else if host {
                         app.cast(me, a);
                     } else if let Some(s) = app.sess.as_mut() {
                         s.vote(a.code());
@@ -3152,7 +3123,8 @@ impl App {
                     }
                 }
                 if self.hub_test > 60 && c.current == 5 && self.hub_test % 60 == 0 {
-                    eprintln!("{} hub: city {} tech {} points {}", if host { "host" } else { "guest" }, c.current, c.tech.len(), c.points);
+                    let crews: Vec<String> = c.crew.iter().map(|k| format!("{} tech/{} RP", k.tech.len(), k.points)).collect();
+                    eprintln!("{} hub: city {} crews {}", if host { "host" } else { "guest" }, c.current, crews.join(", "));
                     vote(self, HubAct::Go);
                 }
             }

@@ -209,10 +209,16 @@ impl Tech {
             Tech::Up(_) => "Turret upgrades",
         }
     }
-    /// What has to be unlocked first, if anything.
+    /// What has to be unlocked first, if anything: its parent in the tree.
     pub fn needs(self) -> Option<Tech> {
         match self {
             Tech::Up(u) => Some(Tech::Build(updef(u).on)),
+            Tech::Build(S::Cannon | S::Flame) => Some(Tech::Build(S::Gun)),
+            Tech::Build(S::Rail | S::Artillery) => Some(Tech::Build(S::Cannon)),
+            Tech::Build(S::Silo) => Some(Tech::Ability(A::Air)),
+            Tech::Build(S::Helipad) => Some(Tech::Ability(A::Gunship)),
+            Tech::Unit(U::Tank) => Some(Tech::Research(R::Armour)),
+            Tech::Ability(A::Gunship) => Some(Tech::Ability(A::Air)),
             Tech::Research(R::Rescue) => Some(Tech::Ability(A::Rescue)),
             Tech::Research(R::Carpet) => Some(Tech::Ability(A::Air)),
             Tech::Research(R::Nuke) => Some(Tech::Build(S::Silo)),
@@ -220,6 +226,63 @@ impl Tech {
             _ => None,
         }
     }
+    /// What it opens up, in tree order.
+    pub fn children(self) -> Vec<Tech> {
+        TECH.into_iter().filter(|t| t.needs() == Some(self)).collect()
+    }
+}
+
+/// Where a tech sits in the drawn tree: which of the two halves, its column (how deep it is) and
+/// its row (in leaf slots, from the top of its half; parents sit level with the middle of their
+/// children).
+#[derive(Clone, Copy, Debug)]
+pub struct Node {
+    pub tech: Tech,
+    pub half: usize,
+    pub col: usize,
+    pub row: f32,
+}
+
+/// Empty rows left between one root's branch and the next.
+pub const TREE_GAP: f32 = 0.6;
+
+/// The whole tech tree laid out left to right, roots first: the branches are split between two
+/// halves of about the same number of rows. Also returns each half's (columns, rows).
+pub fn tree_layout() -> (Vec<Node>, [(usize, f32); 2]) {
+    fn leaves(t: Tech) -> usize {
+        t.children().into_iter().map(leaves).sum::<usize>().max(1)
+    }
+    fn place(t: Tech, half: usize, col: usize, row: &mut f32, out: &mut Vec<Node>) -> f32 {
+        let kids = t.children();
+        let y = if kids.is_empty() {
+            let y = *row;
+            *row += 1.0;
+            y
+        } else {
+            let ys: Vec<f32> = kids.into_iter().map(|k| place(k, half, col + 1, row, out)).collect();
+            (ys[0] + ys[ys.len() - 1]) / 2.0
+        };
+        out.push(Node { tech: t, half, col, row: y });
+        y
+    }
+    let roots: Vec<Tech> = TECH.into_iter().filter(|t| t.needs().is_none()).collect();
+    let total: usize = roots.iter().map(|r| leaves(*r)).sum();
+    let mut out = Vec::new();
+    let mut rows = [0.0f32; 2];
+    let (mut half, mut done) = (0, 0);
+    for r in roots {
+        if half == 0 && done * 2 >= total {
+            half = 1;
+        }
+        if rows[half] > 0.0 {
+            rows[half] += TREE_GAP;
+        }
+        place(r, half, 0, &mut rows[half], &mut out);
+        done += leaves(r);
+    }
+    let cols = |h: usize| out.iter().filter(|n| n.half == h).map(|n| n.col + 1).max().unwrap_or(1);
+    let dims = [(cols(0), rows[0]), (cols(1), rows[1])];
+    (out, dims)
 }
 
 /// Civilians it costs to recruit troops between cities.
@@ -304,6 +367,19 @@ pub fn pick_cities(seed: u64) -> Vec<usize> {
     picks
 }
 
+/// One player's side of a campaign: their research points and what they have unlocked. In co-op
+/// every player earns points from the civilians flown out of their own evac points and builds up
+/// their own tech tree; alone there is just the one.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Crew {
+    pub points: u32,
+    pub tech: Vec<Tech>,
+}
+static NO_CREW: Crew = Crew { points: 0, tech: Vec::new() };
+
+/// Players a campaign keeps a crew for (co-op's limit).
+pub const CREWS: usize = 4;
+
 #[derive(Clone)]
 pub struct Campaign {
     pub fac: usize,
@@ -318,10 +394,8 @@ pub struct Campaign {
     /// cities fought in so far, held or lost
     pub fought: u32,
     pub lost: u32,
-    /// civilians to spend
-    pub points: u32,
-    /// tech tree unlocks bought with research points
-    pub tech: Vec<Tech>,
+    /// each player's research points and tech tree unlocks, host first
+    pub crew: Vec<Crew>,
     /// surviving troops: (kind, soldiers) per squad
     pub units: Vec<(U, u32)>,
     pub flown: u32,
@@ -344,7 +418,7 @@ impl Campaign {
                 CityState { days, start: days, rate: 0.7 + 0.8 * hash(seed, 100 + i as u64), fate: Fate::Open }
             })
             .collect();
-        Campaign { fac, diff, seed, picks, cities, current: 0, fought: 0, lost: 0, points: 0, tech: Vec::new(), units: Vec::new(), flown: 0, kills: 0 }
+        Campaign { fac, diff, seed, picks, cities, current: 0, fought: 0, lost: 0, crew: vec![Crew::default()], units: Vec::new(), flown: 0, kills: 0 }
     }
     /// Fired after three lost cities.
     pub fn fired(&self) -> bool {
@@ -411,30 +485,46 @@ impl Campaign {
             self.current = i;
         }
     }
-    pub fn has_tech(&self, t: Tech) -> bool {
-        self.tech.contains(&t)
+    /// Player `p`'s research points and unlocks.
+    pub fn crew(&self, p: usize) -> &Crew {
+        self.crew.get(p).unwrap_or(&NO_CREW)
     }
-    /// Unlocked, or what it needs is: it can be bought once there are points for it.
-    pub fn open_tech(&self, t: Tech) -> bool {
-        !self.has_tech(t) && t.needs().is_none_or(|n| self.has_tech(n))
+    pub fn crew_mut(&mut self, p: usize) -> &mut Crew {
+        let p = p.min(CREWS - 1);
+        if self.crew.len() <= p {
+            self.crew.resize(p + 1, Crew::default());
+        }
+        &mut self.crew[p]
     }
-    pub fn can_buy(&self, t: Tech) -> bool {
-        self.open_tech(t) && self.points >= t.cost()
+    pub fn points(&self, p: usize) -> u32 {
+        self.crew(p).points
     }
-    pub fn buy(&mut self, t: Tech) -> bool {
-        if !self.can_buy(t) {
+    pub fn has_tech(&self, p: usize, t: Tech) -> bool {
+        self.crew(p).tech.contains(&t)
+    }
+    /// Not unlocked yet, but what it needs is: it can be bought once there are points for it.
+    pub fn open_tech(&self, p: usize, t: Tech) -> bool {
+        !self.has_tech(p, t) && t.needs().is_none_or(|n| self.has_tech(p, n))
+    }
+    pub fn can_buy(&self, p: usize, t: Tech) -> bool {
+        self.open_tech(p, t) && self.points(p) >= t.cost()
+    }
+    /// Player `p` unlocks `t` with their own points.
+    pub fn buy(&mut self, p: usize, t: Tech) -> bool {
+        if !self.can_buy(p, t) {
             return false;
         }
-        self.points -= t.cost();
-        self.tech.push(t);
+        let c = self.crew_mut(p);
+        c.points -= t.cost();
+        c.tech.push(t);
         true
     }
-    /// What the tech tree lets a city's game build, recruit and use.
-    pub fn allowed(&self) -> Allowed {
+    /// What player `p`'s tech tree lets them build, recruit and use in a city.
+    pub fn allowed(&self, p: usize) -> Allowed {
         let mut a = Allowed { builds: START_BUILDS.to_vec(), units: vec![U::Rifle], abilities: Vec::new() };
         // storage is never locked away: scrap depots from the start, ammo depots with the plant
         a.builds.push(S::ScrapDepot);
-        for t in &self.tech {
+        for t in &self.crew(p).tech {
             match *t {
                 Tech::Build(s) => {
                     a.builds.push(s);
@@ -453,12 +543,13 @@ impl Campaign {
         }
         a
     }
-    pub fn recruit(&mut self, u: U) -> bool {
+    /// Player `p` recruits a squad for everybody's army with their own points.
+    pub fn recruit(&mut self, p: usize, u: U) -> bool {
         let c = recruit_cost(u);
-        if self.points < c {
+        if self.points(p) < c || (u != U::Rifle && !self.has_tech(p, Tech::Unit(u))) {
             return false;
         }
-        self.points -= c;
+        self.crew_mut(p).points -= c;
         self.units.push((u, udef(u).n as u32));
         true
     }
@@ -474,18 +565,21 @@ impl Campaign {
         g.campaign = true;
         g.goal = self.hold_secs();
         g.set_civilians(self.civilians_at(self.current));
-        g.allowed = Some(self.allowed());
-        // the starter base keeps only what's unlocked
-        for i in 0..g.structs.len() {
-            if !g.structs[i].dead && !g.build_ok(g.structs[i].t) {
-                g.kill_struct(i);
+        // every player gets their own unlocks and upgrades
+        for o in 0..g.perks.len() {
+            g.perks[o].allowed = Some(self.allowed(o));
+            for t in &self.crew(o).tech {
+                match *t {
+                    Tech::Research(r) => g.complete_research(o, r),
+                    Tech::Up(u) => g.perks[o].ups.push(u),
+                    _ => {}
+                }
             }
         }
-        for t in &self.tech {
-            match *t {
-                Tech::Research(r) => g.complete_research(r),
-                Tech::Up(u) => g.ups.push(u),
-                _ => {}
+        // the starter bases keep only what their players have unlocked
+        for i in 0..g.structs.len() {
+            if !g.structs[i].dead && !g.build_ok(g.structs[i].owner as usize, g.structs[i].t) {
+                g.kill_struct(i);
             }
         }
         let hq = g.world.hq;
@@ -512,7 +606,10 @@ impl Campaign {
     pub fn harvest(&mut self, g: &Game) {
         let cur = self.current;
         if g.won {
-            self.points += g.extracted;
+            // each player's research points are the civilians flown out from their own evac points
+            for (o, k) in g.perks.iter().enumerate() {
+                self.crew_mut(o).points += k.flown;
+            }
             self.flown += g.extracted;
             self.cities[cur].fate = Fate::Held;
         } else {
@@ -576,7 +673,19 @@ pub fn from_text(t: &str) -> Campaign {
     c.current = num("current").unwrap_or(0).min(c.cities.len() as u64 - 1) as usize;
     c.fought = num("fought").unwrap_or(0) as u32;
     c.lost = num("lost").unwrap_or(0) as u32;
-    c.points = num("points").unwrap_or(0) as u32;
+    // the host's crew, then any co-op players' (points1=, tech1=, ...)
+    for p in 0..CREWS {
+        let k = |name: &str| if p == 0 { name.to_string() } else { format!("{}{}", name, p) };
+        let (pts, tech) = (num(&k("points")), field(&k("tech")));
+        if p > 0 && pts.is_none() && tech.is_none() {
+            continue;
+        }
+        let cr = c.crew_mut(p);
+        cr.points = pts.unwrap_or(0) as u32;
+        if let Some(v) = tech {
+            cr.tech = v.split(',').filter_map(|x| x.trim().parse::<usize>().ok()).filter_map(|i| TECH.get(i).copied()).collect();
+        }
+    }
     c.flown = num("flown").unwrap_or(0) as u32;
     c.kills = num("kills").unwrap_or(0);
     if let Some(v) = field("cities") {
@@ -594,9 +703,6 @@ pub fn from_text(t: &str) -> Campaign {
                 };
             }
         }
-    }
-    if let Some(v) = field("tech") {
-        c.tech = v.split(',').filter_map(|x| x.trim().parse::<usize>().ok()).filter_map(|i| TECH.get(i).copied()).collect();
     }
     if let Some(v) = field("units") {
         c.units = v
@@ -619,7 +725,11 @@ pub fn from_text(t: &str) -> Campaign {
 /// written exactly, so both sides build the same game.
 pub fn to_text(c: &Campaign) -> String {
     let picks: Vec<String> = c.picks.iter().map(|i| i.to_string()).collect();
-    let tech: Vec<String> = c.tech.iter().filter_map(|t| TECH.iter().position(|x| x == t)).map(|i| i.to_string()).collect();
+    let tech_of = |cr: &Crew| -> String { cr.tech.iter().filter_map(|t| TECH.iter().position(|x| x == t)).map(|i| i.to_string()).collect::<Vec<_>>().join(",") };
+    let mut others = String::new();
+    for (p, cr) in c.crew.iter().enumerate().skip(1) {
+        others += &format!("points{}={}\ntech{}={}\n", p, cr.points, p, tech_of(cr));
+    }
     let units: Vec<String> = c.units.iter().map(|(u, n)| format!("{}{}", if *u == U::Rifle { 'r' } else { 't' }, n)).collect();
     let cities: Vec<String> = c
         .cities
@@ -635,7 +745,7 @@ pub fn to_text(c: &Campaign) -> String {
         })
         .collect();
     format!(
-        "faction={}\ndifficulty={}\nseed={}\npicks={}\ncurrent={}\nfought={}\nlost={}\npoints={}\nflown={}\nkills={}\ncities={}\ntech={}\nunits={}\n",
+        "faction={}\ndifficulty={}\nseed={}\npicks={}\ncurrent={}\nfought={}\nlost={}\npoints={}\nflown={}\nkills={}\ncities={}\ntech={}\nunits={}\n{}",
         c.fac,
         c.diff,
         c.seed,
@@ -643,12 +753,13 @@ pub fn to_text(c: &Campaign) -> String {
         c.current,
         c.fought,
         c.lost,
-        c.points,
+        c.crew(0).points,
         c.flown,
         c.kills,
         cities.join(","),
-        tech.join(","),
-        units.join(",")
+        tech_of(c.crew(0)),
+        units.join(","),
+        others
     )
 }
 
@@ -854,7 +965,7 @@ mod tests {
         let mut c = Campaign::with_seed(2, 1, 77);
         c.fought = 3;
         c.current = 4;
-        c.tech = vec![Tech::Research(R::Armour), Tech::Build(S::Gun), Tech::Research(R::Barrels), Tech::Ability(A::Rescue), Tech::Research(R::Rescue), Tech::Up(Up::GunAp)];
+        c.crew_mut(0).tech = vec![Tech::Research(R::Armour), Tech::Build(S::Gun), Tech::Research(R::Barrels), Tech::Ability(A::Rescue), Tech::Research(R::Rescue), Tech::Up(Up::GunAp)];
         c.units = vec![(U::Rifle, 6), (U::Tank, 1), (U::Rifle, 2)];
         c
     }
@@ -871,12 +982,13 @@ mod tests {
         let (mut a, mut b) = (mk(), mk());
         assert_eq!(a.groups.len(), 3);
         assert_eq!(a.civs.len(), c.civilians_at(4));
-        assert!(a.research.armour && a.research.barrels && a.research.rescue && !a.research.nuke);
-        assert!(!a.can_research(R::Nuke));
-        assert!(a.build_ok(S::Gun) && a.build_ok(S::Plant) && a.build_ok(S::Pad) && !a.build_ok(S::Cannon) && !a.build_ok(S::Lab));
-        assert!(a.unit_ok(U::Rifle) && !a.unit_ok(U::Tank));
-        assert!(!a.can_use(A::Air) && a.has_up(Up::GunAp) && a.dmg_mult(S::Gun) > 1.0);
-        assert!(a.structs.iter().all(|s| s.dead || a.build_ok(s.t)));
+        let r = a.res(0);
+        assert!(r.armour && r.barrels && r.rescue && !r.nuke);
+        assert!(!a.can_research(0, R::Nuke));
+        assert!(a.build_ok(0, S::Gun) && a.build_ok(0, S::Plant) && a.build_ok(0, S::Pad) && !a.build_ok(0, S::Cannon) && !a.build_ok(0, S::Lab));
+        assert!(a.unit_ok(0, U::Rifle) && !a.unit_ok(0, U::Tank));
+        assert!(!a.can_use(0, A::Air) && a.has_up(0, Up::GunAp) && a.dmg_mult(S::Gun, 0) > 1.0);
+        assert!(a.structs.iter().all(|s| s.dead || a.build_ok(0, s.t)));
         for _ in 0..400 {
             a.tick();
             b.tick();
@@ -884,10 +996,11 @@ mod tests {
         assert_eq!(a.checksum(), b.checksum());
         let mut next = c.clone();
         a.extracted = 77;
+        a.perks[0].flown = 77;
         a.won = true;
         next.harvest(&a);
         assert_eq!(next.fought, 4);
-        assert_eq!(next.points, 77);
+        assert_eq!(next.points(0), 77);
         assert_eq!(next.cities[4].fate, Fate::Held);
         assert_ne!(next.current, 4);
         let alive: usize = a.groups.iter().filter(|g| !g.dead).count();
@@ -900,12 +1013,13 @@ mod tests {
         let mut c = Campaign::with_seed(0, 1, 5);
         let mut g = Game::new(crate::citygen::generate(4), 0, 1.0, 5);
         g.extracted = 500;
+        g.perks[0].flown = 500;
         for k in 0..3 {
             assert!(!c.finished());
             c.harvest(&g);
             assert_eq!(c.lost, k + 1);
         }
-        assert_eq!(c.points, 0);
+        assert_eq!(c.points(0), 0);
         assert!(c.fired() && c.finished());
     }
 
@@ -974,16 +1088,18 @@ mod tests {
     #[test]
     fn save_roundtrip() {
         let mut c = veteran();
-        c.points = 321;
+        c.crew_mut(0).points = 321;
+        c.crew_mut(2).points = 45;
+        c.crew_mut(2).tech = vec![Tech::Build(S::Flame), Tech::Ability(A::Air)];
         c.kills = 1_234_567;
         c.lost = 2;
         c.cities[6].fate = Fate::Fallen;
         c.cities[2].days = 13.371_337;
         let d = from_text(&to_text(&c));
-        assert_eq!((d.fac, d.diff, d.seed, d.current, d.fought, d.lost, d.points, d.kills), (2, 1, 77, 4, 3, 2, 321, 1_234_567));
+        assert_eq!((d.fac, d.diff, d.seed, d.current, d.fought, d.lost, d.points(0), d.kills), (2, 1, 77, 4, 3, 2, 321, 1_234_567));
         assert_eq!(d.cities, c.cities);
         assert_eq!(d.picks, c.picks);
-        assert_eq!(d.tech, c.tech);
+        assert_eq!(d.crew, c.crew);
         assert_eq!(d.units, c.units);
         assert_eq!(to_text(&d), to_text(&c));
     }
@@ -991,15 +1107,74 @@ mod tests {
     #[test]
     fn shop() {
         let mut c = Campaign::new(0, 1);
-        c.points = 300;
-        assert!(!c.buy(Tech::Up(Up::GunRapid)), "needs the gun turret first");
-        assert!(c.buy(Tech::Build(S::Gun)));
-        assert!(!c.buy(Tech::Build(S::Gun)));
-        assert!(c.allowed().builds.contains(&S::Plant), "the first turret brings the ammo plant");
-        assert!(c.buy(Tech::Up(Up::GunRapid)));
-        assert!(c.recruit(U::Rifle));
-        assert!(!c.recruit(U::Tank));
-        assert_eq!(c.points, 300 - Tech::Build(S::Gun).cost() - Tech::Up(Up::GunRapid).cost() - recruit_cost(U::Rifle));
+        c.crew_mut(0).points = 300;
+        assert!(!c.buy(0, Tech::Up(Up::GunRapid)), "needs the gun turret first");
+        assert!(c.buy(0, Tech::Build(S::Gun)));
+        assert!(!c.buy(0, Tech::Build(S::Gun)));
+        assert!(c.allowed(0).builds.contains(&S::Plant), "the first turret brings the ammo plant");
+        assert!(c.buy(0, Tech::Up(Up::GunRapid)));
+        assert!(c.recruit(0, U::Rifle));
+        assert!(!c.recruit(0, U::Tank));
+        assert!(!c.buy(1, Tech::Build(S::Gun)), "the other player has no points of their own");
+        assert_eq!(c.points(0), 300 - Tech::Build(S::Gun).cost() - Tech::Up(Up::GunRapid).cost() - recruit_cost(U::Rifle));
         assert_eq!(c.army(U::Rifle), (1, 6));
+    }
+
+    /// Co-op: each player gets their own unlocks and upgrades in the city, and earns research
+    /// points from the civilians flown out of their own evac points.
+    #[test]
+    fn coop_crews() {
+        let mut c = Campaign::with_seed(0, 1, 21);
+        c.crew_mut(0).tech = vec![Tech::Build(S::Gun), Tech::Up(Up::GunAp), Tech::Research(R::Armour)];
+        c.crew_mut(1).tech = vec![Tech::Build(S::Flame)];
+        let mut g = Game::new(crate::citygen::generate(6), c.fac, c.horde_mult(), 77);
+        g.add_player_hqs(2);
+        c.apply(&mut g);
+        assert_eq!(g.perks.len(), 2);
+        assert!(g.build_ok(0, S::Gun) && !g.build_ok(0, S::Flame));
+        assert!(g.build_ok(1, S::Flame) && !g.build_ok(1, S::Gun));
+        assert!(g.dmg_mult(S::Gun, 0) > 1.0 && g.dmg_mult(S::Gun, 1) == 1.0);
+        assert!(g.armour(S::Wall, 0) > g.armour(S::Wall, 1));
+        // the second player's starter base is theirs: its guns go (they have none unlocked), their evac point stays
+        assert!(g.structs.iter().filter(|s| s.owner == 1 && !s.dead).any(|s| s.t == S::Pad));
+        assert!(g.structs.iter().filter(|s| s.owner == 1 && !s.dead).all(|s| g.build_ok(1, s.t)));
+        // building as a player makes it theirs
+        g.scrap = 1e6;
+        g.actor = 1;
+        let hq1 = g.structs[g.hqs[1]].center();
+        let placed = (0..400).any(|k| {
+            let (x, y) = (hq1.x as i32 - 30 + (k % 20) * 3, hq1.y as i32 - 30 + (k / 20) * 3);
+            g.place(S::Flame, x, y)
+        });
+        assert!(placed);
+        assert!(!g.place(S::Gun, hq1.x as i32 + 20, hq1.y as i32 + 20), "player 1 has no gun turret unlocked");
+        g.actor = 0;
+        assert_eq!(g.structs.last().unwrap().owner, 1);
+        g.perks[0].flown = 30;
+        g.perks[1].flown = 12;
+        g.extracted = 42;
+        g.won = true;
+        c.harvest(&g);
+        assert_eq!((c.points(0), c.points(1), c.flown), (30, 12, 42));
+    }
+
+    /// The drawn tree: every tech once, each to the right of the one it needs, nothing overlapping.
+    #[test]
+    fn tree_layout_fits() {
+        let (nodes, dims) = tree_layout();
+        assert_eq!(nodes.len(), TECH.len());
+        for n in &nodes {
+            if let Some(p) = n.tech.needs() {
+                let par = nodes.iter().find(|m| m.tech == p).unwrap();
+                assert_eq!((par.half, par.col + 1), (n.half, n.col), "{:?}", n.tech);
+            }
+            for m in &nodes {
+                if m.tech != n.tech && m.half == n.half && m.col == n.col {
+                    assert!((m.row - n.row).abs() >= 0.99, "{:?} and {:?} overlap", m.tech, n.tech);
+                }
+            }
+            assert!(n.row >= 0.0 && n.row < dims[n.half].1 && n.col < dims[n.half].0);
+        }
+        assert!(nodes.iter().any(|n| n.half == 1));
     }
 }

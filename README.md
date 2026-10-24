@@ -61,18 +61,19 @@ Pick **World campaign** on the menu. The outbreak is spreading through the world
 - Every city you fight in takes 10 days. Meanwhile the others count down, each at its own speed, and fewer people are left as a city nears its end. A city that reaches zero falls to the horde and can't be picked any more.
 - The closer a city is to falling, the bigger its horde: from ×0.8 for a quiet city to ×3.2 for one about to fall, plus 6% for every city fought before. Civilians on the map scale with the people still alive (about one per 1,700).
 - Hold each city until the evac timer runs out (7 minutes, 20 seconds longer for every city fought, at most 11).
+- A city's horde depends on how close it is to falling (x0.7 for a quiet city up to x2.3 for one about to go) and on how far the campaign has come: the first city is fought at a little over half strength, and every city held makes the next ones 14% harder.
 - The maps are the city centres. The suggested HQ spot is an airport only when one is close enough to share the map with downtown; otherwise it's the middle of the city. You can move it before the city starts.
-- Every civilian flown out of a held city is a **research point**. Between cities you spend them on the **tech tree** or on recruiting troops. You start with only walls, the scrap extractor, the evac point, the rescue station and rifles; every turret, the tank, every ability and the lab's research must be unlocked. Unlocking your first turret brings the ammo plant with it, and every turret has two upgrades of its own (faster fire, armour piercing, napalm, wider rail beams and so on). There is no research lab inside campaign cities.
+- Every civilian flown out of a held city is a **research point**. Between cities you spend them on the **tech tree** or on recruiting troops. The tech tree (button on the campaign screen, or T) is drawn as a tree: each tech opens up the ones to its right, e.g. gun turret, then cannon and flame bunker, then railgun and artillery, each with its upgrades. You start with only walls, the scrap extractor, the evac point, the rescue station and rifles; every turret, the tank, every ability and the lab's research must be unlocked. Unlocking your first turret brings the ammo plant with it, and every turret has two upgrades of its own (faster fire, armour piercing, napalm, wider rail beams and so on). There is no research lab inside campaign cities.
 - A lost city (the HQ overrun) pays nothing, but the campaign goes on. Lose **three** and the world's governments fire you: the campaign is over.
 - Troops that survive (rifle squads and tanks, with however many soldiers are left) march on to the next city and roll out of the HQ when it starts. Scrap, ammo and buildings stay behind.
 - Progress saves to `data/campaign.txt` after every city and every purchase; **Continue** picks it up.
 - The maps are downloaded from OpenStreetMap ahead of time by the **Download campaign cities** workflow and published as the `cities` release. The game fetches the current campaign's maps from GitHub in the background, three at once and the city you picked first (into `data/campaign`), so no campaign city waits on OpenStreetMap. A map that's missing anyway downloads live like any real city: four map tiles at a time from different OpenStreetMap servers.
 - The globe's coastlines are Natural Earth's 1:50m land (public domain), baked into `assets/land.bin` by `tools/bake_land.py`.
-- The campaign is single player for now.
+- In co-op every player has their own research points and their own tech tree: you earn points from the civilians flown out of your own evac points (each player's starter base has one), and what you unlock and research only upgrades what you build and call in. Picking the next city and going in are votes.
 
 ## Co-op with Steam friends
 
-Up to 4 players share one base: the same scrap, buildings and troops, and everyone can build, deploy and fire abilities.
+Up to 4 players share one base: the same scrap, buildings and troops, and everyone can build, deploy and fire abilities. Upgrades are each player's own: research at the lab only upgrades the turrets, squads and strikes of the player who started it.
 
 1. Everyone starts Steam, then starts `PixelHorde.exe`.
 2. The host clicks **Play co-op with Steam friends**. The Steam invite window opens; invite your friends.
