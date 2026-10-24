@@ -17,7 +17,18 @@ mod world;
 
 use macroquad::prelude::*;
 
-fn conf() -> Conf {
+fn conf() -> macroquad::conf::Conf {
+    macroquad::conf::Conf {
+        miniquad_conf: window_conf(),
+        update_on: None,
+        default_filter_mode: FilterMode::Linear,
+        // room for city meshes that grow when they are clipped to the map border
+        draw_call_vertex_capacity: 70_000,
+        draw_call_index_capacity: 200_000,
+    }
+}
+
+fn window_conf() -> Conf {
     Conf {
         window_title: "Pixel Horde".to_owned(),
         window_width: 1600,
@@ -88,7 +99,8 @@ async fn run(steam: Option<net::Steam>) {
                 if let Ok(v) = std::env::var("PH_STRESS") {
                     if v == "1" {
                         g.stress();
-                        for _ in 0..140 {
+                        let n: u32 = std::env::var("PH_STRESS_TICKS").ok().and_then(|s| s.parse().ok()).unwrap_or(140);
+                        for _ in 0..n {
                             g.tick();
                         }
                         eprintln!(

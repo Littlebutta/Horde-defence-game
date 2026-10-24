@@ -216,6 +216,8 @@ pub struct Game {
     pub mult: f32,
     pub swarm: Swarm,
     pub obj: Arc<Vec<i32>>,
+    /// which neighbours a unit may step to from each cell (see `fields::neighbour_mask`)
+    nb: Arc<Vec<u8>>,
     pub hq_dist: Arc<Vec<u32>>,
     pub hunt: Option<Arc<Vec<u16>>>,
     fw_hq: FieldWorker,
@@ -282,6 +284,8 @@ pub struct Game {
     pub zone_dirty: bool,
     pub struct_dirty: bool,
     pub sim_ms: f32,
+    prof: [f64; 12],
+    prof_n: u64,
     pub rng: Rng,
     sd: Vec<AtomicU32>,
     bd: Vec<AtomicU32>,
@@ -307,6 +311,7 @@ impl Game {
             mult,
             swarm: Swarm::new(),
             obj: Arc::new(vec![FREE; N]),
+            nb: Arc::new(crate::fields::neighbour_mask(&vec![FREE; N])),
             hq_dist: Arc::new(vec![INF; N]),
             hunt: None,
             fw_hq: FieldWorker::new(),
@@ -372,6 +377,8 @@ impl Game {
             zone_dirty: true,
             struct_dirty: true,
             sim_ms: 0.0,
+            prof: [0.0; 12],
+            prof_n: 0,
             rng: Rng::new(seed),
             sd: Vec::new(),
             bd: (0..nb).map(|_| AtomicU32::new(0)).collect(),
@@ -434,7 +441,9 @@ impl Game {
 
     pub fn build_obj(&self) -> Vec<i32> {
         let w = &self.world;
+        use rayon::prelude::*;
         let mut o: Vec<i32> = (0..N)
+            .into_par_iter()
             .map(|i| {
                 let t = w.terrain[i];
                 if t == T_WATER {
@@ -466,8 +475,9 @@ impl Game {
         }
         while let Some(d) = self.fw_hq.poll() {
             match d {
-                Done::Hq { obj, d } => {
+                Done::Hq { obj, d, nb } => {
                     self.obj = obj;
+                    self.nb = nb;
                     self.hq_dist = d;
                     self.pad_dirty = true;
                 }
@@ -1203,7 +1213,14 @@ impl Game {
             return;
         }
         let t0 = std::time::Instant::now();
+        let mut last = t0;
+        let mut lap = |slot: &mut f64| {
+            let now = std::time::Instant::now();
+            *slot += (now - last).as_secs_f64() * 1000.0;
+            last = now;
+        };
         self.pump_fields();
+        lap(&mut self.prof[0]);
         let stats = self.faction().stats;
         // spawns
         let mut q = std::mem::take(&mut self.spawnq);
@@ -1221,6 +1238,7 @@ impl Game {
         }
         q.retain(|s| s.left > 0);
         self.spawnq.extend(q);
+        lap(&mut self.prof[1]);
         for p in std::mem::take(&mut self.conv) {
             let seed = self.rng.next_u64();
             self.swarm.spawn(
@@ -1247,6 +1265,7 @@ impl Game {
             a.store(0, Relaxed);
         }
         let obj = self.obj.clone();
+        let nb = self.nb.clone();
         let hqd = self.hq_dist.clone();
         let hunt = self.hunt.clone();
         let revs: Vec<RevIn> = self
@@ -1261,6 +1280,7 @@ impl Game {
         let (killed, deaths) = self.swarm.step(&StepIn {
             dt: DT,
             obj: &obj,
+            nb: &nb,
             hq: &hqd,
             hq_pos: self.world.hq,
             hunt: hunt.as_deref().map(|v| v.as_slice()),
@@ -1273,7 +1293,9 @@ impl Game {
             rev: &revs,
         });
         drop(revs);
+        lap(&mut self.prof[2]);
         self.update_revs(&deaths);
+        lap(&mut self.prof[3]);
         self.kills += killed as u64;
         self.score += killed as f32;
         self.scrap += killed as f32 * self.faction().reward;
@@ -1296,12 +1318,19 @@ impl Game {
             }
         }
         self.civilians();
+        lap(&mut self.prof[4]);
         self.squads_tick();
+        lap(&mut self.prof[5]);
         self.groups_tick();
+        lap(&mut self.prof[6]);
         self.economy();
+        lap(&mut self.prof[7]);
         self.turrets();
+        lap(&mut self.prof[8]);
         self.abilities();
+        lap(&mut self.prof[9]);
         self.director();
+        lap(&mut self.prof[10]);
         for v in self.world.irradiated.iter_mut() {
             if *v > 0.0 {
                 *v = (*v - DT).max(0.0);
@@ -1319,7 +1348,15 @@ impl Game {
         }
         self.booms.retain(|b| b.t > 0.0);
         self.banner.1 -= DT;
+        lap(&mut self.prof[11]);
         self.time += DT;
+        self.prof_n += 1;
+        if self.prof_n % 200 == 0 && std::env::var("PH_PROF").is_ok() {
+            let names = ["fields", "spawn", "swarm", "revs", "damage", "civs", "squads", "groups", "econ", "turrets", "abil", "misc"];
+            let line: Vec<String> = names.iter().zip(self.prof.iter()).map(|(n, v)| format!("{} {:.2}", n, v / 200.0)).collect();
+            eprintln!("ms/tick: {}", line.join(" | "));
+            self.prof = [0.0; 12];
+        }
         self.sim_ms = self.sim_ms * 0.9 + t0.elapsed().as_secs_f32() * 1000.0 * 0.1;
     }
 

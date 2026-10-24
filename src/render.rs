@@ -98,6 +98,7 @@ impl MB {
         }
     }
     fn flush(&mut self) {
+        clip_to_map(&mut self.v, &mut self.i);
         if !self.v.is_empty() {
             self.out.push(Mesh { vertices: std::mem::take(&mut self.v), indices: std::mem::take(&mut self.i), texture: None });
         }
@@ -223,6 +224,72 @@ impl MB {
         self.flush();
         self.out
     }
+}
+
+/// Cuts every triangle to the square map, so streets, rivers and blocks that run past the edge of
+/// the map end cleanly on the border.
+fn clip_to_map(v: &mut Vec<Vertex>, idx: &mut Vec<u16>) {
+    let (w, h) = (W as f32, H as f32);
+    let inside = |p: &Vertex| p.position.x >= 0.0 && p.position.y >= 0.0 && p.position.x <= w && p.position.y <= h;
+    if v.iter().all(inside) {
+        return;
+    }
+    let lerp = |a: &Vertex, b: &Vertex, t: f32| {
+        let c = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+        Vertex {
+            position: a.position.lerp(b.position, t),
+            uv: a.uv.lerp(b.uv, t),
+            color: [c(a.color[0], b.color[0]), c(a.color[1], b.color[1]), c(a.color[2], b.color[2]), c(a.color[3], b.color[3])],
+            normal: a.normal,
+        }
+    };
+    let mut nv: Vec<Vertex> = Vec::with_capacity(v.len());
+    let mut ni: Vec<u16> = Vec::with_capacity(idx.len());
+    let mut remap = vec![u16::MAX; v.len()];
+    for t in idx.chunks_exact(3) {
+        let tri = [&v[t[0] as usize], &v[t[1] as usize], &v[t[2] as usize]];
+        if tri.iter().all(|p| inside(p)) {
+            for &k in t {
+                let k = k as usize;
+                if remap[k] == u16::MAX {
+                    remap[k] = nv.len() as u16;
+                    nv.push(v[k]);
+                }
+                ni.push(remap[k]);
+            }
+            continue;
+        }
+        // Sutherland-Hodgman against the four map edges
+        let mut poly: Vec<Vertex> = tri.iter().map(|p| **p).collect();
+        for (axis, lim, keep_below) in [(0, 0.0, false), (0, w, true), (1, 0.0, false), (1, h, true)] {
+            if poly.is_empty() {
+                break;
+            }
+            let val = |p: &Vertex| if axis == 0 { p.position.x } else { p.position.y };
+            let ok = |p: &Vertex| if keep_below { val(p) <= lim } else { val(p) >= lim };
+            let mut out = Vec::with_capacity(poly.len() + 2);
+            for k in 0..poly.len() {
+                let (a, b) = (&poly[k], &poly[(k + 1) % poly.len()]);
+                if ok(a) {
+                    out.push(*a);
+                }
+                if ok(a) != ok(b) {
+                    let t = (lim - val(a)) / (val(b) - val(a));
+                    out.push(lerp(a, b, t));
+                }
+            }
+            poly = out;
+        }
+        if poly.len() >= 3 {
+            let base = nv.len() as u16;
+            nv.extend_from_slice(&poly);
+            for k in 1..poly.len() as u16 - 1 {
+                ni.extend_from_slice(&[base, base + k, base + k + 1]);
+            }
+        }
+    }
+    *v = nv;
+    *idx = ni;
 }
 
 /// Wall colour for a wall facing `nrm`: lit from the north-west.

@@ -89,6 +89,33 @@ pub fn dial(obj: &[i32], src: &[u32], mode: Mode, max: u32) -> Vec<u32> {
     d
 }
 
+/// For every cell, a bit per direction (in `DX`/`DY` order) that is set when a unit may step that
+/// way as far as the grid goes: inside the map, and for diagonals not squeezing between two blocked
+/// cells. Whether the target cell itself is open is left to the flow field or object grid.
+pub fn neighbour_mask(obj: &[i32]) -> Vec<u8> {
+    use rayon::prelude::*;
+    let mut m = vec![0u8; N];
+    m.par_chunks_mut(W).enumerate().for_each(|(y, row)| {
+        let y = y as i32;
+        for (x, v) in row.iter_mut().enumerate() {
+            let x = x as i32;
+            let mut bits = 0u8;
+            for k in 0..8 {
+                let (nx, ny) = (x + DX[k], y + DY[k]);
+                if nx < 0 || ny < 0 || nx >= W as i32 || ny >= H as i32 {
+                    continue;
+                }
+                if k >= 4 && (obj[y as usize * W + nx as usize] != FREE || obj[ny as usize * W + x as usize] != FREE) {
+                    continue;
+                }
+                bits |= 1 << k;
+            }
+            *v = bits;
+        }
+    });
+    m
+}
+
 pub enum Job {
     Hq {
         obj: Arc<Vec<i32>>,
@@ -116,6 +143,7 @@ pub enum Done {
     Hq {
         obj: Arc<Vec<i32>>,
         d: Arc<Vec<u32>>,
+        nb: Arc<Vec<u8>>,
     },
     Hunt(Arc<Vec<u16>>),
     Target {
@@ -149,10 +177,8 @@ impl FieldWorker {
                 let out = match job {
                     Job::Hq { obj, src } => {
                         let d = dial(&obj, &src, Mode::Hq, INF - 1);
-                        Done::Hq {
-                            obj,
-                            d: Arc::new(d),
-                        }
+                        let nb = Arc::new(neighbour_mask(&obj));
+                        Done::Hq { obj, d: Arc::new(d), nb }
                     }
                     Job::Hunt { obj, src, max } => {
                         let d = dial(&obj, &src, Mode::Open, max);

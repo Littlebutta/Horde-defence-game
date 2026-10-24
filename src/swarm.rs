@@ -14,7 +14,7 @@ use crate::fields::{DX, DY, INF, U16};
 use crate::world::*;
 use macroquad::prelude::{vec2, Vec2};
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering::Relaxed};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Behaviour {
@@ -70,21 +70,26 @@ pub struct RevIn<'a> {
 
 pub struct Swarm {
     pub u: Vec<Unit>,
-    pub dens: Vec<AtomicU32>,
-    pub prev: Vec<AtomicU32>,
+    /// units per cell this tick and last tick (16-bit keeps these grids small and cache friendly)
+    pub dens: Vec<AtomicU16>,
+    pub prev: Vec<AtomicU16>,
     pub tint: Vec<AtomicU8>,
-    pub coarse: Vec<AtomicU32>,
+    /// units per coarse cell, summed from `dens` after each step
+    pub coarse: Vec<u32>,
     pub deaths: Vec<AtomicU32>,
     pub deaths_prev: Vec<AtomicU32>,
     pub dmg: Vec<f32>,
     pub dsrc: Vec<u16>,
     touched: Vec<u32>,
     tick: u64,
+    /// reused buffer for compacting `u`
+    spare: Vec<Unit>,
 }
 
 pub struct StepIn<'a> {
     pub dt: f32,
     pub obj: &'a [i32],
+    pub nb: &'a [u8],
     pub hq: &'a [u32],
     pub hq_pos: Vec2,
     pub hunt: Option<&'a [u16]>,
@@ -115,16 +120,17 @@ impl Swarm {
         let mk = |n: usize| (0..n).map(|_| AtomicU32::new(0)).collect::<Vec<_>>();
         Swarm {
             u: Vec::new(),
-            dens: mk(N),
-            prev: mk(N),
+            dens: (0..N).map(|_| AtomicU16::new(0)).collect(),
+            prev: (0..N).map(|_| AtomicU16::new(0)).collect(),
             tint: (0..N).map(|_| AtomicU8::new(0)).collect(),
-            coarse: mk(CW * CH),
+            coarse: vec![0; CW * CH],
             deaths: mk(CW * CH),
             deaths_prev: mk(CW * CH),
             dmg: vec![0.0; N],
             dsrc: vec![0; N],
             touched: Vec::new(),
             tick: 0,
+            spare: Vec::new(),
         }
     }
     pub fn len(&self) -> usize {
@@ -193,23 +199,27 @@ impl Swarm {
     /// Advances every unit one tick. Returns the number killed and the zombie deaths that call for revenge.
     pub fn step(&mut self, inp: &StepIn) -> (u32, Vec<Death>) {
         self.tick += 1;
+        // keep units that are near each other near each other in memory, so each thread works on
+        // one patch of the map and its grid reads stay in cache (a stable sort keeps this deterministic)
+        if self.tick % 16 == 1 && self.u.len() > 20_000 {
+            self.u.par_sort_by_key(|u| ((u.y as u32 >> 4) * (W as u32 >> 4)) + (u.x as u32 >> 4));
+        }
         std::mem::swap(&mut self.dens, &mut self.prev);
         std::mem::swap(&mut self.deaths, &mut self.deaths_prev);
-        self.dens.par_iter().for_each(|a| a.store(0, Relaxed));
-        self.tint.par_iter().for_each(|a| a.store(0, Relaxed));
-        self.coarse.par_iter().for_each(|a| a.store(0, Relaxed));
+        self.dens.par_chunks_mut(1 << 16).for_each(|c| c.iter_mut().for_each(|a| *a.get_mut() = 0));
+        self.tint.par_chunks_mut(1 << 16).for_each(|c| c.iter_mut().for_each(|a| *a.get_mut() = 0));
         self.deaths.par_iter().for_each(|a| a.store(0, Relaxed));
         let st = inp.stats;
         let zombie = st.mode == Behaviour::Zombie;
         let orc = st.mode == Behaviour::Orc;
         let use_hunt = inp.hunt.is_some() && !(zombie && inp.rush);
         let wander = zombie && !inp.rush;
-        let (obj, hq, hunt) = (inp.obj, inp.hq, inp.hunt.unwrap_or(&[]));
-        let (dens, prev, tint, coarse, deaths, dprev, dmg, dsrc) = (
+        let (obj, nb, hq, hunt) = (inp.obj, inp.nb, inp.hq, inp.hunt.unwrap_or(&[]));
+        let any_dmg = !self.touched.is_empty();
+        let (dens, prev, tint, deaths, dprev, dmg, dsrc) = (
             &self.dens,
             &self.prev,
             &self.tint,
-            &self.coarse,
             &self.deaths,
             &self.deaths_prev,
             &self.dmg,
@@ -244,7 +254,7 @@ impl Swarm {
                         tint[c].fetch_max(TINT_DOWN, Relaxed);
                         continue;
                     }
-                    let dm = dmg[c];
+                    let dm = if any_dmg { dmg[c] } else { 0.0 };
                     if dm > 0.0 {
                         u.hp -= dm;
                         if u.hp <= 0.0 {
@@ -312,14 +322,9 @@ impl Swarm {
                         }
                         dens[c].fetch_add(1, Relaxed);
                         tint[c].fetch_max(TINT_FLY, Relaxed);
-                        coarse[(c / W / CG) * CW + (c % W) / CG].fetch_add(1, Relaxed);
                         continue;
                     }
-                    let free_diag = |k: usize, nx: i32, ny: i32| -> bool {
-                        k < 4
-                            || (obj[cy as usize * W + nx as usize] == FREE
-                                && obj[ny as usize * W + cx as usize] == FREE)
-                    };
+                    let m = nb[c];
                     // zombie revenge: lock on to whoever killed one nearby, until it dies
                     if zombie {
                         if u.tg == 0 {
@@ -349,12 +354,12 @@ impl Swarm {
                                 for k in 0..8 {
                                     let nx = cx + DX[k];
                                     let ny = cy + DY[k];
-                                    if nx < 0 || ny < 0 || nx >= W as i32 || ny >= H as i32 {
+                                    if m & (1 << k) == 0 {
                                         continue;
                                     }
                                     let nc = ny as usize * W + nx as usize;
                                     let fv = f[nc];
-                                    if fv == INF || !free_diag(k, nx, ny) {
+                                    if fv == INF {
                                         continue;
                                     }
                                     let v = fv as f32
@@ -374,11 +379,11 @@ impl Swarm {
                                 for k in 0..8 {
                                     let nx = cx + DX[k];
                                     let ny = cy + DY[k];
-                                    if nx < 0 || ny < 0 || nx >= W as i32 || ny >= H as i32 {
+                                    if m & (1 << k) == 0 {
                                         continue;
                                     }
                                     let o = obj[ny as usize * W + nx as usize];
-                                    if o == SOLID || o <= -2 || !free_diag(k, nx, ny) {
+                                    if o == SOLID || o <= -2 {
                                         continue;
                                     }
                                     let v = -(DX[k] as f32 * d.x + DY[k] as f32 * d.y)
@@ -399,12 +404,12 @@ impl Swarm {
                         for k in 0..8 {
                             let nx = cx + DX[k];
                             let ny = cy + DY[k];
-                            if nx < 0 || ny < 0 || nx >= W as i32 || ny >= H as i32 {
+                            if m & (1 << k) == 0 {
                                 continue;
                             }
                             let nc = ny as usize * W + nx as usize;
                             let fv = hunt[nc];
-                            if fv == U16 || !free_diag(k, nx, ny) {
+                            if fv == U16 {
                                 continue;
                             }
                             let v = fv as f32
@@ -423,13 +428,7 @@ impl Swarm {
                         for _ in 0..3 {
                             let nx = cx + DX[k];
                             let ny = cy + DY[k];
-                            if nx >= 0
-                                && ny >= 0
-                                && nx < W as i32
-                                && ny < H as i32
-                                && obj[ny as usize * W + nx as usize] == FREE
-                                && free_diag(k, nx, ny)
-                            {
+                            if m & (1 << k) != 0 && obj[ny as usize * W + nx as usize] == FREE {
                                 best = k as i32;
                                 break;
                             }
@@ -441,12 +440,12 @@ impl Swarm {
                         for k in 0..8 {
                             let nx = cx + DX[k];
                             let ny = cy + DY[k];
-                            if nx < 0 || ny < 0 || nx >= W as i32 || ny >= H as i32 {
+                            if m & (1 << k) == 0 {
                                 continue;
                             }
                             let nc = ny as usize * W + nx as usize;
                             let fv = hq[nc];
-                            if fv == INF || !free_diag(k, nx, ny) {
+                            if fv == INF {
                                 continue;
                             }
                             let v = fv as f32
@@ -473,8 +472,9 @@ impl Swarm {
                                 a.fetch_add((st.atk * dt * DMG_SCALE) as u32, Relaxed);
                             }
                         } else if o == FREE {
-                            let tx = nx as f32 + xs(&mut s);
-                            let ty = ny as f32 + xs(&mut s);
+                            // (an f32 like 1535.99999 can round up to the next cell, so stay inside it)
+                            let tx = (nx as f32 + xs(&mut s)).min(nx as f32 + 0.999);
+                            let ty = (ny as f32 + xs(&mut s)).min(ny as f32 + 0.999);
                             let (dx, dy) = (tx - x, ty - y);
                             let len = (dx * dx + dy * dy).sqrt();
                             let stp = spd * dt * (0.75 + 0.5 * xs(&mut s));
@@ -493,44 +493,58 @@ impl Swarm {
                     }
                     dens[c].fetch_add(1, Relaxed);
                     tint[c].fetch_max(tcode, Relaxed);
-                    coarse[(c / W / CG) * CW + (c % W) / CG].fetch_add(1, Relaxed);
                 }
                 ev
             })
             .collect();
+        // coarse crowd counts, one row of coarse cells per task
+        let dens = &self.dens;
+        self.coarse.par_chunks_mut(CW).enumerate().for_each(|(gy, row)| {
+            row.fill(0);
+            for y in gy * CG..(gy + 1) * CG {
+                let line = &dens[y * W..(y + 1) * W];
+                for (gx, v) in row.iter_mut().enumerate() {
+                    *v += line[gx * CG..(gx + 1) * CG].iter().map(|a| a.load(Relaxed) as u32).sum::<u32>();
+                }
+            }
+        });
         // clear the damage that was applied this tick
         for &c in &self.touched {
             self.dmg[c as usize] = 0.0;
             self.dsrc[c as usize] = 0;
         }
         self.touched.clear();
-        // compact out the dead; zombies that just went down count as kills too
-        let n = self.u.len();
-        let mut j = 0;
-        let mut killed = 0u32;
-        for i in 0..n {
-            let mut u = self.u[i];
-            if u.hd & 0x80 != 0 {
-                killed += 1;
-                u.hd &= 0x7f;
-            }
-            if u.hp > 0.0 {
-                self.u[j] = u;
-                j += 1;
-            } else {
-                killed += 1;
-            }
+        // compact out the dead (in parallel, keeping order); zombies that just went down count as kills too
+        let killed: u32 = self
+            .u
+            .par_iter_mut()
+            .map(|u| {
+                let mut k = 0;
+                if u.hd & 0x80 != 0 {
+                    k += 1;
+                    u.hd &= 0x7f;
+                }
+                if u.hp <= 0.0 {
+                    k += 1;
+                }
+                k
+            })
+            .sum();
+        if killed > 0 {
+            let mut spare = std::mem::take(&mut self.spare);
+            spare.clear();
+            spare.par_extend(self.u.par_iter().filter(|u| u.hp > 0.0).copied());
+            self.spare = std::mem::replace(&mut self.u, spare);
         }
-        self.u.truncate(j);
         (killed, events.into_iter().flatten().collect())
     }
 
     #[inline]
     pub fn at(&self, c: usize) -> u32 {
-        self.dens[c].load(Relaxed)
+        self.dens[c].load(Relaxed) as u32
     }
     #[inline]
     pub fn coarse_at(&self, i: usize) -> u32 {
-        self.coarse[i].load(Relaxed)
+        self.coarse[i]
     }
 }
