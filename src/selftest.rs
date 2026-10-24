@@ -99,3 +99,32 @@ pub fn abilities(g: &mut Game) {
         g.tick();
     }
 }
+
+/// PH_GALLERY=1: one of every structure around the HQ, for screenshots of their art.
+pub fn gallery(g: &mut Game) {
+    g.scrap = 1e6;
+    g.ammo = 1e6;
+    let h = g.world.hq;
+    let put = |g: &mut game::Game, t: S, dx: i32, dy: i32| {
+        for k in 0..40 {
+            if g.place(t, h.x as i32 + dx + (k % 8) * 3, h.y as i32 + dy + (k / 8) * 3) {
+                return;
+            }
+        }
+        eprintln!("could not place {:?}", t);
+    };
+    put(g, S::Gun, 14, -6);
+    put(g, S::Cannon, 14, 4);
+    put(g, S::Extractor, -24, -8);
+    put(g, S::Plant, -24, 4);
+    put(g, S::Silo, 26, -10);
+    put(g, S::Pad, -14, 16);
+    put(g, S::Outpost, 2, 16);
+    put(g, S::Lab, 26, 4);
+    for k in 0..6 {
+        put(g, S::Wall, -12 + k * 3, -16);
+    }
+    for _ in 0..40 {
+        g.tick();
+    }
+}

@@ -43,6 +43,8 @@ pub struct App {
     music: music::Music,
     /// music volume 0..=100, saved in settings
     music_vol: u32,
+    /// effects volume 0..=100, saved in settings
+    sfx_vol: u32,
     /// the volume to go back to when M unmutes
     music_prev: u32,
     fac: usize,
@@ -196,7 +198,8 @@ impl App {
             real: st.real,
             city: st.city,
             camp_mode: st.campaign,
-            music: music::Music::start(st.music),
+            music: music::Music::start(st.music, st.sfx),
+            sfx_vol: st.sfx,
             music_vol: st.music,
             music_prev: if st.music > 0 { st.music } else { 70 },
             camp: None,
@@ -248,6 +251,7 @@ impl App {
         self.ui_rects.clear();
         self.tip = None;
         self.net_frame();
+        self.music.ambience(self.screen == Screen::Play);
         match self.screen {
             Screen::Menu => {
                 self.menu();
@@ -449,6 +453,48 @@ impl App {
         }
         if self.hot(r) {
             self.tip = Some("Click to change the music volume. M mutes it during a game.".into());
+        }
+    }
+    /// Plays the sound cues the sim raised, louder near the middle of the view and panned to
+    /// the side they happened on.
+    fn play_sfx(&mut self, g: &mut Game) {
+        let cues = std::mem::take(&mut g.sfx);
+        if cues.is_empty() || self.sfx_vol == 0 {
+            return;
+        }
+        // half the view's width in map cells, and quieter as the camera pulls back
+        let r = (screen_width() / 2.0 / self.cam.scale()).max(10.0);
+        let zoom = (500.0 / self.cam.dist).clamp(0.35, 1.0);
+        for (s, p) in cues {
+            let off = p - self.cam.t;
+            let near = (1.0 - (off.length() - r).max(0.0) / (2.0 * r)).clamp(0.0, 1.0);
+            let pan = (off.dot(self.cam.right()) / r).clamp(-1.0, 1.0);
+            let jitter = rand::gen_range(0.93, 1.07);
+            let (snd, gain, speed) = match s {
+                Sfx::Cannon => (music::Snd::Cannon, 0.55, jitter),
+                Sfx::Flame => (music::Snd::Flame, 0.6, jitter),
+                Sfx::Railgun => (music::Snd::Railgun, 0.8, jitter),
+                Sfx::ArtilleryShot => (music::Snd::ArtilleryShot, 0.8, jitter),
+                Sfx::ArtilleryHit => (music::Snd::ArtilleryHit, 0.8, jitter),
+                Sfx::Bomb => (music::Snd::ArtilleryHit, 0.9, 0.85 * jitter),
+                Sfx::Nuke => (music::Snd::ArtilleryHit, 1.0, 0.5),
+            };
+            // a nuke is heard anywhere on the map
+            let gain = if s == Sfx::Nuke { gain * near.max(0.7) } else { gain * near * zoom };
+            self.music.play(music::Play { snd, gain, pan, speed });
+        }
+    }
+    /// The effects volume button, stepping like the music one.
+    fn sfx_button(&mut self, r: Rect) {
+        let v = self.sfx_vol;
+        let label = if v == 0 { "Effects off".to_string() } else { format!("Effects {}%", v) };
+        if self.button(r, &label, true, false) {
+            self.sfx_vol = [75, 50, 25, 0].into_iter().find(|s| *s < v).unwrap_or(100);
+            self.music.set_sfx_volume(self.sfx_vol);
+            self.save_settings();
+        }
+        if self.hot(r) {
+            self.tip = Some("Click to change the volume of weapons, explosions and the battle ambience.".into());
         }
     }
     /// A button; returns true when clicked.
@@ -794,6 +840,7 @@ impl App {
             self.dark = !self.dark;
         }
         self.music_button(Rect::new(x0 + 138.0, by + 6.0, 120.0, 32.0));
+        self.sfx_button(Rect::new(x0 + 264.0, by + 6.0, 128.0, 32.0));
         // updater line
         let st = self.updater.get();
         text(
@@ -818,7 +865,7 @@ impl App {
             text(
                 &self.fonts.mono,
                 &self.status,
-                x0 + 274.0,
+                x0 + 404.0,
                 by + 28.0,
                 13.0,
                 rgb(250, 82, 82),
@@ -1044,7 +1091,7 @@ impl App {
     }
 
     fn save_settings(&self) {
-        storage::save_settings(&storage::Settings { dark: self.dark, fac: self.fac, diff: self.diff, real: self.real, city: self.city.clone(), campaign: self.camp_mode, music: self.music_vol });
+        storage::save_settings(&storage::Settings { dark: self.dark, fac: self.fac, diff: self.diff, real: self.real, city: self.city.clone(), campaign: self.camp_mode, music: self.music_vol, sfx: self.sfx_vol });
     }
 
     fn start(&mut self) {
@@ -1330,6 +1377,7 @@ impl App {
         if sc.dark != self.dark {
             sc.retheme(&g, th);
         }
+        self.play_sfx(&mut g);
         // fixed 20 Hz simulation; in co-op, in lockstep with the host. Nothing runs while the HQ
         // spot is being chosen.
         if self.placing.is_some() {
@@ -1765,7 +1813,8 @@ impl App {
             }
         }
         let bx = sw - 330.0;
-        self.music_button(Rect::new(bx - 110.0, 6.0, 104.0, 28.0));
+        self.music_button(Rect::new(bx - 226.0, 6.0, 104.0, 28.0));
+        self.sfx_button(Rect::new(bx - 116.0, 6.0, 110.0, 28.0));
         if self.button(
             Rect::new(bx, 6.0, 74.0, 28.0),
             if self.dark { "Light" } else { "Dark" },

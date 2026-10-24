@@ -19,6 +19,8 @@ use macroquad::prelude::*;
 use rayon::prelude::*;
 use std::sync::atomic::Ordering::Relaxed;
 
+mod art;
+
 pub struct Fonts {
     pub head: Font,
     pub mono: Font,
@@ -68,6 +70,53 @@ void main() {
     gl_FragColor = color * texture2D(Texture, uv);
 }"#;
 
+/// Solids: like `FS`, but surfaces tagged with u = 1 (fungus on infected blocks) throb with
+/// `Time`, each at its own phase v.
+const FS_PULSE: &str = r#"#version 100
+precision mediump float;
+varying lowp vec4 color;
+varying mediump vec2 uv;
+uniform sampler2D Texture;
+uniform float Time;
+void main() {
+    vec4 c = color * texture2D(Texture, vec2(0.5, 0.5));
+    if (uv.x > 0.5) {
+        float p = 0.5 + 0.5 * sin(Time * 2.4 + uv.y);
+        c.rgb = c.rgb * (0.55 + 0.65 * p) + vec3(0.16, 0.02, 0.24) * p;
+    }
+    gl_FragColor = c;
+}"#;
+const VS_PULSE: &str = r#"#version 100
+attribute vec3 position;
+attribute vec2 texcoord;
+attribute vec4 color0;
+varying mediump vec2 uv;
+varying lowp vec4 color;
+uniform mat4 Model;
+uniform mat4 Projection;
+void main() {
+    gl_Position = Projection * Model * vec4(position, 1);
+    color = color0 / 255.0;
+    uv = texcoord;
+}"#;
+
+/// Solid things with a working depth buffer: tested and written like the default material, plus
+/// the fungus pulse.
+pub fn depth_material() -> Material {
+    solid_material(PipelineParams { depth_test: Comparison::LessOrEqual, depth_write: true, ..Default::default() })
+}
+
+fn solid_material(mut pp: PipelineParams) -> Material {
+    let blend = BlendState::new(Equation::Add, BlendFactor::Value(BlendValue::SourceAlpha), BlendFactor::OneMinusValue(BlendValue::SourceAlpha));
+    pp.color_blend = Some(blend);
+    pp.alpha_blend = Some(blend);
+    load_material(
+        ShaderSource::Glsl { vertex: VS_PULSE, fragment: FS_PULSE },
+        MaterialParams { pipeline_params: pp, uniforms: vec![UniformDesc::new("Time", UniformType::Float1)], ..Default::default() },
+    )
+    .unwrap()
+}
+
 /// Ground layers: no depth test (later layers paint over earlier ones) but depth is written, so
 /// buildings drawn afterwards are correctly hidden behind or shown in front of the street.
 pub fn flat_material() -> Material {
@@ -86,22 +135,12 @@ pub fn flat_material() -> Material {
 /// painter's order decides what covers what. `cull` hides the inside faces of closed shapes, which
 /// is what makes one building look solid without a depth buffer.
 pub fn painter_material(cull: bool) -> Material {
-    let blend = BlendState::new(Equation::Add, BlendFactor::Value(BlendValue::SourceAlpha), BlendFactor::OneMinusValue(BlendValue::SourceAlpha));
-    load_material(
-        ShaderSource::Glsl { vertex: VS, fragment: FS },
-        MaterialParams {
-            pipeline_params: PipelineParams {
-                depth_test: Comparison::Always,
-                depth_write: false,
-                cull_face: if cull { CULL } else { miniquad::CullFace::Nothing },
-                color_blend: Some(blend),
-                alpha_blend: Some(blend),
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-    )
-    .unwrap()
+    solid_material(PipelineParams {
+        depth_test: Comparison::Always,
+        depth_write: false,
+        cull_face: if cull { CULL } else { miniquad::CullFace::Nothing },
+        ..Default::default()
+    })
 }
 /// Which side the painter material drops: every solid face is wound to face outward (see
 /// `MB::wall`); GL calls the inward ones back faces with this camera.
@@ -120,6 +159,8 @@ struct MB {
     split: bool,
     anchor: Vec3,
     anchors: Vec<Vec3>,
+    /// texture coordinates for the next vertices; u = 1 marks a pulsing surface, v is its phase
+    uv: Vec2,
 }
 impl MB {
     fn split(on: bool) -> MB {
@@ -152,7 +193,7 @@ impl MB {
         }
     }
     fn vert3(&mut self, p: Vec3, c: Color) -> u16 {
-        self.v.push(Vertex::new(p.x, p.y, p.z, 0.0, 0.0, c));
+        self.v.push(Vertex::new(p.x, p.y, p.z, self.uv.x, self.uv.y, c));
         (self.v.len() - 1) as u16
     }
     fn vert(&mut self, p: Vec2, c: Color) -> u16 {
@@ -512,6 +553,9 @@ fn bake_tile(g: &Game, th: &Theme, members: &[usize], infected: &std::collection
             col = mix(col, th.rubble, dmg * 0.6);
         }
         mb.poly_at(&b.poly, b.h, col);
+        if inf {
+            art::fungus(&mut mb, b, bi);
+        }
     }
     let (solid, anchors) = mb.finish_objs();
     (solid, anchors, rubble.finish())
@@ -534,6 +578,8 @@ pub struct Scene {
     pub painter: bool,
     solid: Material,
     bare: Material,
+    /// solids with depth testing (when the depth buffer works)
+    depth: Material,
     pub dark: bool,
     btimer: f32,
     ztimer: f32,
@@ -591,6 +637,7 @@ impl Scene {
             painter,
             solid: painter_material(true),
             bare: painter_material(false),
+            depth: depth_material(),
             dark: th.dark,
             btimer: 0.0,
             ztimer: 0.0,
@@ -1279,67 +1326,7 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels, painter: bool
             mb.prism(&rect_pts(x, y, w, h), base, base + 0.3, alpha(d.top, 0.3), alpha(d.top, 0.3));
             continue;
         }
-        let top = base + d.ht;
-        mb.prism(&rect_pts(x, y, w, h), base, top, d.top, d.side);
-        let dark = mix(d.side, BLACK, 0.3);
-        match s.t {
-            S::Gun | S::Cannon => {
-                let r = if s.t == S::Gun { 1.4 } else { 2.2 };
-                let ring_pts: Vec<Vec2> = (0..10).map(|k| c + vec2((k as f32 * 0.628).cos(), (k as f32 * 0.628).sin()) * r).collect();
-                mb.prism(&ring_pts, top, top + r * 0.8, dark, dark);
-                let dir = vec2(s.aim.cos(), s.aim.sin());
-                let n = vec2(-dir.y, dir.x) * if s.t == S::Gun { 0.3 } else { 0.5 };
-                let len = if s.t == S::Gun { 3.4 } else { 4.8 };
-                let bz = top + r * 0.5;
-                mb.prism(&[c - n, c + dir * len - n, c + dir * len + n, c + n], bz, bz + 0.6, rgb(40, 40, 40), rgb(40, 40, 40));
-            }
-            S::Extractor => {
-                let a = t * 2.0;
-                for k in 0..3 {
-                    let q = rot(vec2(1.0, 0.0), a + k as f32 * 2.094);
-                    let n = vec2(-q.y, q.x) * 0.35;
-                    mb.prism(&[c - n, c + q * 2.2 - n, c + q * 2.2 + n, c + n], top, top + 0.5, d.top, dark);
-                }
-            }
-            S::Plant => {
-                mb.prism(&rect_pts(x + 1.0, y + 1.0, 1.6, 1.6), top, top + 3.5, dark, dark);
-            }
-            S::Silo => {
-                let ready = s.cd <= 0.0;
-                let pts: Vec<Vec2> = (0..14).map(|k| c + vec2((k as f32 * 0.449).cos(), (k as f32 * 0.449).sin()) * 3.0).collect();
-                mb.prism(&pts, top, top + 0.4, if ready { rgb(64, 192, 87) } else { rgb(201, 42, 42) }, rgb(90, 98, 108));
-            }
-            S::Pad => {
-                let pts: Vec<Vec2> = (0..20).map(|k| c + vec2((k as f32 * 0.314).cos(), (k as f32 * 0.314).sin()) * 4.6).collect();
-                mb.prism(&pts, top, top + 0.1, WHITE, rgb(255, 212, 59));
-                for (a, b) in [(vec2(-1.6, -2.2), vec2(-1.6, 2.2)), (vec2(1.6, -2.2), vec2(1.6, 2.2)), (vec2(-1.6, -0.35), vec2(1.6, 0.35))] {
-                    let (lo, hi) = (c + a.min(b) - vec2(0.35, 0.0), c + a.max(b) + vec2(0.35, 0.0));
-                    mb.prism(&rect_pts(lo.x, lo.y, hi.x - lo.x, hi.y - lo.y), top + 0.1, top + 0.15, rgb(60, 66, 76), rgb(60, 66, 76));
-                }
-                if s.cd > 0.0 {
-                    bar(&mut mb, c + vec2(0.0, -6.0), top + 0.5, 9.0, 1.0 - s.cd / PAD_COOLDOWN, rgb(28, 126, 214));
-                }
-                let n = g.civs.iter().filter(|cv| cv.st == C_AT_PAD && cv.pad == i).count();
-                if n > 0 {
-                    labels.items.push((p3(c, top + 6.0), format!("{} waiting", n), WHITE, 12.0));
-                }
-            }
-            S::Outpost => {
-                mb.prism(&rect_pts(c.x - 0.2, c.y - 0.2, 0.4, 0.4), top, top + 6.0, rgb(40, 40, 40), rgb(40, 40, 40));
-                mb.prism(&rect_pts(c.x, c.y - 0.1, 3.0, 0.2), top + 4.6, top + 6.0, rgb(28, 126, 214), rgb(28, 126, 214));
-            }
-            S::Lab => {
-                let pts: Vec<Vec2> = (0..12).map(|k| c + vec2((k as f32 * 0.524).cos(), (k as f32 * 0.524).sin()) * 2.8).collect();
-                let busy = g.research.busy.is_some();
-                mb.prism(&pts, top, top + 1.6 + if busy { (t * 3.0).sin().abs() } else { 0.0 }, mix(d.top, WHITE, 0.35), d.top);
-            }
-            S::Hq => {
-                let pts: Vec<Vec2> = (0..12).map(|k| c + vec2((k as f32 * 0.524).cos(), (k as f32 * 0.524).sin()) * 3.6).collect();
-                mb.prism(&pts, top, top + 3.0, mix(d.top, WHITE, 0.25), d.side);
-                labels.items.push((p3(c, top + 5.0), "HQ".into(), WHITE, 14.0));
-            }
-            S::Wall => {}
-        }
+        let top = art::structure(&mut mb, g, i, s, base, t, labels);
         if s.hp < s.max * 0.99 && s.t != S::Wall {
             let f = s.hp / s.max;
             bar(&mut mb, c + vec2(0.0, -h / 2.0 - 2.0), top + 1.0, w.max(6.0), f, if f > 0.4 { rgb(64, 192, 87) } else { rgb(250, 82, 82) });
@@ -1361,20 +1348,15 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels, painter: bool
         mb.prism(&pts, b.h + 0.4, b.h + 0.5, col, col);
         labels.items.push((p3(b.c, b.h + 3.0), format!("{}", n), WHITE, 12.0));
     }
-    // hives: a living dome
+    // hives: a living mound of pods
     for h in &g.hives {
         if h.dead || !inview(h.p, 30.0) {
             continue;
         }
         mb.obj(h.p, 0.0);
-        let pulse = 1.0 + 0.06 * (t * 2.5).sin();
-        let size = (5.0 + h.r * 0.06) * pulse;
-        for (k, (r, z0, z1)) in [(size, 0.0, size * 0.5), (size * 0.75, size * 0.5, size * 0.9), (size * 0.45, size * 0.9, size * 1.15)].iter().enumerate() {
-            let pts: Vec<Vec2> = (0..14).map(|j| h.p + vec2((j as f32 * 0.449).cos(), (j as f32 * 0.449).sin()) * *r).collect();
-            let col = [rgb(120, 40, 160), rgb(160, 70, 200), rgb(240, 170, 255)][k];
-            mb.prism(&pts, *z0, *z1, col, col);
-        }
-        bar(&mut mb, h.p + vec2(0.0, -size - 3.0), size * 1.4, 14.0, h.hp / h.max, rgb(204, 93, 232));
+        let top = art::hive(&mut mb, h, t);
+        let size = 5.0 + h.r * 0.06;
+        bar(&mut mb, h.p + vec2(0.0, -size - 3.0), top + 1.0, 14.0, h.hp / h.max, rgb(204, 93, 232));
     }
     mb
 }
@@ -1428,13 +1410,15 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
             objs.push((a.truncate().distance(v.eye) - a.z, m));
         }
         objs.sort_by(|a, b| b.0.total_cmp(&a.0));
+        sc.solid.set_uniform("Time", t);
         gl_use_material(&sc.solid);
         for (_, m) in objs {
             draw_mesh(m);
         }
         gl_use_material(&sc.bare);
     } else {
-        gl_use_default_material();
+        sc.depth.set_uniform("Time", t);
+        gl_use_material(&sc.depth);
         for k in order {
             for m in &sc.tiles[k].solid {
                 draw_mesh(m);
@@ -1443,6 +1427,7 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
         for m in &dynamic {
             draw_mesh(m);
         }
+        gl_use_default_material();
     }
     // portal labels
     for p in &g.portals {

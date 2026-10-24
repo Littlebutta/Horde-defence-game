@@ -1,13 +1,15 @@
-//! Background music: Devin's tracks, embedded in the exe, played as a shuffled playlist.
-//! The tracks don't loop on their own, so each one crossfades into the next. Playback runs on its
-//! own thread (rodio streams the MP3s), so the game only sets the volume.
+//! Sound: Devin's music tracks as a shuffled playlist, the battle ambience under a game, and the
+//! weapon sound effects. Everything is embedded in the exe and plays on one audio thread (rodio,
+//! with symphonia's pure-Rust MP3 decoder); the game only sends it volumes and effects to play.
+//! Neither the music nor the ambience loops cleanly on its own, so each one crossfades into its
+//! next play.
 
 use std::io::Cursor;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
-use rodio::{Decoder, OutputStream, Sink, Source};
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 
 static TRACKS: [&[u8]; 4] = [
     include_bytes!("../assets/music/horde-defense.mp3"),
@@ -15,104 +17,298 @@ static TRACKS: [&[u8]; 4] = [
     include_bytes!("../assets/music/night-watch-protocol.mp3"),
     include_bytes!("../assets/music/night-watch-protocol-2.mp3"),
 ];
-/// seconds each crossfade takes; the end of a track fades out while the next fades in
+static AMBIENCE: [&[u8]; 1] = [include_bytes!("../assets/sfx/ambience.mp3")];
+
+/// The sound effects, by the name of the file Devin made them for.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Snd {
+    Cannon,
+    ArtilleryShot,
+    ArtilleryHit,
+    Flame,
+    Railgun,
+}
+const SNDS: usize = 5;
+static SFX: [&[u8]; SNDS] = [
+    include_bytes!("../assets/sfx/cannon-shell.wav"),
+    include_bytes!("../assets/sfx/artillery-shot.mp3"),
+    include_bytes!("../assets/sfx/artillery-explosion.mp3"),
+    include_bytes!("../assets/sfx/flame-bunker.mp3"),
+    include_bytes!("../assets/sfx/railgun.wav"),
+];
+/// at most this many copies of one effect play at once, and a new copy waits this long after the
+/// last one, so a hundred cannons firing together stay a rumble instead of a wall of noise
+const VOICES: [usize; SNDS] = [5, 3, 5, 3, 3];
+const GAP_MS: [u64; SNDS] = [70, 120, 90, 250, 150];
+
+/// seconds each music crossfade takes; the end of a track fades out while the next fades in
 const FADE: f32 = 6.0;
+const AMB_FADE: f32 = 2.5;
 /// the music never plays at full output: it sits under the game
 const MAX_GAIN: f32 = 0.8;
+const AMB_GAIN: f32 = 0.35;
+const SFX_GAIN: f32 = 0.9;
+
+pub struct Play {
+    pub snd: Snd,
+    /// 0..1 before the effects volume
+    pub gain: f32,
+    /// -1 left .. 1 right
+    pub pan: f32,
+    /// playback speed: below 1 is deeper and longer
+    pub speed: f32,
+}
 
 pub struct Music {
-    /// volume 0..=100, read by the player thread
+    /// volumes 0..=100, read by the audio thread
     vol: Arc<AtomicU32>,
+    sfx_vol: Arc<AtomicU32>,
+    /// the battle ambience plays while this is set (a game is on screen)
+    amb: Arc<AtomicBool>,
+    tx: Option<mpsc::Sender<Play>>,
 }
 
 impl Music {
-    pub fn start(vol: u32) -> Music {
-        let v = Arc::new(AtomicU32::new(vol.min(100)));
-        // headless test runs and the city fetcher stay silent
-        let quiet = ["PH_SHOT", "PH_FETCH", "PH_NETTEST"].iter().any(|k| std::env::var(k).is_ok());
+    pub fn start(vol: u32, sfx: u32) -> Music {
+        let mut m = Music {
+            vol: Arc::new(AtomicU32::new(vol.min(100))),
+            sfx_vol: Arc::new(AtomicU32::new(sfx.min(100))),
+            amb: Arc::new(AtomicBool::new(false)),
+            tx: None,
+        };
+        // headless test runs and the city fetcher stay silent (PH_SOUND=1 turns sound back on)
+        let quiet = ["PH_SHOT", "PH_FETCH", "PH_NETTEST"].iter().any(|k| std::env::var(k).is_ok()) && std::env::var("PH_SOUND").is_err();
         if !quiet {
-            let v2 = v.clone();
-            let _ = std::thread::Builder::new().name("music".into()).spawn(move || player(v2));
+            let (tx, rx) = mpsc::channel();
+            let (v, s, a) = (m.vol.clone(), m.sfx_vol.clone(), m.amb.clone());
+            if std::thread::Builder::new().name("audio".into()).spawn(move || player(v, s, a, rx)).is_ok() {
+                m.tx = Some(tx);
+            }
         }
-        Music { vol: v }
+        m
     }
     pub fn set_volume(&self, vol: u32) {
         self.vol.store(vol.min(100), Ordering::Relaxed);
     }
+    pub fn set_sfx_volume(&self, vol: u32) {
+        self.sfx_vol.store(vol.min(100), Ordering::Relaxed);
+    }
+    pub fn ambience(&self, on: bool) {
+        self.amb.store(on, Ordering::Relaxed);
+    }
+    pub fn play(&self, p: Play) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(p);
+        }
+    }
 }
+
+// ------------------------------------------------------------------------------- playlists
 
 struct Playing {
     sink: Sink,
     len: f32,
 }
 
-fn play(handle: &rodio::OutputStreamHandle, i: usize) -> Option<Playing> {
-    let dec = Decoder::new(Cursor::new(TRACKS[i])).ok()?;
-    let len = dec.total_duration().map(|d| d.as_secs_f32()).unwrap_or(0.0);
+/// A track's length in seconds. MP3s without a length header are decoded once to count it.
+fn length(data: &'static [u8]) -> f32 {
+    let Ok(dec) = Decoder::new(Cursor::new(data)) else { return 0.0 };
+    if let Some(d) = dec.total_duration() {
+        return d.as_secs_f32();
+    }
+    let per_sec = (dec.sample_rate() * dec.channels() as u32) as f32;
+    dec.count() as f32 / per_sec
+}
+
+fn start_track(handle: &OutputStreamHandle, data: &'static [u8], len: f32) -> Option<Playing> {
+    let dec = Decoder::new(Cursor::new(data)).ok()?;
     let sink = Sink::try_new(handle).ok()?;
     sink.set_volume(0.0);
     sink.append(dec);
     Some(Playing { sink, len })
 }
 
-/// Fade gain of a track: ramps in over the first FADE seconds and out over the last FADE.
-fn fade(p: &Playing) -> f32 {
-    let t = p.sink.get_pos().as_secs_f32();
-    let fin = (t / FADE).min(1.0);
-    let fout = if p.len > 0.0 { ((p.len - t) / FADE).clamp(0.0, 1.0) } else { 1.0 };
-    fin.min(fout)
+/// Tracks played one after another in shuffled rounds, each crossfading into the next.
+struct Playlist {
+    tracks: &'static [&'static [u8]],
+    fade: f32,
+    order: Vec<usize>,
+    last: usize,
+    lens: Vec<f32>,
+    cur: Option<Playing>,
+    old: Option<Playing>,
+    /// 0..1, eases the whole list in and out when it's switched on or off
+    level: f32,
 }
 
-fn player(vol: Arc<AtomicU32>) {
-    // no audio device: no music, the game carries on
+impl Playlist {
+    fn new(tracks: &'static [&'static [u8]], fade: f32) -> Playlist {
+        let lens = tracks.iter().map(|t| length(t)).collect();
+        Playlist { tracks, fade, order: Vec::new(), last: usize::MAX, lens, cur: None, old: None, level: 0.0 }
+    }
+    fn next(&mut self, rng: &mut u64) -> usize {
+        if self.order.is_empty() {
+            // shuffle a fresh round, never repeating the track that just played
+            self.order = (0..self.tracks.len()).collect();
+            for i in (1..self.order.len()).rev() {
+                *rng ^= *rng << 13;
+                *rng ^= *rng >> 7;
+                *rng ^= *rng << 17;
+                self.order.swap(i, (*rng % (i as u64 + 1)) as usize);
+            }
+            if self.order.len() > 1 && self.order.last() == Some(&self.last) {
+                let n = self.order.len();
+                self.order.swap(0, n - 1);
+            }
+        }
+        self.last = self.order.pop().unwrap();
+        self.last
+    }
+    /// Fade gain of a track: ramps in over the first `fade` seconds and out over the last.
+    fn shape(&self, p: &Playing) -> f32 {
+        let t = p.sink.get_pos().as_secs_f32();
+        let fin = (t / self.fade).min(1.0);
+        let fout = if p.len > 0.0 { ((p.len - t) / self.fade).clamp(0.0, 1.0) } else { 1.0 };
+        fin.min(fout)
+    }
+    /// One step of the audio thread: `on` plays the list, `gain` is its volume.
+    fn update(&mut self, handle: &OutputStreamHandle, rng: &mut u64, on: bool, gain: f32, dt: f32) {
+        self.level = if on { (self.level + dt / self.fade).min(1.0) } else { (self.level - dt / self.fade).max(0.0) };
+        if self.level <= 0.0 {
+            // fully off: stop, and start from a fresh track next time
+            self.cur = None;
+            self.old = None;
+            return;
+        }
+        match &self.cur {
+            None => {
+                let i = self.next(rng);
+                self.cur = start_track(handle, self.tracks[i], self.lens[i]);
+            }
+            Some(c) => {
+                // start the next track as this one begins to fade out
+                let left = c.len - c.sink.get_pos().as_secs_f32();
+                if c.sink.empty() || (c.len > 0.0 && left <= self.fade) {
+                    self.old = self.cur.take();
+                    let i = self.next(rng);
+                    self.cur = start_track(handle, self.tracks[i], self.lens[i]);
+                }
+            }
+        }
+        for p in self.old.iter().chain(self.cur.iter()) {
+            // an equal-power curve keeps the crossfade from dipping in the middle
+            let f = self.shape(p);
+            p.sink.set_volume(gain * self.level * (f * std::f32::consts::FRAC_PI_2).sin());
+        }
+        if self.old.as_ref().is_some_and(|o| o.sink.empty()) {
+            self.old = None;
+        }
+    }
+}
+
+// --------------------------------------------------------------------------------- effects
+
+/// A decoded effect, shared by every copy that plays it.
+struct Clip {
+    /// interleaved stereo
+    data: Arc<[f32]>,
+    rate: u32,
+    playing: Arc<AtomicUsize>,
+}
+
+fn decode(bytes: &'static [u8]) -> Option<Clip> {
+    let dec = Decoder::new(Cursor::new(bytes)).ok()?;
+    let (ch, rate) = (dec.channels() as usize, dec.sample_rate());
+    let s: Vec<f32> = dec.convert_samples().collect();
+    let data: Vec<f32> = if ch == 1 {
+        s.iter().flat_map(|v| [*v, *v]).collect()
+    } else {
+        s.chunks_exact(ch).flat_map(|f| [f[0], f[1]]).collect()
+    };
+    Some(Clip { data: data.into(), rate, playing: Arc::new(AtomicUsize::new(0)) })
+}
+
+/// One playing copy of a clip, panned; counts itself in `playing` while it lives.
+struct Voice {
+    data: Arc<[f32]>,
+    i: usize,
+    rate: u32,
+    gl: f32,
+    gr: f32,
+    playing: Arc<AtomicUsize>,
+}
+impl Drop for Voice {
+    fn drop(&mut self) {
+        self.playing.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+impl Iterator for Voice {
+    type Item = f32;
+    fn next(&mut self) -> Option<f32> {
+        let v = *self.data.get(self.i)?;
+        let g = if self.i % 2 == 0 { self.gl } else { self.gr };
+        self.i += 1;
+        Some(v * g)
+    }
+}
+impl Source for Voice {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> u16 {
+        2
+    }
+    fn sample_rate(&self) -> u32 {
+        self.rate
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
+fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx: mpsc::Receiver<Play>) {
+    // no audio device: no sound, the game carries on
     let Ok((_stream, handle)) = OutputStream::try_default() else { return };
     let mut rng = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
-    let mut order: Vec<usize> = Vec::new();
-    let mut last = usize::MAX;
-    let mut next = move || {
-        if order.is_empty() {
-            // shuffle a fresh round, never repeating the track that just played
-            order = (0..TRACKS.len()).collect();
-            for i in (1..order.len()).rev() {
-                rng ^= rng << 13;
-                rng ^= rng >> 7;
-                rng ^= rng << 17;
-                order.swap(i, (rng % (i as u64 + 1)) as usize);
-            }
-            if order.last() == Some(&last) {
-                order.swap(0, TRACKS.len() - 1);
-            }
-        }
-        last = order.pop().unwrap();
-        last
-    };
-    let mut cur = play(&handle, next());
-    let mut old: Option<Playing> = None;
+    let mut music = Playlist::new(&TRACKS, FADE);
+    let mut ambience = Playlist::new(&AMBIENCE, AMB_FADE);
+    let clips: Vec<Option<Clip>> = SFX.iter().map(|b| decode(b)).collect();
+    let mut last_play = [Instant::now() - Duration::from_secs(1); SNDS];
+    let mut t = Instant::now();
     loop {
-        // perceived loudness is roughly the square of the gain, so the slider is squared
-        let v = vol.load(Ordering::Relaxed) as f32 / 100.0;
-        let master = v * v * MAX_GAIN;
-        // a track that can't be decoded is skipped
-        let Some(c) = &cur else {
-            cur = play(&handle, next());
-            std::thread::sleep(Duration::from_millis(200));
-            continue;
+        let dt = t.elapsed().as_secs_f32().min(0.5);
+        t = Instant::now();
+        // perceived loudness is roughly the square of the gain, so the volume settings are squared
+        let sq = |a: &AtomicU32| {
+            let v = a.load(Ordering::Relaxed) as f32 / 100.0;
+            v * v
         };
-        // start the next track as this one begins to fade out
-        let left = c.len - c.sink.get_pos().as_secs_f32();
-        if c.sink.empty() || (c.len > 0.0 && left <= FADE) {
-            old = cur.take();
-            cur = play(&handle, next());
+        let (mv, sv) = (sq(&vol), sq(&sfx_vol));
+        music.update(&handle, &mut rng, true, mv * MAX_GAIN, dt);
+        ambience.update(&handle, &mut rng, amb.load(Ordering::Relaxed) && sv > 0.0, sv * AMB_GAIN, dt);
+        // effects queued since the last step; wait for the next one for up to 50 ms
+        let deadline = t + Duration::from_millis(50);
+        while let Ok(p) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            let k = p.snd as usize;
+            let Some(c) = &clips[k] else { continue };
+            let now = Instant::now();
+            let g = p.gain.clamp(0.0, 1.0) * sv * SFX_GAIN;
+            if g < 0.003 || c.playing.load(Ordering::Relaxed) >= VOICES[k] || now - last_play[k] < Duration::from_millis(GAP_MS[k]) {
+                continue;
+            }
+            last_play[k] = now;
+            c.playing.fetch_add(1, Ordering::Relaxed);
+            let pan = p.pan.clamp(-1.0, 1.0);
+            let v = Voice {
+                data: c.data.clone(),
+                i: 0,
+                rate: c.rate,
+                gl: g * (1.0 - pan.max(0.0) * 0.7),
+                gr: g * (1.0 + pan.min(0.0) * 0.7),
+                playing: c.playing.clone(),
+            };
+            let _ = handle.play_raw(v.speed(p.speed.clamp(0.3, 3.0)));
         }
-        for p in old.iter().chain(cur.iter()) {
-            // an equal-power curve keeps the crossfade from dipping in the middle
-            let f = fade(p);
-            p.sink.set_volume(master * (f * std::f32::consts::FRAC_PI_2).sin());
-        }
-        if old.as_ref().is_some_and(|o| o.sink.empty()) {
-            old = None;
-        }
-        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -121,11 +317,16 @@ mod tests {
     use super::*;
     #[test]
     fn tracks_decode_with_a_length() {
-        for t in TRACKS {
-            let d = Decoder::new(Cursor::new(t)).unwrap();
-            let len = d.total_duration().expect("length").as_secs_f32();
-            assert!(len > 60.0, "{len}");
-            eprintln!("{len:.1}s at {} Hz", d.sample_rate());
+        for t in TRACKS.iter().chain(AMBIENCE.iter()) {
+            let len = length(t);
+            assert!(len > 20.0, "{len}");
+        }
+    }
+    #[test]
+    fn effects_decode() {
+        for b in SFX {
+            let c = decode(b).expect("decodes");
+            assert!(c.data.len() > 10_000);
         }
     }
 }
