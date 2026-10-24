@@ -403,7 +403,7 @@ fn bake_tile(g: &Game, th: &Theme, members: &[usize], infected: &std::collection
             }
             let col = shade(side, nrm);
             // a little darker at street level, like ambient occlusion
-            mb.quad3(p3(a, 0.0), p3(c, 0.0), p3(c, b.h), p3(a, b.h), mix(col, BLACK, 0.22), col);
+            mb.quad3(p3(a, 0.0), p3(c, 0.0), p3(c, b.h), p3(a, b.h), mix(col, BLACK, 0.15), col);
             // window bands on taller blocks, nudged off the wall so they don't flicker
             if b.h > 7.0 && e.length() > 3.0 {
                 let floors = (b.h / 3.2) as i32;
