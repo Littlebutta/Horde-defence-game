@@ -147,6 +147,8 @@ pub struct StepIn<'a> {
     /// coarse cells where a zombie just died: revenge target + 1
     pub lock: &'a [u16],
     pub rev: &'a [RevIn<'a>],
+    /// coarse cells in a helium tower's slowing field
+    pub slow: &'a [u8],
 }
 
 /// Fixed-point scale for damage tallies kept in atomics.
@@ -493,6 +495,9 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
             u.aux =
                 ((u.aux - dt * 0.015) + near.min(200) as f32 * 0.004).clamp(0.0, 1.0);
             spd *= 1.0 + u.aux * 1.2;
+        }
+        if inp.slow[gi] != 0 {
+            spd *= 0.4;
         }
         // fliers: straight for the HQ over rooftops and walls
         if u.fl & F_FLY != 0 {

@@ -39,6 +39,9 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 - Outposts push the base zone outwards. Factories, silos, pads and labs must go inside the zone.
 - Rescue squads walk up to civilians one by one and escort them back. Once inside the base, civilians walk to the nearest extraction pad. Each pad flies up to 16 out (+100 score, +20 scrap, +10 ammo each), then needs 30 seconds, so more pads means faster extraction. A crowded base slows your income.
 - Every missile silo has its own ICBM cooldown.
+- Special towers: the **flame bunker** (B) is very tough but short ranged and burns everything in a cone; the **railgun** (N) waits for a dense group, charges, then kills everything in a straight line to the end of its range; the **helium tower** (I) slows everything in its field to 40% speed and needs no ammo; **artillery** (Y) shells any spot on the map (click it, right-click a target, **Cease fire** to stop) at 45 ammo a shell.
+- The **heli pad** (U) keeps its own gunship: click the pad, right-click anywhere and it flies there for free, fires for 20 s (right-click again to move it), then rearms for 35 s.
+- A **rescue station** (J) sends a rescue team every 25 s to the biggest group of civilians it can reach safely and walks them back to the base.
 - The research lab unlocks upgrades: bigger rescue squads, carpet bombing (drag to aim the bomb run), a nuclear warhead that leaves radiation nobody of yours can enter or build in, and (on its own panel under the abilities) reinforced armour for walls and turrets, shell presses for faster ammo, and long barrels for turret range.
 - Units go anywhere on land except inside buildings: water is the only barrier. Only your turrets and garrisoned rifles stand on rooftops.
 - Hordes walk around your walls and only chew through one when it blocks the way.
@@ -46,15 +49,19 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 
 ## World campaign
 
-Pick **World campaign** on the menu to fight through ten of the world's biggest cities, smallest first: Osaka, Dhaka, Beijing, Mumbai, Cairo, Mexico City, São Paulo, Shanghai, Delhi and Tokyo.
+Pick **World campaign** on the menu. The outbreak is spreading through the world's biggest cities and you're the one the governments send in. It starts in **New York**; after that you pick each city on a globe: New York, Osaka, Dhaka, Beijing, Mumbai, Cairo, Mexico City, São Paulo, Shanghai, Delhi and Tokyo.
 
-- The maps are the city centres. Megacity airports are mostly far out of town, so the suggested HQ spot is an airport only when one is close enough to share the map with downtown; otherwise it's the middle of the city. You can move it before the city starts.
-- Hold each city until the evac timer runs out (7 minutes in Osaka, 30 seconds longer every city). The horde is 30% bigger in every city, so Tokyo has about 10 times Osaka's.
-- Troops that survive (rifle squads and tanks, with however many soldiers are left) march on to the next city and roll out of the HQ when it starts. Scrap, ammo and buildings stay behind: every city starts from the same small base.
-- Civilians you fly out are the campaign's currency. Between cities you spend them on the research the lab sells for scrap in a normal game (Bigger squads, Carpet bombing, Nuclear warhead, Reinforced armour, Shell presses, Long barrels) or on recruiting more troops. There is no research lab inside campaign cities.
-- If the HQ falls, try the city again with the army and civilians you had before it.
+- The globe between cities: drag to turn it, scroll to zoom, click a city (on the globe or in the list) to pick it. Every city shows its **days until it falls** and the **people still alive** there, from its real metro population.
+- Every city you fight in takes 10 days. Meanwhile the others count down, each at its own speed, and fewer people are left as a city nears its end. A city that reaches zero falls to the horde and can't be picked any more.
+- The closer a city is to falling, the bigger its horde: from ×0.8 for a quiet city to ×3.2 for one about to fall, plus 6% for every city fought before. Civilians on the map scale with the people still alive (about one per 1,700).
+- Hold each city until the evac timer runs out (7 minutes, 20 seconds longer for every city fought, at most 11).
+- The maps are the city centres. The suggested HQ spot is an airport only when one is close enough to share the map with downtown; otherwise it's the middle of the city. You can move it before the city starts.
+- Civilians flown out of a held city are the campaign's currency. Between cities you spend them on the research the lab sells for scrap in a normal game (Bigger squads, Carpet bombing, Nuclear warhead, Reinforced armour, Shell presses, Long barrels) or on recruiting more troops. There is no research lab inside campaign cities.
+- A lost city (the HQ overrun) pays nothing, but the campaign goes on. Lose **three** and the world's governments fire you: the campaign is over.
+- Troops that survive (rifle squads and tanks, with however many soldiers are left) march on to the next city and roll out of the HQ when it starts. Scrap, ammo and buildings stay behind.
 - Progress saves to `data/campaign.txt` after every city and every purchase; **Continue** picks it up.
-- The ten maps are downloaded from OpenStreetMap ahead of time by the **Download campaign cities** workflow and published as the `cities` release. The game fetches them from GitHub in the background when it starts (into `data/campaign`), so no campaign city waits on OpenStreetMap. A map that's missing anyway downloads live like any real city.
+- The maps are downloaded from OpenStreetMap ahead of time by the **Download campaign cities** workflow and published as the `cities` release. The game fetches them from GitHub in the background when it starts (into `data/campaign`), so no campaign city waits on OpenStreetMap. A map that's missing anyway downloads live like any real city.
+- The globe's coastlines are Natural Earth's 1:50m land (public domain), baked into `assets/land.bin` by `tools/bake_land.py`.
 - The campaign is single player for now.
 
 ## Co-op with Steam friends
@@ -86,7 +93,7 @@ The exe is at `target/release/PixelHorde.exe` (or `PixelHorde` on Linux/macOS). 
 
 Steam support is the default `steam` feature; `cargo build --release --no-default-features` builds without it. The Steam API DLL ships inside the exe and is written next to it on first start.
 
-For headless testing on Linux: `PH_SHOT=out.png PH_FAC=1 PH_TICKS=2000 xvfb-run ./target/release/PixelHorde` runs a random city for 2000 ticks and saves a screenshot. Add `PH_STRESS=1` to drop a million units on the map, `PH_CAMP=3` to play campaign city 4 with a small veteran army (its real map if it is in `data/campaign`, else a random one), `PH_HUB=1` to show the campaign screen, or `PH_SCRIPT=1` to build a base and fire every ability. `PH_ZOOM`, `PH_YAW` and `PH_PITCH` set the camera, and `PH_PROF=1` prints where each tick's time goes. For co-op without Steam, `PH_HOST=47777` and `PH_JOIN=127.0.0.1:47777` connect two copies over TCP, and `PH_NETTEST=1000` runs a scripted co-op game for 1000 ticks and prints both sides' checksums. `cargo test --release` checks that two games given the same commands stay identical.
+For headless testing on Linux: `PH_SHOT=out.png PH_FAC=1 PH_TICKS=2000 xvfb-run ./target/release/PixelHorde` runs a random city for 2000 ticks and saves a screenshot. Add `PH_STRESS=1` to drop a million units on the map, `PH_CAMP=5` to play campaign city 5 (Cairo; 0 is New York) with a small veteran army (its real map if it is in `data/campaign`, else a random one), `PH_HUB=1` to show the campaign screen, or `PH_SCRIPT=1` to build a base and fire every ability. `PH_ZOOM`, `PH_YAW` and `PH_PITCH` set the camera, and `PH_PROF=1` prints where each tick's time goes. For co-op without Steam, `PH_HOST=47777` and `PH_JOIN=127.0.0.1:47777` connect two copies over TCP, and `PH_NETTEST=1000` runs a scripted co-op game for 1000 ticks and prints both sides' checksums. `cargo test --release` checks that two games given the same commands stay identical.
 
 ## How it works
 

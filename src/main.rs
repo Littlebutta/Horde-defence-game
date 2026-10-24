@@ -7,6 +7,7 @@ mod citygen;
 mod defs;
 mod fields;
 mod game;
+mod globe;
 mod music;
 mod net;
 mod osm;
@@ -14,6 +15,7 @@ mod render;
 mod selftest;
 mod storage;
 mod swarm;
+mod ui;
 mod update;
 mod world;
 
@@ -43,6 +45,7 @@ fn window_conf() -> Conf {
             4
         },
         window_resizable: true,
+        fullscreen: std::env::var("PH_SHOT").is_err() && storage::load_settings().fullscreen,
         ..Default::default()
     }
 }
@@ -62,7 +65,7 @@ async fn run(steam: Option<net::Steam>) {
     // PH_SHOT=<png> renders a test game headlessly and saves a screenshot (used in CI-less testing)
     let shot = std::env::var("PH_SHOT").ok();
     let menu_shot = std::env::var("PH_MENU").is_ok();
-    // PH_CAMP=<city 0-9>: the test game is that campaign city, with a small veteran army; PH_HUB=1 shows the campaign screen
+    // PH_CAMP=<city 0-10>: the test game is that campaign city, with a small veteran army; PH_HUB=1 shows the campaign screen
     let camp: Option<usize> = std::env::var("PH_CAMP").ok().and_then(|s| s.parse().ok());
     if std::env::var("PH_HUB").is_ok() {
         app.test_campaign(camp.unwrap_or(3), false);
@@ -134,7 +137,34 @@ async fn run(steam: Option<net::Steam>) {
                 if std::env::var("PH_GALLERY").is_ok() {
                     selftest::gallery(g);
                 }
+                if std::env::var("PH_TOWERS").is_ok() {
+                    selftest::towers(g);
+                }
                 let mut hq = g.world.hq;
+                // PH_LOOK=air|gunship|heli|icbm: look at the first one in flight instead
+                match std::env::var("PH_LOOK").as_deref() {
+                    Ok("air") => {
+                        if let Some(game::Strike::Air { from, dir, pos, .. }) = g.strikes.iter().find(|s| matches!(s, game::Strike::Air { .. })) {
+                            hq = *from + *dir * *pos;
+                        }
+                    }
+                    Ok("icbm") => {
+                        if let Some(game::Strike::Icbm { from, to, t, dur, .. }) = g.strikes.iter().find(|s| matches!(s, game::Strike::Icbm { .. })) {
+                            hq = from.lerp(*to, t / dur);
+                        }
+                    }
+                    Ok("gunship") => {
+                        if let Some(s) = g.gunships.first() {
+                            hq = s.p;
+                        }
+                    }
+                    Ok("heli") => {
+                        if let Some(h) = g.helis.first() {
+                            hq = h.from.lerp(h.to, (h.t / h.dur).clamp(0.0, 1.0));
+                        }
+                    }
+                    _ => {}
+                }
                 // PH_HIVE=1: look at the first alien hive instead
                 if let (true, Some(h)) = (std::env::var("PH_HIVE").is_ok(), g.hives.iter().find(|h| !h.dead)) {
                     hq = h.p;
