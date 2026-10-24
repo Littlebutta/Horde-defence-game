@@ -22,17 +22,18 @@ fn conf() -> macroquad::conf::Conf {
         miniquad_conf: window_conf(),
         update_on: None,
         default_filter_mode: FilterMode::Linear,
-        // room for city meshes that grow when they are clipped to the map border
-        draw_call_vertex_capacity: 70_000,
-        draw_call_index_capacity: 200_000,
+        // room for city meshes that grow when they are clipped to the map border. macroquad batches
+        // meshes with 16-bit indices, so a draw call must stay under 65536 vertices or they wrap.
+        draw_call_vertex_capacity: 60_000,
+        draw_call_index_capacity: 150_000,
     }
 }
 
 fn window_conf() -> Conf {
     Conf {
         window_title: "Pixel Horde".to_owned(),
-        window_width: 1600,
-        window_height: 900,
+        window_width: std::env::var("PH_W").ok().and_then(|s| s.parse().ok()).unwrap_or(1600),
+        window_height: std::env::var("PH_H").ok().and_then(|s| s.parse().ok()).unwrap_or(900),
         high_dpi: false,
         sample_count: if std::env::var("PH_SHOT").is_ok() {
             1
