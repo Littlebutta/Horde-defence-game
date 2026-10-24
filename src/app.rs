@@ -5,6 +5,7 @@ use crate::defs::*;
 use crate::game::*;
 use crate::net::{self, Cmd};
 use crate::osm::{self, OsmMsg};
+use crate::music;
 use crate::storage;
 use crate::render::{self, text, text_w, Fonts, Scene, ViewInfo, WorldLabels};
 use crate::update::{UpState, Updater};
@@ -39,6 +40,11 @@ pub struct App {
     screen: Screen,
     fonts: Fonts,
     dark: bool,
+    music: music::Music,
+    /// music volume 0..=100, saved in settings
+    music_vol: u32,
+    /// the volume to go back to when M unmutes
+    music_prev: u32,
     fac: usize,
     diff: usize,
     real: bool,
@@ -180,6 +186,9 @@ impl App {
             real: st.real,
             city: st.city,
             camp_mode: st.campaign,
+            music: music::Music::start(st.music),
+            music_vol: st.music,
+            music_prev: if st.music > 0 { st.music } else { 70 },
             camp: None,
             in_camp: false,
             pack: campaign::Pack::start(),
@@ -407,6 +416,26 @@ impl App {
         );
         draw_rectangle(r.x, r.y, r.w, r.h, p.panel);
         self.ui_rects.push(r);
+    }
+    fn set_music(&mut self, v: u32) {
+        if self.music_vol > 0 {
+            self.music_prev = self.music_vol;
+        }
+        self.music_vol = v;
+        self.music.set_volume(v);
+        self.save_settings();
+    }
+    /// The music volume button: each click steps the volume down, from off back up to full.
+    fn music_button(&mut self, r: Rect) {
+        let v = self.music_vol;
+        let label = if v == 0 { "Music off".to_string() } else { format!("Music {}%", v) };
+        if self.button(r, &label, true, false) {
+            let next = [75, 50, 25, 0].into_iter().find(|s| *s < v).unwrap_or(100);
+            self.set_music(next);
+        }
+        if self.hot(r) {
+            self.tip = Some("Click to change the music volume. M mutes it during a game.".into());
+        }
     }
     /// A button; returns true when clicked.
     fn button(&mut self, r: Rect, label: &str, enabled: bool, active: bool) -> bool {
@@ -750,6 +779,7 @@ impl App {
         ) {
             self.dark = !self.dark;
         }
+        self.music_button(Rect::new(x0 + 138.0, by + 6.0, 120.0, 32.0));
         // updater line
         let st = self.updater.get();
         text(
@@ -774,7 +804,7 @@ impl App {
             text(
                 &self.fonts.mono,
                 &self.status,
-                x0 + 150.0,
+                x0 + 274.0,
                 by + 28.0,
                 13.0,
                 rgb(250, 82, 82),
@@ -995,7 +1025,7 @@ impl App {
     }
 
     fn save_settings(&self) {
-        storage::save_settings(&storage::Settings { dark: self.dark, fac: self.fac, diff: self.diff, real: self.real, city: self.city.clone(), campaign: self.camp_mode });
+        storage::save_settings(&storage::Settings { dark: self.dark, fac: self.fac, diff: self.diff, real: self.real, city: self.city.clone(), campaign: self.camp_mode, music: self.music_vol });
     }
 
     fn start(&mut self) {
@@ -1602,6 +1632,7 @@ impl App {
             }
         }
         let bx = sw - 330.0;
+        self.music_button(Rect::new(bx - 110.0, 6.0, 104.0, 28.0));
         if self.button(
             Rect::new(bx, 6.0, 74.0, 28.0),
             if self.dark { "Light" } else { "Dark" },
@@ -2031,6 +2062,7 @@ impl App {
                 match ch {
                     't' => self.toggle_top(),
                     'k' => self.dark = !self.dark,
+                    'm' => self.set_music(if self.music_vol > 0 { 0 } else { self.music_prev }),
                     'p' | ' ' => self.toggle_pause(),
                     'h' => self.cam.t = g.world.hq,
                     'f' => {

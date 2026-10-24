@@ -22,10 +22,12 @@ pub struct Settings {
     pub real: bool,
     pub city: String,
     pub campaign: bool,
+    /// music volume 0..=100
+    pub music: u32,
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { dark: true, fac: 0, diff: 1, real: false, city: String::new(), campaign: false }
+        Settings { dark: true, fac: 0, diff: 1, real: false, city: String::new(), campaign: false, music: 70 }
     }
 }
 
@@ -42,6 +44,7 @@ pub fn load_settings() -> Settings {
             "real" => s.real = v == "1",
             "city" => s.city = v.to_string(),
             "campaign" => s.campaign = v == "1",
+            "music" => s.music = v.parse().unwrap_or(70).min(100),
             _ => {}
         }
     }
@@ -49,7 +52,7 @@ pub fn load_settings() -> Settings {
 }
 
 pub fn save_settings(s: &Settings) {
-    let t = format!("dark={}\nfaction={}\ndifficulty={}\nreal={}\ncity={}\ncampaign={}\n", s.dark as u8, s.fac, s.diff, s.real as u8, s.city.replace('\n', " "), s.campaign as u8);
+    let t = format!("dark={}\nfaction={}\ndifficulty={}\nreal={}\ncity={}\ncampaign={}\nmusic={}\n", s.dark as u8, s.fac, s.diff, s.real as u8, s.city.replace('\n', " "), s.campaign as u8, s.music);
     let _ = std::fs::write(data_dir().join("settings.txt"), t);
 }
 

@@ -7,6 +7,7 @@ mod citygen;
 mod defs;
 mod fields;
 mod game;
+mod music;
 mod net;
 mod osm;
 mod render;
