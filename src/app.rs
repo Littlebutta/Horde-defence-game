@@ -967,7 +967,9 @@ impl App {
         self.screen = Screen::Hub;
         if play {
             self.in_camp = true;
-            self.begin(crate::citygen::generate(42), 1000 + level as u64);
+            let city = &CITIES[level.min(CITIES.len() - 1)];
+            let d = campaign::load_map(city).unwrap_or_else(|| crate::citygen::generate(42));
+            self.begin(d, 1000 + level as u64);
         }
     }
 
