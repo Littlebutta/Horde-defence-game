@@ -207,7 +207,32 @@ pub struct Research {
     pub rescue: bool,
     pub air: bool,
     pub nuke: bool,
-    pub busy: Option<(A, f32)>,
+    pub armour: bool,
+    pub presses: bool,
+    pub barrels: bool,
+    pub busy: Option<(R, f32)>,
+}
+impl Research {
+    pub fn has(&self, r: R) -> bool {
+        match r {
+            R::Rescue => self.rescue,
+            R::Carpet => self.air,
+            R::Nuke => self.nuke,
+            R::Armour => self.armour,
+            R::Presses => self.presses,
+            R::Barrels => self.barrels,
+        }
+    }
+    pub fn set(&mut self, r: R) {
+        match r {
+            R::Rescue => self.rescue = true,
+            R::Carpet => self.air = true,
+            R::Nuke => self.nuke = true,
+            R::Armour => self.armour = true,
+            R::Presses => self.presses = true,
+            R::Barrels => self.barrels = true,
+        }
+    }
 }
 
 pub struct Game {
@@ -278,6 +303,11 @@ pub struct Game {
     pub portal_t: f32,
     portals_opened: u32,
     pub over: bool,
+    /// campaign: the city is held once `time` reaches `goal` seconds (0 = endless)
+    pub goal: f32,
+    pub won: bool,
+    /// campaign game: research is unlocked between cities, not at the lab
+    pub campaign: bool,
     pub income_mult: f32,
     pub banner: (String, f32),
     pub dirty_buildings: Vec<usize>,
@@ -371,6 +401,9 @@ impl Game {
             portal_t: 20.0,
             portals_opened: 0,
             over: false,
+            goal: 0.0,
+            won: false,
+            campaign: false,
             income_mult: 1.0,
             banner: (String::new(), 0.0),
             dirty_buildings: Vec::new(),
@@ -748,14 +781,15 @@ impl Game {
     pub fn add_struct(&mut self, t: S, x: i32, y: i32, roof: i32) -> usize {
         let d = def(t);
         let idx = self.structs.len();
+        let hp = d.hp * self.armour(t);
         let mut s = Structure {
             t,
             x,
             y,
             w: d.w,
             h: d.h,
-            hp: d.hp,
-            max: d.hp,
+            hp,
+            max: hp,
             cd: 0.0,
             roof,
             dead: false,
@@ -797,6 +831,19 @@ impl Game {
         self.sd.push(AtomicU32::new(0));
         self.low.push(t == S::Wall);
         idx
+    }
+
+    /// Health multiplier from Reinforced armour (walls and turrets only).
+    pub fn armour(&self, t: S) -> f32 {
+        if self.research.armour && (t == S::Wall || def(t).turret) {
+            1.75
+        } else {
+            1.0
+        }
+    }
+    /// A turret's reach, with rooftop and Long barrels bonuses.
+    pub fn turret_range(&self, t: S, roof: bool) -> f32 {
+        def(t).range * if roof { 1.6 } else { 1.0 } * if self.research.barrels { 1.25 } else { 1.0 }
     }
 
     /// Buys and places a structure on the ground. Returns false if it can't go there or you can't afford it.
@@ -1350,6 +1397,10 @@ impl Game {
         self.banner.1 -= DT;
         lap(&mut self.prof[11]);
         self.time += DT;
+        if self.goal > 0.0 && self.time >= self.goal && !self.over {
+            self.won = true;
+            self.over = true;
+        }
         self.prof_n += 1;
         if self.prof_n % 200 == 0 && std::env::var("PH_PROF").is_ok() {
             let names = ["fields", "spawn", "swarm", "revs", "damage", "civs", "squads", "groups", "econ", "turrets", "abil", "misc"];
@@ -1378,25 +1429,21 @@ impl Game {
                 S::Plant => {
                     if self.scrap >= 3.0 * DT {
                         self.scrap -= 3.0 * DT;
-                        self.ammo += 12.0 * DT * im;
+                        let rate = if self.research.presses { 20.0 } else { 12.0 };
+                        self.ammo += rate * DT * im;
                     }
                 }
                 _ => {}
             }
         }
-        if let Some((a, t)) = self.research.busy {
+        if let Some((r, t)) = self.research.busy {
             let t = t - DT;
             if t <= 0.0 {
-                match a {
-                    A::Rescue => self.research.rescue = true,
-                    A::Air => self.research.air = true,
-                    A::Icbm => self.research.nuke = true,
-                    _ => {}
-                }
                 self.research.busy = None;
-                self.show(format!("Research complete: {}", adef(a).up_name), 3.0);
+                self.complete_research(r);
+                self.show(format!("Research complete: {}", rdef(r).name), 3.0);
             } else {
-                self.research.busy = Some((a, t));
+                self.research.busy = Some((r, t));
             }
         }
     }
@@ -1634,7 +1681,7 @@ impl Game {
             if self.structs[i].cd > 0.0 || self.ammo < d.ammo {
                 continue;
             }
-            let range = d.range * if roof >= 0 { 1.6 } else { 1.0 };
+            let range = self.turret_range(t, roof >= 0);
             if let Some(tg) = self.find_target(center, range) {
                 let src = self.rev_src(RevKey::Struct(i));
                 self.blast(tg, d.rad, d.dmg, d.bdmg, src, 0.0);
@@ -1706,18 +1753,30 @@ impl Game {
             A::Gunship => true,
         }
     }
-    pub fn can_research(&self, a: A) -> bool {
-        a != A::Gunship
-            && !self.upgraded(a)
+    pub fn can_research(&self, r: R) -> bool {
+        !self.campaign
+            && !self.research.has(r)
             && self.research.busy.is_none()
             && self.has(S::Lab)
-            && self.scrap >= adef(a).up_cost
+            && self.scrap >= rdef(r).cost
     }
-    pub fn start_research(&mut self, a: A) {
-        if self.can_research(a) {
-            self.scrap -= adef(a).up_cost;
-            self.research.busy = Some((a, 30.0));
-            self.show(format!("Researching {} (30 s)", adef(a).up_name), 2.5);
+    pub fn start_research(&mut self, r: R) {
+        if self.can_research(r) {
+            self.scrap -= rdef(r).cost;
+            self.research.busy = Some((r, 30.0));
+            self.show(format!("Researching {} (30 s)", rdef(r).name), 2.5);
+        }
+    }
+    /// Turns a research topic on, including for what's already built.
+    pub fn complete_research(&mut self, r: R) {
+        self.research.set(r);
+        if r == R::Armour {
+            for s in &mut self.structs {
+                if s.t == S::Wall || def(s.t).turret {
+                    s.hp *= 1.75;
+                    s.max *= 1.75;
+                }
+            }
         }
     }
     fn pay(&mut self, a: A) {

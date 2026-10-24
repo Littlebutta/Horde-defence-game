@@ -1079,7 +1079,7 @@ impl App {
                         let cost = g.cost_at(t, p);
                         let afford = g.scrap >= cost;
                         ghost(q.x - d.w as f32 / 2.0, q.y - d.h as f32 / 2.0, d.w as f32, d.h as f32, g.world.buildings[b].h, can && afford);
-                        draw_circle_lines(q.x, q.y, d.range * 1.6, 0.4, rgba(255, 212, 59, 0.6));
+                        draw_circle_lines(q.x, q.y, g.turret_range(t, true), 0.4, rgba(255, 212, 59, 0.6));
                         let extra = cost - d.cost;
                         let s = if !can {
                             "Rooftop full".to_string()
@@ -1139,7 +1139,7 @@ impl App {
                         spots[0].0 as f32 + d.w as f32 / 2.0,
                         spots[0].1 as f32 + d.h as f32 / 2.0,
                     );
-                    draw_circle_lines(c.x, c.y, d.range, 0.4, rgba(255, 212, 59, 0.6));
+                    draw_circle_lines(c.x, c.y, g.turret_range(t, false), 0.4, rgba(255, 212, 59, 0.6));
                 }
                 let afford = g.scrap >= total;
                 let mut s = if n_ok == 0 {
@@ -1487,50 +1487,8 @@ impl App {
             }
             // research
             let ur = Rect::new(r.x + 8.0, r.y + 54.0, r.w - 16.0, 24.0);
-            if a != A::Gunship {
-                let (label, en) = if g.upgraded(a) {
-                    (format!("Upgraded: {}", d.up_name), false)
-                } else if let Some((ra, t)) = g.research.busy {
-                    if ra == a {
-                        (format!("Researching… {:.0}s", t), false)
-                    } else {
-                        (format!("Upgrade ${:.0}", d.up_cost), false)
-                    }
-                } else if !g.has(S::Lab) {
-                    ("Upgrade: needs research lab".to_string(), false)
-                } else {
-                    (
-                        format!("Upgrade: {} ${:.0}", d.up_name, d.up_cost),
-                        g.can_research(a),
-                    )
-                };
-                let p2 = pal(self.dark);
-                let hotu = self.hot(ur);
-                draw_rectangle(
-                    ur.x,
-                    ur.y,
-                    ur.w,
-                    ur.h,
-                    if hotu && en {
-                        mix(p2.panel2, p2.accent, 0.2)
-                    } else {
-                        p2.panel2
-                    },
-                );
-                text(
-                    &self.fonts.mono,
-                    &label,
-                    ur.x + 8.0,
-                    ur.y + 16.0,
-                    11.5,
-                    if en { p2.accent } else { p2.dim },
-                );
-                if hotu {
-                    self.tip = Some(format!("{}: {}", d.up_name, d.upgrade));
-                    if en && is_mouse_button_pressed(MouseButton::Left) {
-                        self.act(g, Cmd::Research(a));
-                    }
-                }
+            if let Some(rs) = ability_research(a) {
+                self.research_button(g, rs, ur, "Upgrade");
             } else {
                 text(
                     &self.fonts.mono,
@@ -1542,6 +1500,17 @@ impl App {
                 );
             }
             ay += 92.0;
+        }
+
+        // lab research that isn't tied to an ability
+        if !g.campaign && g.has(S::Lab) {
+            let r = Rect::new(ax, ay, aw, 30.0 + LAB_ONLY.len() as f32 * 30.0);
+            self.panel(r);
+            text(&self.fonts.head, "Research lab", r.x + 12.0, r.y + 20.0, 15.0, p.text);
+            for (i, rs) in LAB_ONLY.iter().enumerate() {
+                let ur = Rect::new(r.x + 8.0, r.y + 28.0 + i as f32 * 30.0, r.w - 16.0, 24.0);
+                self.research_button(g, *rs, ur, "Research");
+            }
         }
 
         // selection info
@@ -1640,6 +1609,36 @@ impl App {
                 true,
             ) {
                 self.leave_game();
+            }
+        }
+    }
+
+    /// One research row: shows its state and starts it on click.
+    fn research_button(&mut self, g: &mut Game, rs: R, ur: Rect, verb: &str) {
+        let p = pal(self.dark);
+        let d = rdef(rs);
+        let (label, en) = if g.research.has(rs) {
+            (format!("Done: {}", d.name), false)
+        } else if g.campaign {
+            ("Unlock between cities".to_string(), false)
+        } else if let Some((busy, t)) = g.research.busy {
+            if busy == rs {
+                (format!("Researching… {:.0}s", t), false)
+            } else {
+                (format!("{}: {} ${:.0}", verb, d.name, d.cost), false)
+            }
+        } else if !g.has(S::Lab) {
+            (format!("{}: needs research lab", verb), false)
+        } else {
+            (format!("{}: {} ${:.0}", verb, d.name, d.cost), g.can_research(rs))
+        };
+        let hot = self.hot(ur);
+        draw_rectangle(ur.x, ur.y, ur.w, ur.h, if hot && en { mix(p.panel2, p.accent, 0.2) } else { p.panel2 });
+        text(&self.fonts.mono, &label, ur.x + 8.0, ur.y + 16.0, 11.5, if en { p.accent } else { p.dim });
+        if hot {
+            self.tip = Some(format!("{}: {}", d.name, d.tip));
+            if en && is_mouse_button_pressed(MouseButton::Left) {
+                self.act(g, Cmd::Research(rs));
             }
         }
     }

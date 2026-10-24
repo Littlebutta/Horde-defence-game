@@ -39,7 +39,7 @@ pub enum Cmd {
     Deploy(U, Vec2),
     Order(u32, Vec2),
     Ability(A, Vec2, Vec2),
-    Research(A),
+    Research(R),
 }
 
 const ALL_S: [S; 10] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq];
@@ -98,9 +98,9 @@ impl Wr {
                 self.v2(f);
                 self.v2(t);
             }
-            Cmd::Research(a) => {
+            Cmd::Research(r) => {
                 self.u32(6);
-                self.u32(a_id(a));
+                self.u32(RESEARCH.iter().position(|x| *x == r).unwrap() as u32);
             }
         }
     }
@@ -126,7 +126,7 @@ impl Rd<'_> {
             3 => Cmd::Deploy(*ALL_U.get(self.u32()? as usize)?, self.v2()?),
             4 => Cmd::Order(self.u32()?, self.v2()?),
             5 => Cmd::Ability(self.a()?, self.v2()?, self.v2()?),
-            6 => Cmd::Research(self.a()?),
+            6 => Cmd::Research(*RESEARCH.get(self.u32()? as usize)?),
             _ => return None,
         })
     }
@@ -188,8 +188,8 @@ pub fn apply(g: &mut Game, c: Cmd) -> Option<&'static str> {
             (!ok).then_some("Can't send troops there")
         }
         Cmd::Ability(a, f, t) => (!g.use_ability(a, f, t)).then_some(BAD_TARGET),
-        Cmd::Research(a) => {
-            g.start_research(a);
+        Cmd::Research(r) => {
+            g.start_research(r);
             None
         }
     }

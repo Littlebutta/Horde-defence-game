@@ -219,20 +219,65 @@ pub struct ADef {
     pub ammo: f32,
     pub cd: f32,
     pub tip: &'static str,
-    pub upgrade: &'static str,
-    pub up_cost: f32,
-    pub up_name: &'static str,
 }
 pub fn adef(a: A) -> &'static ADef {
-    static RESCUE: ADef = ADef { key: 'r', name: "Rescue squad", cost: 80.0, ammo: 0.0, cd: 6.0, tip: "Sends troops to the spot you click. Each soldier walks up to civilians one by one and escorts them back to the base, where they walk to an extraction pad.", upgrade: "18 troops, gathers up to 120 civilians from a wider area", up_cost: 600.0, up_name: "Bigger squads" };
-    static AIR: ADef = ADef { key: 'q', name: "Airstrike", cost: 250.0, ammo: 0.0, cd: 18.0, tip: "A bomber crosses the map and drops a line of bombs through the spot you click. Flattens buildings.", upgrade: "12 bombs; drag on the map to aim the bomb run", up_cost: 900.0, up_name: "Carpet bombing" };
-    static GUNSHIP: ADef = ADef { key: 'g', name: "Gunship", cost: 300.0, ammo: 150.0, cd: 40.0, tip: "A helicopter gunship flies out and circles the spot you click for 20 seconds, firing at anything in range.", upgrade: "", up_cost: 0.0, up_name: "" };
-    static ICBM: ADef = ADef { key: 'e', name: "ICBM", cost: 1500.0, ammo: 400.0, cd: 75.0, tip: "$1500 + 400 ammo. Launches from the nearest ready silo and erases everything in a huge radius. Every silo has its own cooldown, so more silos means more launches.", upgrade: "Nuclear warhead: bigger blast, leaves radiation you can't build or send troops into for 90 s", up_cost: 2500.0, up_name: "Nuclear warhead" };
+    static RESCUE: ADef = ADef { key: 'r', name: "Rescue squad", cost: 80.0, ammo: 0.0, cd: 6.0, tip: "Sends troops to the spot you click. Each soldier walks up to civilians one by one and escorts them back to the base, where they walk to an extraction pad." };
+    static AIR: ADef = ADef { key: 'q', name: "Airstrike", cost: 250.0, ammo: 0.0, cd: 18.0, tip: "A bomber crosses the map and drops a line of bombs through the spot you click. Flattens buildings." };
+    static GUNSHIP: ADef = ADef { key: 'g', name: "Gunship", cost: 300.0, ammo: 150.0, cd: 40.0, tip: "A helicopter gunship flies out and circles the spot you click for 20 seconds, firing at anything in range." };
+    static ICBM: ADef = ADef { key: 'e', name: "ICBM", cost: 1500.0, ammo: 400.0, cd: 75.0, tip: "$1500 + 400 ammo. Launches from the nearest ready silo and erases everything in a huge radius. Every silo has its own cooldown, so more silos means more launches." };
     match a {
         A::Rescue => &RESCUE,
         A::Air => &AIR,
         A::Gunship => &GUNSHIP,
         A::Icbm => &ICBM,
+    }
+}
+
+/// Research topics. In a normal game the research lab sells them for scrap; in the campaign they are
+/// unlocked between cities with civilians flown out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum R {
+    Rescue,
+    Carpet,
+    Nuke,
+    Armour,
+    Presses,
+    Barrels,
+}
+pub const RESEARCH: [R; 6] = [R::Rescue, R::Carpet, R::Nuke, R::Armour, R::Presses, R::Barrels];
+/// Lab topics that aren't tied to an ability (those show on the ability panel instead).
+pub const LAB_ONLY: [R; 3] = [R::Armour, R::Presses, R::Barrels];
+pub struct RDef {
+    pub name: &'static str,
+    pub tip: &'static str,
+    /// scrap at the research lab
+    pub cost: f32,
+    /// civilians in the campaign
+    pub civs: u32,
+}
+pub fn rdef(r: R) -> &'static RDef {
+    static RESCUE: RDef = RDef { name: "Bigger squads", tip: "Rescue squads send 18 troops and gather up to 120 civilians from a wider area", cost: 600.0, civs: 120 };
+    static CARPET: RDef = RDef { name: "Carpet bombing", tip: "Airstrikes drop 12 bombs; drag on the map to aim the bomb run", cost: 900.0, civs: 200 };
+    static NUKE: RDef = RDef { name: "Nuclear warhead", tip: "Bigger ICBM blast that leaves radiation you can't build or send troops into for 90 s", cost: 2500.0, civs: 450 };
+    static ARMOUR: RDef = RDef { name: "Reinforced armour", tip: "Walls and turrets get 75% more health", cost: 700.0, civs: 150 };
+    static PRESSES: RDef = RDef { name: "Shell presses", tip: "Ammo plants make 20 ammo a second instead of 12 from the same scrap", cost: 800.0, civs: 180 };
+    static BARRELS: RDef = RDef { name: "Long barrels", tip: "Turrets reach 25% further", cost: 1000.0, civs: 220 };
+    match r {
+        R::Rescue => &RESCUE,
+        R::Carpet => &CARPET,
+        R::Nuke => &NUKE,
+        R::Armour => &ARMOUR,
+        R::Presses => &PRESSES,
+        R::Barrels => &BARRELS,
+    }
+}
+/// The research that upgrades an ability, if any.
+pub fn ability_research(a: A) -> Option<R> {
+    match a {
+        A::Rescue => Some(R::Rescue),
+        A::Air => Some(R::Carpet),
+        A::Icbm => Some(R::Nuke),
+        A::Gunship => None,
     }
 }
 
