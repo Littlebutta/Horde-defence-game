@@ -10,8 +10,9 @@
 //! Every 100 ticks clients send a checksum of their game to the host, which compares it with its
 //! own, so a game that drifts apart is noticed instead of silently showing different worlds.
 //!
-//! Transport is Steam (lobbies, the friends invite overlay, Steam relay networking) when Steam is
-//! running, or plain TCP for local testing (`PH_HOST=port` / `PH_JOIN=addr:port`).
+//! Transport: Steam finds the game (lobbies, invites, "Join game") and carries the messages unless
+//! a direct internet connection between the PCs works (see `direct`), which is faster. Plain TCP is
+//! for local testing (`PH_HOST=port` / `PH_JOIN=addr:port`).
 
 use crate::defs::*;
 use crate::game::Game;
@@ -19,6 +20,8 @@ use crate::storage::{self, Rd, Wr};
 use crate::world::Desc;
 use macroquad::prelude::{vec2, Vec2};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+
+mod direct;
 
 /// Steam's test App ID (Spacewar) until the game has its own.
 pub const APP_ID: u32 = 480;
@@ -233,6 +236,15 @@ pub enum Ev {
     Data(u64, Vec<u8>),
 }
 
+/// A Steam friend, for the invite list.
+pub struct Friend {
+    pub id: u64,
+    pub name: String,
+    pub online: bool,
+    /// playing Pixel Horde right now
+    pub here: bool,
+}
+
 pub trait Link {
     fn me(&self) -> u64;
     fn host(&self) -> u64;
@@ -243,6 +255,21 @@ pub trait Link {
         "Player".into()
     }
     fn invite(&self) {}
+    /// Steam's in-game overlay is up (the invite window can open)
+    fn overlay(&self) -> bool {
+        false
+    }
+    fn friends(&self) -> Vec<Friend> {
+        Vec::new()
+    }
+    /// sends a friend a Steam invite to the lobby, no overlay needed
+    fn invite_friend(&self, _id: u64) -> bool {
+        false
+    }
+    /// how messages reach this peer (on a client: the host), e.g. "direct"
+    fn route(&self, _peer: u64) -> &'static str {
+        ""
+    }
     fn set_joinable(&self, _joinable: bool) {}
     fn close(&mut self) {}
 }
@@ -386,6 +413,25 @@ impl Session {
     }
     pub fn invite(&self) {
         self.link.invite();
+    }
+    pub fn overlay(&self) -> bool {
+        self.link.overlay()
+    }
+    pub fn friends(&self) -> Vec<Friend> {
+        self.link.friends()
+    }
+    pub fn invite_friend(&self, id: u64) -> bool {
+        self.link.invite_friend(id)
+    }
+    /// How player `i`'s messages travel: to them on the host, to the host on a client.
+    pub fn route(&self, i: usize) -> &'static str {
+        if self.host {
+            self.players.get(i).filter(|_| i > 0).map(|p| self.link.route(p.id)).unwrap_or("")
+        } else if i == self.me {
+            self.link.route(self.link.host())
+        } else {
+            ""
+        }
     }
     pub fn host_name(&self) -> String {
         self.players.first().map(|p| p.name.clone()).unwrap_or_else(|| "the host".into())
@@ -862,10 +908,13 @@ pub mod tcp {
 
 #[cfg(feature = "steam")]
 mod steam_impl {
-    use super::{Ev, Link, APP_ID};
+    use super::direct;
+    use super::{Ev, Friend, Link, APP_ID};
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
     use steamworks::networking_types::{NetworkingIdentity, SendFlags};
-    use steamworks::{Client, GameLobbyJoinRequested, GameRichPresenceJoinRequested, LobbyId, LobbyType, SteamId};
+    use steamworks::sys;
+    use steamworks::{Client, FriendFlags, FriendState, GameLobbyJoinRequested, GameRichPresenceJoinRequested, LobbyId, LobbyType, SteamId};
 
     /// The Steam client, when Steam is running.
     pub struct Steam {
@@ -884,6 +933,30 @@ mod steam_impl {
             }
         }
         None
+    }
+
+    /// Steam networking's defaults are made for small action games: 256 KB/s at most and a 512 KB
+    /// send buffer. Lift them so maps arrive in seconds, and let it connect the two PCs directly
+    /// (ICE: STUN NAT piercing over the open internet) wherever it can, using its relays otherwise.
+    fn tune_networking() {
+        use sys::ESteamNetworkingConfigValue::*;
+        let set: [(sys::ESteamNetworkingConfigValue, i32); 6] = [
+            (k_ESteamNetworkingConfig_SendRateMin, 1 << 20),
+            (k_ESteamNetworkingConfig_SendRateMax, 32 << 20),
+            (k_ESteamNetworkingConfig_SendBufferSize, 32 << 20),
+            (k_ESteamNetworkingConfig_RecvBufferSize, 32 << 20),
+            (k_ESteamNetworkingConfig_RecvBufferMessages, 1 << 16),
+            (k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable, sys::k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_All),
+        ];
+        unsafe {
+            let u = sys::SteamAPI_SteamNetworkingUtils_SteamAPI_v004();
+            if u.is_null() {
+                return;
+            }
+            for (k, v) in set {
+                sys::SteamAPI_ISteamNetworkingUtils_SetGlobalConfigValueInt32(u, k, v);
+            }
+        }
     }
 
     impl Steam {
@@ -906,6 +979,7 @@ mod steam_impl {
             client.networking_messages().session_request_callback(|r| {
                 r.accept();
             });
+            tune_networking();
             client.networking_utils().init_relay_network_access();
             // launched by Steam from an invite: `+connect_lobby <id>`
             let args: Vec<String> = std::env::args().collect();
@@ -942,11 +1016,37 @@ mod steam_impl {
         pub fn link(&self, lobby: u64) -> Box<dyn Link> {
             let lobby = LobbyId::from_raw(lobby);
             let mm = self.client.matchmaking();
-            mm.set_lobby_data(lobby, "build", &crate::update::build_number().to_string());
+            let me = self.client.user().steam_id();
+            let host = mm.lobby_owner(lobby) == me;
+            let way = if host {
+                mm.set_lobby_data(lobby, "build", &crate::update::build_number().to_string());
+                match direct::Host::start(me.raw() ^ lobby.raw()) {
+                    Some(h) => {
+                        mm.set_lobby_data(lobby, "dtok", &h.token.to_string());
+                        Way::Host(h)
+                    }
+                    None => Way::Steam,
+                }
+            } else {
+                Way::Ask(Instant::now())
+            };
             let known = mm.lobby_members(lobby);
             self.client.friends().set_rich_presence("connect", Some(&format!("+connect_lobby {}", lobby.raw())));
-            Box::new(SteamLink { client: self.client.clone(), lobby, known, me: self.client.user().steam_id() })
+            Box::new(SteamLink { client: self.client.clone(), lobby, known, me, way })
         }
+    }
+
+    /// How this PC's messages travel.
+    enum Way {
+        /// the host: direct connections to the friends that made one, Steam for the rest
+        Host(direct::Host),
+        /// a friend who just joined, waiting for the host's addresses in the lobby
+        Ask(Instant),
+        /// a friend trying the host's addresses
+        Trying(std::sync::mpsc::Receiver<Option<std::net::TcpStream>>),
+        /// a friend connected straight to the host
+        Direct(direct::ToHost),
+        Steam,
     }
 
     struct SteamLink {
@@ -954,6 +1054,62 @@ mod steam_impl {
         lobby: LobbyId,
         known: Vec<SteamId>,
         me: SteamId,
+        way: Way,
+    }
+
+    impl SteamLink {
+        fn steam_send(&self, to: u64, data: &[u8], reliable: bool) -> bool {
+            let flags = if reliable { SendFlags::RELIABLE_NO_NAGLE | SendFlags::AUTO_RESTART_BROKEN_SESSION } else { SendFlags::UNRELIABLE_NO_NAGLE };
+            let id = NetworkingIdentity::new_steam_id(SteamId::from_raw(to));
+            match self.client.networking_messages().send_message_to_user(id, flags, data, 0) {
+                Ok(()) => true,
+                // the send buffer is full: keep it queued and try next frame
+                Err(steamworks::SteamError::LimitExceeded) => false,
+                Err(_) => true,
+            }
+        }
+        /// Moves a friend along: host's addresses, connection attempt, direct or Steam.
+        fn advance(&mut self, out: &mut Vec<Ev>) {
+            let host = self.host();
+            let mm = self.client.matchmaking();
+            match &mut self.way {
+                Way::Host(h) => {
+                    if let Some(a) = h.take_addrs() {
+                        mm.set_lobby_data(self.lobby, "direct", &a);
+                    }
+                    let known = &self.known;
+                    let mut data = Vec::new();
+                    for id in h.poll(|id| known.iter().any(|k| k.raw() == id), &mut data) {
+                        out.push(Ev::Leave(id));
+                    }
+                    out.extend(data.into_iter().map(|(id, d)| Ev::Data(id, d)));
+                }
+                Way::Ask(t) => {
+                    let addrs = mm.lobby_data(self.lobby, "direct").filter(|a| !a.is_empty());
+                    let token = mm.lobby_data(self.lobby, "dtok").and_then(|t| t.parse::<u64>().ok());
+                    if let (Some(a), Some(tok)) = (addrs, token) {
+                        self.way = Way::Trying(direct::connect(&a, tok, self.me.raw()));
+                    } else if t.elapsed() > Duration::from_secs(6) || (token.is_none() && t.elapsed() > Duration::from_secs(2)) {
+                        self.way = Way::Steam;
+                    }
+                }
+                Way::Trying(rx) => match rx.try_recv() {
+                    Ok(Some(s)) => self.way = direct::ToHost::new(host, s).map(Way::Direct).unwrap_or(Way::Steam),
+                    Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => self.way = Way::Steam,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                },
+                Way::Direct(c) => {
+                    let mut data = Vec::new();
+                    let alive = c.poll(&mut data);
+                    out.extend(data.into_iter().map(|d| Ev::Data(host, d)));
+                    if !alive {
+                        out.push(Ev::Leave(host));
+                        self.way = Way::Steam;
+                    }
+                }
+                Way::Steam => {}
+            }
+        }
     }
 
     impl Link for SteamLink {
@@ -969,14 +1125,18 @@ mod steam_impl {
             for m in &self.known {
                 if !now.contains(m) && *m != self.me {
                     out.push(Ev::Leave(m.raw()));
+                    if let Way::Host(h) = &mut self.way {
+                        h.drop_peer(m.raw());
+                    }
                 }
             }
             if !now.is_empty() {
                 self.known = now;
             }
+            self.advance(&mut out);
             let nm = self.client.networking_messages();
             loop {
-                let batch = nm.receive_messages_on_channel(0, 64);
+                let batch = nm.receive_messages_on_channel(0, 256);
                 if batch.is_empty() {
                     break;
                 }
@@ -992,13 +1152,15 @@ mod steam_impl {
             out
         }
         fn send(&mut self, to: u64, data: &[u8], reliable: bool) -> bool {
-            let flags = if reliable { SendFlags::RELIABLE | SendFlags::AUTO_RESTART_BROKEN_SESSION } else { SendFlags::UNRELIABLE_NO_NAGLE };
-            let id = NetworkingIdentity::new_steam_id(SteamId::from_raw(to));
-            match self.client.networking_messages().send_message_to_user(id, flags, data, 0) {
-                Ok(()) => true,
-                // the send buffer is full: keep it queued and try next frame
-                Err(steamworks::SteamError::LimitExceeded) => false,
-                Err(_) => true,
+            match &self.way {
+                Way::Host(h) if h.send(to, data) => true,
+                Way::Direct(c) => {
+                    c.peer.send(data);
+                    true
+                }
+                // still finding the route: hold reliable messages back so none overtakes another
+                Way::Ask(_) | Way::Trying(_) => !reliable,
+                _ => self.steam_send(to, data, reliable),
             }
         }
         fn name_of(&self, id: u64) -> String {
@@ -1007,10 +1169,48 @@ mod steam_impl {
         fn invite(&self) {
             self.client.friends().activate_invite_dialog(self.lobby);
         }
+        fn overlay(&self) -> bool {
+            self.client.utils().is_overlay_enabled()
+        }
+        fn friends(&self) -> Vec<Friend> {
+            let app = self.client.utils().app_id();
+            let mut v: Vec<Friend> = self
+                .client
+                .friends()
+                .get_friends(FriendFlags::IMMEDIATE)
+                .into_iter()
+                .map(|f| {
+                    let online = !matches!(f.state(), FriendState::Offline | FriendState::Invisible);
+                    let here = f.game_played().is_some_and(|g| g.game.app_id() == app);
+                    Friend { id: f.id().raw(), name: f.name(), online, here }
+                })
+                .filter(|f| !self.known.iter().any(|k| k.raw() == f.id))
+                .collect();
+            v.sort_by_key(|f| (!f.here, !f.online, f.name.to_lowercase()));
+            v
+        }
+        fn invite_friend(&self, id: u64) -> bool {
+            unsafe {
+                let mm = sys::SteamAPI_SteamMatchmaking_v009();
+                !mm.is_null() && sys::SteamAPI_ISteamMatchmaking_InviteUserToLobby(mm, self.lobby.raw(), id)
+            }
+        }
+        fn route(&self, peer: u64) -> &'static str {
+            match &self.way {
+                Way::Host(h) if h.has(peer) => "direct",
+                Way::Direct(_) => "direct",
+                Way::Ask(_) | Way::Trying(_) => "connecting",
+                _ => "via Steam",
+            }
+        }
         fn set_joinable(&self, joinable: bool) {
             self.client.matchmaking().set_lobby_joinable(self.lobby, joinable);
         }
         fn close(&mut self) {
+            if let Way::Host(h) = &mut self.way {
+                h.close();
+            }
+            self.way = Way::Steam;
             self.client.friends().set_rich_presence("connect", None);
             self.client.matchmaking().leave_lobby(self.lobby);
         }

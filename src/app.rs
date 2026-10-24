@@ -15,6 +15,7 @@ use crate::update::{UpState, Updater};
 use crate::world::*;
 use macroquad::prelude::*;
 
+mod invite;
 mod settings;
 mod widgets;
 use widgets::{R_CTRL, R_PANEL};
@@ -119,6 +120,14 @@ pub struct App {
     settings_paused: bool,
     /// a dialog is open: controls under it don't react
     blocked: bool,
+    /// the invite dialog (Steam friends) is open over the lobby
+    invite_open: bool,
+    invite_scroll: f32,
+    /// the Steam friends list, and when it was last read
+    friends: Vec<net::Friend>,
+    friends_at: f32,
+    /// friends invited from the dialog this session
+    invited: Vec<u64>,
     show_fps: bool,
     fullscreen: bool,
     /// anti-aliasing: 0 = 4x MSAA, 1 = off, 2 = compatible (no render target, painter's order)
@@ -253,6 +262,11 @@ impl App {
             settings_open: std::env::var("PH_SETTINGS").is_ok(),
             settings_paused: false,
             blocked: false,
+            invite_open: false,
+            invite_scroll: 0.0,
+            friends: Vec::new(),
+            friends_at: -10.0,
+            invited: Vec::new(),
             show_fps: st.fps,
             fullscreen: st.fullscreen,
             aa: st.aa,
@@ -287,7 +301,7 @@ impl App {
             return;
         }
         ui::begin();
-        self.blocked = self.settings_open;
+        self.blocked = self.settings_open || self.invite_open;
         match self.screen {
             Screen::Menu => self.menu(),
             Screen::Loading => self.loading(),
@@ -301,6 +315,10 @@ impl App {
     /// What goes over any screen, in points: the settings dialog and the tooltip.
     fn overlays(&mut self) {
         self.blocked = false;
+        if self.invite_open && self.screen != Screen::Play && !self.settings_open {
+            self.tip = None;
+            self.invites();
+        }
         if self.settings_open {
             self.tip = None;
             self.settings();
@@ -329,12 +347,13 @@ impl App {
                         let (link, name) = (st.link(lobby), st.name());
                         self.status.clear();
                         self.sess = Some(if host {
-                            let s = net::Session::new_host(link, name);
-                            s.invite();
-                            s
+                            net::Session::new_host(link, name)
                         } else {
                             net::Session::new_client(link, name)
                         });
+                        if host {
+                            self.open_invites();
+                        }
                     }
                     Err(e) => self.status = e,
                 }
@@ -454,12 +473,12 @@ impl App {
     fn players_panel(&mut self, r: Rect) {
         let p = pal(self.dark);
         let Some(s) = self.sess.as_ref() else { return };
-        let rows: Vec<(String, bool)> = s.players.iter().enumerate().map(|(i, pl)| (pl.name.clone(), i == s.me)).collect();
+        let rows: Vec<(String, bool, &str)> = s.players.iter().enumerate().map(|(i, pl)| (pl.name.clone(), i == s.me, s.route(i))).collect();
         let mut a = self.card(r, &format!("Players {}/4", rows.len()));
         let mut invite = false;
         for k in 0..4 {
             let pr = a.cut_top(54.0, 8.0);
-            if let Some((name, me)) = rows.get(k) {
+            if let Some((name, me, route)) = rows.get(k) {
                 let col = PLAYER_COLS[k];
                 rrect(pr, R_CTRL, mix(p.panel2, col, 0.08));
                 rrect_lines(pr, R_CTRL, 1.0, alpha(col, 0.5));
@@ -473,7 +492,9 @@ impl App {
                     (false, true) => "YOU",
                     _ => "IN THE LOBBY",
                 };
-                text(&self.fonts.mono, tag, pr.x + 46.0, pr.y + 42.0, 10.5, p.dim);
+                // how this player's messages travel: straight between the PCs, or through Steam
+                let tag = if route.is_empty() { tag.to_string() } else { format!("{} · {}", tag, route.to_uppercase()) };
+                text(&self.fonts.mono, &tag, pr.x + 46.0, pr.y + 42.0, 10.5, p.dim);
             } else {
                 let hot = self.hot(pr);
                 rrect(pr, R_CTRL, if hot { mix(p.panel2, p.text, 0.06) } else { alpha(p.panel2, 0.5) });
@@ -491,9 +512,7 @@ impl App {
             text(&self.fonts.mono, l, a.x, a.y + 12.0 + i as f32 * 16.0, 12.0, p.dim);
         }
         if invite {
-            if let Some(s) = &self.sess {
-                s.invite();
-            }
+            self.open_invites();
         }
     }
 
@@ -878,9 +897,7 @@ impl App {
         if lobby {
             let c = coop.cols(2, 10.0);
             if self.button(c[0], "Invite Steam friends", true, true) {
-                if let Some(s) = &self.sess {
-                    s.invite();
-                }
+                self.open_invites();
             }
             if self.button(c[1], "Leave lobby", true, false) {
                 self.leave_coop();
