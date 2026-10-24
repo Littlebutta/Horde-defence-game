@@ -46,7 +46,7 @@ fn window_conf() -> Conf {
             4
         },
         window_resizable: true,
-        // the four armies' units (tools/make_icon.py); the exe's own icon comes from build.rs
+        // four squares in the army colours (tools/make_icon.py); the exe's own icon comes from build.rs
         icon: Some(macroquad::miniquad::conf::Icon {
             small: *include_bytes!("../assets/icon16.rgba"),
             medium: *include_bytes!("../assets/icon32.rgba"),
@@ -146,6 +146,9 @@ async fn run(steam: Option<net::Steam>) {
                 }
                 if std::env::var("PH_TOWERS").is_ok() {
                     selftest::towers(g);
+                }
+                if std::env::var("PH_UNITS").is_ok() {
+                    selftest::units(g);
                 }
                 let mut hq = g.world.hq;
                 // PH_LOOK=air|gunship|heli|icbm: look at the first one in flight instead

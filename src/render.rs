@@ -1058,6 +1058,20 @@ fn fill_concave(pts: &[Vec2], col: Color) {
     }
 }
 
+/// The mouse pointer, drawn by the game in screen pixels: a deep blue arrow with a white rim, a bit
+/// bigger than the system one so it's easy to find on both map themes.
+pub fn cursor(at: Vec2) {
+    const ARROW: [(f32, f32); 7] = [(0.0, 0.0), (0.0, 21.0), (4.9, 16.4), (8.1, 23.8), (11.2, 22.5), (8.0, 15.3), (14.6, 15.1)];
+    let pts: Vec<Vec2> = ARROW.iter().map(|&(x, y)| at + vec2(x, y) * 1.15).collect();
+    let shadow: Vec<Vec2> = pts.iter().map(|p| *p + vec2(1.5, 2.0)).collect();
+    fill_concave(&shadow, Color::new(0.0, 0.0, 0.0, 0.35));
+    fill_concave(&pts, rgb(18, 52, 170));
+    for k in 0..pts.len() {
+        let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
+        draw_line(a.x, a.y, b.x, b.y, 1.6, WHITE);
+    }
+}
+
 /// Runs `f` with 2D drawing lifted `h` cells off the ground.
 pub fn at_height(h: f32, f: impl FnOnce()) {
     let mut gl = unsafe { get_internal_gl() };
@@ -1171,17 +1185,8 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
                     mb.disc(m.p, 1.2, WHITE);
                     mb.disc(m.p, 0.85, d.col);
                 }
-                U::Tank => {
-                    let a = if gr.target.distance(m.p) > 1.0 { (gr.target - m.p).to_angle() } else { 0.0 };
-                    let box_ = |x0: f32, y0: f32, x1: f32, y1: f32| [vec2(x0, y0), vec2(x1, y0), vec2(x1, y1), vec2(x0, y1)].map(|q| m.p + rot(q, a));
-                    let b = box_(-2.4, -1.6, 2.4, 1.6);
-                    mb.quad(b[0], b[1], b[2], b[3], rgb(20, 60, 110));
-                    let b = box_(-2.1, -1.3, 2.1, 1.3);
-                    mb.quad(b[0], b[1], b[2], b[3], d.col);
-                    mb.disc(m.p, 1.0, rgb(20, 60, 110));
-                    let b = box_(0.0, -0.3, 3.4, 0.3);
-                    mb.quad(b[0], b[1], b[2], b[3], rgb(20, 60, 110));
-                }
+                // drawn in golden line art with the aircraft
+                U::Tank => {}
             }
         }
         if sel {
@@ -1240,6 +1245,7 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
                 let r = if *nuke { 190.0 } else { 120.0 };
                 mb.disc(*to, r, rgba(234, 67, 53, 0.10 + 0.05 * (t * 6.0).sin().abs()));
                 ring(&mut mb, *to, r, 1.2, rgba(234, 67, 53, 0.8));
+                ring(&mut mb, *to, r * NUKE_CORE, 0.8, rgba(234, 67, 53, 0.6));
                 mb.dashed(&[*from, *to], 1.4, 6.0, 5.0, alpha(rgb(66, 133, 244), 0.9));
             }
             Strike::Air { bombs, line, .. } => {
@@ -1275,7 +1281,7 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
         let c = s.center();
         match s.t {
             S::Helium if inview(c, 60.0) => {
-                let r = g.turret_range(S::Helium, s.roof >= 0);
+                let r = g.turret_range(S::Helium, s.up());
                 mb.disc(c, r, rgba(165, 216, 255, 0.10 + 0.03 * (t * 1.3).sin()));
                 ring(&mut mb, c, r, 0.5, rgba(200, 235, 255, 0.55));
                 for k in 0..10 {
@@ -1290,7 +1296,7 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
                 if let Some(tg) = s.target {
                     let f = 1.0 - s.charge / RAIL_CHARGE;
                     let dir = (tg - c).normalize_or_zero();
-                    let end = c + dir * g.turret_range(S::Rail, s.roof >= 0);
+                    let end = c + dir * g.turret_range(S::Rail, s.up());
                     mb.dashed(&[c, end], 0.3 + 0.5 * f, 3.0, 2.0, Color::new(0.6, 0.9, 1.0, 0.25 + 0.5 * f));
                 }
             }
@@ -1339,15 +1345,17 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels, painter: bool
             continue;
         }
         let d = def(s.t);
-        let base = if s.roof >= 0 { g.world.buildings[s.roof as usize].h } else { 0.0 };
+        let base = g.struct_base(i);
         let (x, y, w, h) = (s.x as f32, s.y as f32, s.w as f32, s.h as f32);
         let c = vec2(x + w / 2.0, y + h / 2.0);
         if !inview(c, 20.0) {
             continue;
         }
-        // on a roof: drawn just after that building
+        // on a roof or a bunker: drawn just after it
         if s.roof >= 0 {
             mb.obj(g.world.buildings[s.roof as usize].c, 1.0);
+        } else if s.on >= 0 {
+            mb.obj(g.structs[s.on as usize].center(), 1.0);
         } else {
             mb.obj(c, 0.0);
         }
@@ -1367,7 +1375,8 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels, painter: bool
     }
     // troops on rooftops
     for (gi, gr) in g.groups.iter().enumerate() {
-        if gr.dead || gr.state != GState::Garrison {
+        // (troops in a bunker show as its count)
+        if gr.dead || gr.state != GState::Garrison || gr.b < 0 {
             continue;
         }
         let b = &g.world.buildings[gr.b as usize];
@@ -1548,6 +1557,14 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
     for s in &g.gunships {
         let heading = if s.phase == 1 { s.ang + std::f32::consts::FRAC_PI_2 } else { (s.center - s.p).to_angle() };
         air::heli(&mut glow, s.p, 16.0 + 20.0, heading, t, true, false, mk);
+    }
+    for gr in &g.groups {
+        if gr.dead || gr.kind != U::Tank {
+            continue;
+        }
+        for m in gr.m.iter().filter(|m| m.alive) {
+            air::tank(&mut glow, m.p, m.hd, m.aim, mk.min(1.6));
+        }
     }
     gl_use_material(&sc.line_mat);
     for m in glow.finish() {

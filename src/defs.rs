@@ -30,9 +30,11 @@ pub enum S {
     Rescue,
     ScrapDepot,
     AmmoDepot,
+    Bunker,
 }
-pub const BUILD_ORDER: [S; 17] = [
+pub const BUILD_ORDER: [S; 18] = [
     S::Wall,
+    S::Bunker,
     S::Gun,
     S::Cannon,
     S::Flame,
@@ -203,10 +205,12 @@ pub fn def(s: S) -> &'static Def {
     static HELIPAD: Def = Def { key: 'u', name: "Heli pad", w: 11, h: 11, hp: 800.0, cost: 1500.0, ht: 0.6, top: rgb(73, 80, 87), side: rgb(40, 44, 50), zone: true, tip: "Keeps a gunship of its own. Click the pad, then right-click anywhere: the gunship flies there for free and fires for 20 s (right-click again to move it), then returns to rearm for 35 s. Base zone only.", ..BASE };
     static RESCUE: Def = Def { key: 'j', name: "Rescue station", w: 9, h: 9, hp: 600.0, cost: 500.0, ht: 3.2, top: rgb(105, 219, 124), side: rgb(43, 138, 62), zone: true, tip: "Every 25 s sends a rescue team to the biggest group of civilians it can reach safely and walks them back to the base. Base zone only.", ..BASE };
     static SDEPOT: Def = Def { key: '0', name: "Scrap depot", w: 7, h: 7, hp: 500.0, cost: 250.0, ht: 2.6, top: rgb(56, 217, 169), side: rgb(18, 134, 106), zone: true, tip: "Stores 2500 more scrap (you start with room for 2500). Base zone only.", ..BASE };
+    static BUNKER: Def = Def { key: '-', name: "Bunker", w: 7, h: 7, hp: 1400.0, cost: 150.0, ht: 2.4, top: rgb(150, 156, 122), side: rgb(92, 98, 72), tip: "A concrete bunker. Right-click it with a squad selected to send them in: they fire from the slits with +60% range and are safe until it falls, when 3 in 4 of them die. Any number of troops fit. Research turret mounts to put a turret on top for the rooftop range bonus.", ..BASE };
     static ADEPOT: Def = Def { key: 'v', name: "Ammo depot", w: 7, h: 7, hp: 500.0, cost: 250.0, ht: 2.6, top: rgb(198, 154, 116), side: rgb(134, 96, 63), zone: true, tip: "Stores 2000 more ammo (you start with room for 1500). Base zone only.", ..BASE };
     match s {
         S::ScrapDepot => &SDEPOT,
         S::AmmoDepot => &ADEPOT,
+        S::Bunker => &BUNKER,
         S::Flame => &FLAME,
         S::Rail => &RAIL,
         S::Helium => &HELIUM,
@@ -248,8 +252,8 @@ pub struct UDef {
     pub tip: &'static str,
 }
 pub fn udef(u: U) -> &'static UDef {
-    static RIFLE: UDef = UDef { key: '8', name: "Rifle squad", cost: 60.0, n: 6, hp: 30.0, spd: 14.0, range: 24.0, rate: 0.5, dmg: 9.0, rad: 1.0, ammo: 0.25, bdmg: 0.0, col: rgb(28, 126, 214), tip: "Six soldiers march from the HQ and hold where you click. Click a building to garrison it (+60% range). Select units with left click, send them with right click." };
-    static TANK: UDef = UDef { key: '9', name: "Tank", cost: 300.0, n: 1, hp: 600.0, spd: 18.0, range: 44.0, rate: 1.1, dmg: 45.0, rad: 3.5, ammo: 2.0, bdmg: 4.0, col: rgb(24, 100, 171), tip: "Drives from the HQ and shells the horde. Tough, but each shell costs 2 ammo. Left click to select, right click to move." };
+    static RIFLE: UDef = UDef { key: '8', name: "Rifle squad", cost: 60.0, n: 6, hp: 30.0, spd: 14.0, range: 24.0, rate: 0.5, dmg: 9.0, rad: 1.0, ammo: 0.0, bdmg: 0.0, col: rgb(28, 126, 214), tip: "Six soldiers march from the HQ and hold where you click, spread out in a line. They need no ammo. Click a building or a bunker to garrison it (+60% range). Select units with left click, send them with right click." };
+    static TANK: UDef = UDef { key: '9', name: "Tank", cost: 300.0, n: 1, hp: 600.0, spd: 18.0, range: 44.0, rate: 1.1, dmg: 45.0, rad: 3.5, ammo: 0.0, bdmg: 4.0, col: rgb(24, 100, 171), tip: "Drives from the HQ and shells the thickest part of the horde. Tough, and needs no ammo. Left click to select, right click to move." };
     match u {
         U::Rifle => &RIFLE,
         U::Tank => &TANK,
@@ -274,7 +278,7 @@ pub struct ADef {
 }
 pub fn adef(a: A) -> &'static ADef {
     static RESCUE: ADef = ADef { key: 'r', name: "Rescue squad", cost: 80.0, ammo: 0.0, cd: 6.0, tip: "Sends troops to the spot you click. Each soldier walks up to civilians one by one and escorts them back to the base, where they walk to an evac point." };
-    static AIR: ADef = ADef { key: 'q', name: "Airstrike", cost: 250.0, ammo: 0.0, cd: 18.0, tip: "A bomber crosses the map and drops a line of bombs through the spot you click. Flattens buildings." };
+    static AIR: ADef = ADef { key: 'q', name: "Airstrike", cost: 250.0, ammo: 0.0, cd: 18.0, tip: "A B-2 bomber drops 5 bombs spread evenly along a line. Right-click where the run starts, hold and drag to where it ends, and let go to send it. Flattens buildings." };
     static GUNSHIP: ADef = ADef { key: 'g', name: "Gunship", cost: 300.0, ammo: 150.0, cd: 40.0, tip: "A helicopter gunship flies out and circles the spot you click for 20 seconds, firing at anything in range." };
     static ICBM: ADef = ADef { key: 'e', name: "ICBM", cost: 1500.0, ammo: 400.0, cd: 75.0, tip: "$1500 + 400 ammo. Launches from the nearest ready silo and erases everything in a huge radius. Every silo has its own cooldown, so more silos means more launches." };
     match a {
@@ -295,10 +299,11 @@ pub enum R {
     Armour,
     Presses,
     Barrels,
+    Mounts,
 }
-pub const RESEARCH: [R; 6] = [R::Rescue, R::Carpet, R::Nuke, R::Armour, R::Presses, R::Barrels];
+pub const RESEARCH: [R; 7] = [R::Rescue, R::Carpet, R::Nuke, R::Armour, R::Presses, R::Barrels, R::Mounts];
 /// Lab topics that aren't tied to an ability (those show on the ability panel instead).
-pub const LAB_ONLY: [R; 3] = [R::Armour, R::Presses, R::Barrels];
+pub const LAB_ONLY: [R; 4] = [R::Armour, R::Presses, R::Barrels, R::Mounts];
 pub struct RDef {
     pub name: &'static str,
     pub tip: &'static str,
@@ -309,11 +314,12 @@ pub struct RDef {
 }
 pub fn rdef(r: R) -> &'static RDef {
     static RESCUE: RDef = RDef { name: "Bigger squads", tip: "Rescue squads send 18 troops and gather up to 120 civilians from a wider area", cost: 600.0, civs: 120 };
-    static CARPET: RDef = RDef { name: "Carpet bombing", tip: "Airstrikes drop 12 bombs; drag on the map to aim the bomb run", cost: 900.0, civs: 200 };
+    static CARPET: RDef = RDef { name: "Carpet bombing", tip: "Airstrikes drop 12 bombs along the run instead of 5", cost: 900.0, civs: 200 };
     static NUKE: RDef = RDef { name: "Nuclear warhead", tip: "Bigger ICBM blast that leaves radiation you can't build or send troops into for 90 s", cost: 2500.0, civs: 450 };
     static ARMOUR: RDef = RDef { name: "Reinforced armour", tip: "Walls and turrets get 75% more health", cost: 700.0, civs: 150 };
     static PRESSES: RDef = RDef { name: "Shell presses", tip: "Ammo plants make 10 ammo a second instead of 6 from the same scrap", cost: 800.0, civs: 180 };
     static BARRELS: RDef = RDef { name: "Long barrels", tip: "Turrets reach 25% further", cost: 1000.0, civs: 220 };
+    static MOUNTS: RDef = RDef { name: "Turret mounts", tip: "A turret can be built on top of a bunker, where it gets the rooftop range bonus (+60%)", cost: 600.0, civs: 140 };
     match r {
         R::Rescue => &RESCUE,
         R::Carpet => &CARPET,
@@ -321,6 +327,7 @@ pub fn rdef(r: R) -> &'static RDef {
         R::Armour => &ARMOUR,
         R::Presses => &PRESSES,
         R::Barrels => &BARRELS,
+        R::Mounts => &MOUNTS,
     }
 }
 /// Campaign-only turret upgrades, two for each kind of turret, bought with research points.

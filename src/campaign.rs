@@ -109,10 +109,10 @@ pub enum Tech {
 }
 
 /// What every campaign starts with.
-pub const START_BUILDS: [S; 4] = [S::Wall, S::Extractor, S::Pad, S::Rescue];
+pub const START_BUILDS: [S; 5] = [S::Wall, S::Bunker, S::Extractor, S::Pad, S::Rescue];
 
 /// The whole tree, in the order the campaign screen lists it. Saves store indices into it, so new entries go at the end.
-pub const TECH: [Tech; 31] = [
+pub const TECH: [Tech; 32] = [
     Tech::Build(S::Gun),
     Tech::Build(S::Cannon),
     Tech::Build(S::Flame),
@@ -144,6 +144,7 @@ pub const TECH: [Tech; 31] = [
     Tech::Up(Up::HeliumHull),
     Tech::Up(Up::ArtyRapid),
     Tech::Up(Up::ArtyHe),
+    Tech::Research(R::Mounts),
 ];
 
 /// Turrets that shoot ammo: the first one unlocked brings the ammo plant with it.
@@ -215,7 +216,7 @@ impl Tech {
             Tech::Research(R::Rescue) => Some(Tech::Ability(A::Rescue)),
             Tech::Research(R::Carpet) => Some(Tech::Ability(A::Air)),
             Tech::Research(R::Nuke) => Some(Tech::Build(S::Silo)),
-            Tech::Research(R::Presses | R::Barrels) => Some(Tech::Build(S::Gun)),
+            Tech::Research(R::Presses | R::Barrels | R::Mounts) => Some(Tech::Build(S::Gun)),
             _ => None,
         }
     }

@@ -13,6 +13,10 @@ pub const DT: f32 = 0.05;
 /// Civilians one extraction flight carries, and how long a pad needs before the next flight.
 pub const PAD_SEATS: u32 = 16;
 pub const PAD_COOLDOWN: f32 = 30.0;
+/// The longest bomb run a B-2 can be given.
+pub const AIR_RUN_MAX: f32 = 420.0;
+/// Inside this fraction of an ICBM's radius nothing survives.
+pub const NUKE_CORE: f32 = 0.3;
 
 pub struct Structure {
     pub t: S,
@@ -24,6 +28,8 @@ pub struct Structure {
     pub max: f32,
     pub cd: f32,
     pub roof: i32,
+    /// turrets: the bunker it is mounted on (-1: none)
+    pub on: i32,
     pub dead: bool,
     pub pending: bool,
     pub last_fire: f32,
@@ -36,6 +42,10 @@ pub struct Structure {
     pub snd: f32,
 }
 impl Structure {
+    /// Up on a roof or a bunker: no footprint on the ground, and the rooftop range bonus.
+    pub fn up(&self) -> bool {
+        self.roof >= 0 || self.on >= 0
+    }
     pub fn center(&self) -> Vec2 {
         vec2(
             self.x as f32 + self.w as f32 / 2.0,
@@ -53,6 +63,9 @@ pub struct Member {
     pub home: bool,
     /// rescue troops: civilians this soldier is escorting
     pub carry: u8,
+    /// which way it last moved, and where it last fired (tanks: hull and turret)
+    pub hd: f32,
+    pub aim: f32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -67,7 +80,10 @@ pub struct Group {
     pub m: Vec<Member>,
     pub state: GState,
     pub tf: Option<Arc<Vec<u32>>>,
+    /// the city building it is garrisoning (or headed into), -1: none
     pub b: i32,
+    /// the bunker it is garrisoning (or headed into), -1: none
+    pub sb: i32,
     pub target: Vec2,
     pub dead: bool,
     pub job: u64,
@@ -189,6 +205,8 @@ pub struct Gunship {
     pub ang: f32,
     pub cd: f32,
     pub phase: u8, // 0 going out, 1 circling, 2 going home
+    /// last time it raised its gun sound
+    pub snd: f32,
 }
 pub enum HeliKind {
     Deliver(usize),
@@ -241,6 +259,10 @@ pub enum Sfx {
     Nuke,
     /// a flame bunker stopped spraying (ends its Flame sound)
     FlameStop,
+    /// a gun turret's burst (raised every few shots)
+    Gun,
+    /// a gunship's chain gun (raised as each burst sound runs out)
+    HeliGun,
 }
 pub struct Portal {
     pub p: Vec2,
@@ -271,6 +293,7 @@ pub struct Research {
     pub armour: bool,
     pub presses: bool,
     pub barrels: bool,
+    pub mounts: bool,
     pub busy: Option<(R, f32)>,
 }
 impl Research {
@@ -282,6 +305,7 @@ impl Research {
             R::Armour => self.armour,
             R::Presses => self.presses,
             R::Barrels => self.barrels,
+            R::Mounts => self.mounts,
         }
     }
     pub fn set(&mut self, r: R) {
@@ -292,6 +316,7 @@ impl Research {
             R::Armour => self.armour = true,
             R::Presses => self.presses = true,
             R::Barrels => self.barrels = true,
+            R::Mounts => self.mounts = true,
         }
     }
 }
@@ -671,7 +696,7 @@ impl Game {
             })
             .collect();
         for (i, s) in self.structs.iter().enumerate() {
-            if s.dead || s.roof >= 0 || s.pending {
+            if s.dead || s.up() || s.pending {
                 continue;
             }
             for y in s.y..s.y + s.h {
@@ -820,7 +845,7 @@ impl Game {
                 // walls are never a target in themselves: the horde walks around them, and only
                 // chews through one when it blocks the way to the HQ (the HQ field handles that)
                 for s in &self.structs {
-                    if s.dead || s.pending || s.roof >= 0 || s.t == S::Wall {
+                    if s.dead || s.pending || s.up() || s.t == S::Wall {
                         continue;
                     }
                     for y in s.y..s.y + s.h {
@@ -979,6 +1004,10 @@ impl Game {
     }
 
     pub fn add_struct(&mut self, t: S, x: i32, y: i32, roof: i32) -> usize {
+        self.add_struct_on(t, x, y, roof, -1)
+    }
+    /// `add_struct`, mounted on bunker `on` when that is >= 0.
+    fn add_struct_on(&mut self, t: S, x: i32, y: i32, roof: i32, on: i32) -> usize {
         let d = def(t);
         let idx = self.structs.len();
         let hp = d.hp * self.armour(t);
@@ -992,6 +1021,7 @@ impl Game {
             max: hp,
             cd: 0.0,
             roof,
+            on,
             dead: false,
             pending: false,
             last_fire: -100.0,
@@ -1000,7 +1030,7 @@ impl Game {
             charge: 0.0,
             snd: -100.0,
         };
-        if roof < 0 {
+        if !s.up() {
             for yy in y..y + d.h {
                 for xx in x..x + d.w {
                     self.occ[yy as usize * W + xx as usize] = idx as i32;
@@ -1024,7 +1054,7 @@ impl Game {
             self.world.add_outpost(c);
             self.zone_dirty = true;
         }
-        if roof < 0 && !s.pending {
+        if !s.up() && !s.pending {
             self.obj_dirty = true;
             self.struct_dirty = true;
         }
@@ -1050,6 +1080,52 @@ impl Game {
             _ => 1.0,
         };
         def(t).range * if roof { 1.6 } else { 1.0 } * if self.research.barrels { 1.25 } else { 1.0 } * up
+    }
+    /// Height a structure stands at: a building's roof, a bunker's top, or the ground.
+    pub fn struct_base(&self, i: usize) -> f32 {
+        let s = &self.structs[i];
+        if s.roof >= 0 {
+            self.world.buildings[s.roof as usize].h
+        } else if s.on >= 0 {
+            def(S::Bunker).ht
+        } else {
+            0.0
+        }
+    }
+    /// The bunker under a point.
+    pub fn bunker_at(&self, p: Vec2) -> Option<usize> {
+        self.structs.iter().position(|s| {
+            !s.dead && !s.pending && s.t == S::Bunker && p.x >= s.x as f32 && p.y >= s.y as f32 && p.x < (s.x + s.w) as f32 && p.y < (s.y + s.h) as f32
+        })
+    }
+    /// Whether turret `t` can go on top of bunker `b` (needs Turret mounts; one turret a bunker).
+    pub fn can_mount(&self, t: S, b: usize) -> bool {
+        let d = def(t);
+        let Some(bs) = self.structs.get(b) else { return false };
+        self.research.mounts
+            && d.turret
+            && !d.ground
+            && d.w <= bs.w
+            && self.build_ok(t)
+            && !bs.dead
+            && !bs.pending
+            && bs.t == S::Bunker
+            && !self.structs.iter().any(|m| !m.dead && m.on == b as i32)
+    }
+    /// Buys and mounts a turret on a bunker.
+    pub fn place_mount(&mut self, t: S, b: usize) -> bool {
+        if !self.can_mount(t, b) {
+            return false;
+        }
+        let c = self.structs[b].center();
+        let cost = self.cost_at(t, c);
+        if self.scrap < cost {
+            return false;
+        }
+        self.scrap -= cost;
+        let d = def(t);
+        self.add_struct_on(t, (c.x - d.w as f32 / 2.0) as i32, (c.y - d.h as f32 / 2.0) as i32, -1, b as i32);
+        true
     }
     pub fn has_up(&self, u: Up) -> bool {
         self.ups.contains(&u)
@@ -1160,7 +1236,7 @@ impl Game {
         }
         self.structs[i].dead = true;
         let s = &self.structs[i];
-        if s.roof < 0 {
+        if !s.up() {
             for yy in s.y..s.y + s.h {
                 for xx in s.x..s.x + s.w {
                     let c = yy as usize * W + xx as usize;
@@ -1175,6 +1251,11 @@ impl Game {
         let t = s.t;
         if t == S::Outpost {
             self.rebuild_zone();
+        }
+        if t == S::Bunker {
+            if let Some(k) = self.structs.iter().position(|m| !m.dead && m.on == i as i32) {
+                self.kill_struct(k);
+            }
         }
         if t == S::Pad {
             self.pad_dirty = true;
@@ -1827,6 +1908,24 @@ impl Game {
         }
     }
 
+    /// An ICBM going off: nothing survives the inner third, and the blast weakens out to the edge,
+    /// where only the toughest of the horde (and most buildings) live through it. Rings stack, so
+    /// a cell takes the damage of every ring that reaches it.
+    pub fn nuke_blast(&mut self, at: Vec2, r: f32) {
+        // (fraction of the radius, horde damage, building damage per cell, hive damage)
+        const RINGS: [(f32, f32, f32, f32); 6] = [
+            (1.0, 5.0, 0.0, 0.0),
+            (0.9, 10.0, 1.0, 100.0),
+            (0.75, 25.0, 6.0, 300.0),
+            (0.6, 80.0, 18.0, 800.0),
+            (0.45, 280.0, 30.0, 2000.0),
+            (NUKE_CORE, 1e9, 1e6, 1e9),
+        ];
+        for (f, d, bd, hv) in RINGS {
+            self.blast(at, r * f, d, bd, 0, hv);
+        }
+    }
+
     pub fn damage_hives(&mut self, at: Vec2, r: f32, d: f32) {
         for h in &mut self.hives {
             if !h.dead && h.p.distance(at) < r + 6.0 + h.r * 0.08 {
@@ -1892,15 +1991,8 @@ impl Game {
                     return None;
                 }
                 if g.state == GState::Garrison {
-                    let b = g.b as usize;
-                    return Some((
-                        self.world.buildings[b].c,
-                        vec![
-                            (self.world.buildings[b].c.y as usize * W
-                                + self.world.buildings[b].c.x as usize)
-                                as u32,
-                        ],
-                    ));
+                    let (c, _) = self.garrison_spot(g)?;
+                    return Some((c, vec![(c.y as usize * W + c.x as usize) as u32]));
                 }
                 let mut c = Vec2::ZERO;
                 for m in g.m.iter().filter(|m| m.alive) {
@@ -1998,20 +2090,22 @@ impl Game {
     fn turrets(&mut self) {
         // cells gun turrets are already shooting at this tick, so two never waste shots on one target
         let mut claimed: Vec<usize> = Vec::new();
+        // where cannon shells are already landing this tick
+        let mut shells: Vec<(Vec2, f32)> = Vec::new();
         for i in 0..self.structs.len() {
-            let (t, center, roof) = {
+            let (t, center, up) = {
                 let s = &self.structs[i];
                 if s.dead || s.pending || !matches!(s.t, S::Gun | S::Cannon) {
                     continue;
                 }
-                (s.t, s.center(), s.roof)
+                (s.t, s.center(), s.up())
             };
             let d = def(t);
             self.structs[i].cd -= DT;
             if self.structs[i].cd > 0.0 || self.ammo < d.ammo {
                 continue;
             }
-            let range = self.turret_range(t, roof >= 0);
+            let range = self.turret_range(t, up);
             let tg = if t == S::Gun {
                 let cell = self.target_cell(center, range, &claimed, |_| false);
                 if let Some(k) = cell {
@@ -2019,7 +2113,12 @@ impl Game {
                 }
                 cell.map(Self::cell_pos)
             } else {
-                self.find_target(center, range)
+                let rad = d.rad * self.rad_mult(t);
+                let tg = self.cluster_target(center, range, rad, &shells);
+                if let Some(p) = tg {
+                    shells.push((p, rad));
+                }
+                tg
             };
             if let Some(tg) = tg {
                 let src = self.rev_src(RevKey::Struct(i));
@@ -2028,7 +2127,7 @@ impl Game {
                 self.structs[i].cd = self.reload(t);
                 self.structs[i].last_fire = self.time;
                 self.structs[i].aim = libm::atan2f(tg.y - center.y, tg.x - center.x);
-                let base = if roof >= 0 { self.world.buildings[roof as usize].h } else { 0.0 };
+                let base = self.struct_base(i);
                 self.tracers.push(Tracer {
                     a: center,
                     az: base + d.ht,
@@ -2036,6 +2135,10 @@ impl Game {
                     t: 0.09,
                     kind: if t == S::Cannon { 1 } else { 0 },
                 });
+                if t == S::Gun && self.time - self.structs[i].snd >= 0.45 {
+                    self.structs[i].snd = self.time;
+                    self.sfx.push((Sfx::Gun, center));
+                }
                 if t == S::Cannon {
                     self.sfx.push((Sfx::Cannon, center));
                     self.booms.push(Boom {
@@ -2074,6 +2177,58 @@ impl Game {
             }
         }
         best.map(|p| (p, bn))
+    }
+
+    /// Where a splash weapon at `c` with reach `r` and blast radius `rad` hits the most of the horde:
+    /// the densest few coarse cells in range, then the spot inside them whose blast covers the
+    /// most units, keeping clear of blasts already landing (`taken`).
+    fn cluster_target(&self, c: Vec2, r: f32, rad: f32, taken: &[(Vec2, f32)]) -> Option<Vec2> {
+        let mut cand: Vec<(u32, usize)> = self
+            .coarse_near(c, r)
+            .into_iter()
+            .map(|(_, gi)| {
+                let (gx, gy) = ((gi % CW) as i32, (gi / CW) as i32);
+                // a cell's own count plus its neighbours', so a cell at the heart of a crowd wins
+                let mut n = 0;
+                for oy in -1..=1 {
+                    for ox in -1..=1 {
+                        let (x, y) = (gx + ox, gy + oy);
+                        if x >= 0 && y >= 0 && x < CW as i32 && y < CH as i32 {
+                            n += self.swarm.coarse_at(y as usize * CW + x as usize) * if ox == 0 && oy == 0 { 2 } else { 1 };
+                        }
+                    }
+                }
+                (n, gi)
+            })
+            .collect();
+        cand.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        let k = rad.round().max(1.0) as i32;
+        let (mut best, mut bv) = (None, 0u32);
+        for &(_, gi) in cand.iter().take(5) {
+            let (bx, by) = (((gi % CW) * CG) as i32, ((gi / CW) * CG) as i32);
+            // every other cell is plenty for a blast several cells wide
+            for y in (by..by + CG as i32).step_by(2) {
+                for x in (bx..bx + CG as i32).step_by(2) {
+                    let p = vec2(x as f32 + 0.5, y as f32 + 0.5);
+                    if p.distance(c) > r || taken.iter().any(|(q, qr)| q.distance(p) < (qr + rad) * 0.6) {
+                        continue;
+                    }
+                    let mut v = 0;
+                    for yy in (y - k).max(0)..=(y + k).min(H as i32 - 1) {
+                        for xx in (x - k).max(0)..=(x + k).min(W as i32 - 1) {
+                            if (xx - x) * (xx - x) + (yy - y) * (yy - y) <= k * k {
+                                v += self.swarm.at(yy as usize * W + xx as usize);
+                            }
+                        }
+                    }
+                    if v > bv {
+                        bv = v;
+                        best = Some(p);
+                    }
+                }
+            }
+        }
+        best.or_else(|| self.find_target(c, r))
     }
 
     /// Coarse cells with hostiles within `r` of `c`, nearest first.
@@ -2220,6 +2375,7 @@ impl Game {
                     ang: 0.0,
                     cd: 0.0,
                     phase: 0,
+                    snd: -100.0,
                 });
                 true
             }
@@ -2242,12 +2398,12 @@ impl Game {
     fn towers(&mut self) {
         self.slow.iter_mut().for_each(|v| *v = 0);
         for i in 0..self.structs.len() {
-            let (t, c, roof) = {
+            let (t, c, up) = {
                 let s = &self.structs[i];
                 if s.dead || s.pending {
                     continue;
                 }
-                (s.t, s.center(), s.roof)
+                (s.t, s.center(), s.up())
             };
             let d = def(t);
             match t {
@@ -2300,7 +2456,7 @@ impl Game {
                     self.sfx.push((Sfx::Flame, c));
                 }
                 S::Rail => {
-                    let range = self.turret_range(t, roof >= 0);
+                    let range = self.turret_range(t, up);
                     if self.structs[i].charge > 0.0 {
                         self.structs[i].charge -= DT;
                         if self.structs[i].charge > 0.0 {
@@ -2323,7 +2479,7 @@ impl Game {
                         for k in 1..=8 {
                             self.damage_hives(c + dir * range * k as f32 / 8.0, d.rad, 40.0);
                         }
-                        let base = if roof >= 0 { self.world.buildings[roof as usize].h } else { 0.0 };
+                        let base = self.struct_base(i);
                         self.tracers.push(Tracer { a: c, az: base + d.ht + 1.5, b: end, t: 0.4, kind: 6 });
                         self.booms.push(Boom { p: c + dir * 4.0, r: 3.0, t: 0.25, life: 0.25, kind: 4 });
                         self.structs[i].last_fire = self.time;
@@ -2346,7 +2502,7 @@ impl Game {
                     }
                 }
                 S::Helium => {
-                    let r = self.turret_range(t, roof >= 0);
+                    let r = self.turret_range(t, up);
                     let rr = r / CG as f32;
                     let (cx, cy) = (c.x / CG as f32, c.y / CG as f32);
                     let (x0, x1) = ((cx - rr).floor().max(0.0) as usize, ((cx + rr).ceil() as usize).min(CW - 1));
@@ -2571,8 +2727,9 @@ impl Game {
             }
             A::Air => {
                 let upgraded = self.research.air;
-                let (start, end) = if upgraded && from.distance(to) > 8.0 {
-                    (from, to)
+                // the run is drawn from `from` to `to`; a plain click gets a short run through it
+                let (start, end) = if from.distance(to) > 8.0 {
+                    (from, from + (to - from).clamp_length_max(AIR_RUN_MAX))
                 } else {
                     let ang = self.rng.f() * std::f32::consts::TAU;
                     let d = vec2(libm::cosf(ang), libm::sinf(ang));
@@ -2590,12 +2747,8 @@ impl Game {
                     } else {
                         0.5
                     };
-                    let jitter = if upgraded {
-                        vec2(-dir.y, dir.x) * (self.rng.f() - 0.5) * 10.0
-                    } else {
-                        Vec2::ZERO
-                    };
-                    let p = start + seg * f + jitter;
+                    // evenly spaced along the line
+                    let p = start + seg * f;
                     bombs.push((p, back + seg.length() * f, false));
                 }
                 self.strikes.push(Strike::Air {
@@ -2618,6 +2771,7 @@ impl Game {
                     ang: 0.0,
                     cd: 0.0,
                     phase: 0,
+                    snd: -100.0,
                 });
             }
             A::Icbm => {
@@ -2701,7 +2855,11 @@ impl Game {
         });
         self.strikes = strikes;
         for (p, r, d, bd, k, hv) in blasts {
-            self.blast(p, r, d, bd, 0, hv);
+            if k == 1 {
+                self.nuke_blast(p, r);
+            } else {
+                self.blast(p, r, d, bd, 0, hv);
+            }
             self.booms.push(Boom {
                 p,
                 r,
@@ -2762,6 +2920,10 @@ impl Game {
                                 t: 0.06,
                                 kind: 2,
                             });
+                            if self.time - g.snd >= 1.45 {
+                                g.snd = self.time;
+                                self.sfx.push((Sfx::HeliGun, g.p));
+                            }
                         }
                         g.cd = 0.1;
                     }
@@ -2800,7 +2962,7 @@ impl Game {
         for i in done {
             if !self.structs[i].dead {
                 self.structs[i].pending = false;
-                if self.structs[i].roof < 0 {
+                if !self.structs[i].up() {
                     self.obj_dirty = true;
                     self.struct_dirty = true;
                 }
@@ -3360,6 +3522,8 @@ impl Game {
                 alive: true,
                 home: false,
                 carry: 0,
+                hd: -std::f32::consts::FRAC_PI_2,
+                aim: -std::f32::consts::FRAC_PI_2,
             });
         }
         let job = self.target_job(tc);
@@ -3588,12 +3752,8 @@ impl Game {
     /// Sends `n` troops out of the HQ to a spot (free; `deploy` is the paid version).
     pub fn spawn_group(&mut self, kind: U, n: usize, at: Vec2) -> bool {
         let d = udef(kind);
-        let roof = if kind == U::Rifle {
-            self.roof_at(at)
-        } else {
-            None
-        };
-        let Some(tc) = self.order_cell(roof, at) else {
+        let (roof, bunker) = self.order_into(kind, at);
+        let Some(tc) = self.order_cell(roof, bunker, at) else {
             return false;
         };
         let hq = &self.structs[self.hq_idx];
@@ -3607,6 +3767,8 @@ impl Game {
                 alive: true,
                 home: false,
                 carry: 0,
+                hd: -std::f32::consts::FRAC_PI_2,
+                aim: -std::f32::consts::FRAC_PI_2,
             });
         }
         let job = self.target_job(tc);
@@ -3616,13 +3778,28 @@ impl Game {
             state: GState::Wait,
             tf: None,
             b: roof.map(|r| r.0 as i32).unwrap_or(-1),
+            sb: bunker.map(|i| i as i32).unwrap_or(-1),
             target: Self::cell_pos(tc),
             dead: false,
             job,
         });
         true
     }
-    fn order_cell(&self, roof: Option<(usize, Vec2)>, at: Vec2) -> Option<usize> {
+    /// What a click sends troops into: a bunker or a city building (rifle squads only).
+    fn order_into(&self, kind: U, at: Vec2) -> (Option<(usize, Vec2)>, Option<usize>) {
+        if kind != U::Rifle {
+            return (None, None);
+        }
+        match self.bunker_at(at) {
+            Some(i) => (None, Some(i)),
+            None => (self.roof_at(at), None),
+        }
+    }
+    fn order_cell(&self, roof: Option<(usize, Vec2)>, bunker: Option<usize>, at: Vec2) -> Option<usize> {
+        if let Some(i) = bunker {
+            let s = &self.structs[i];
+            return self.nearest_walkable(s.center(), s.w.max(s.h) / 2 + 14);
+        }
         match roof {
             Some((b, _)) => {
                 let bb = &self.world.buildings[b];
@@ -3632,27 +3809,88 @@ impl Game {
             None => self.nearest_walkable(at, 12),
         }
     }
+    /// Where a garrisoned group sits and how high: its bunker or building (None once that is gone).
+    pub fn garrison_spot(&self, g: &Group) -> Option<(Vec2, f32)> {
+        if g.sb >= 0 {
+            let s = &self.structs[g.sb as usize];
+            return (!s.dead).then(|| (s.center(), def(S::Bunker).ht));
+        }
+        if g.b >= 0 {
+            let b = &self.world.buildings[g.b as usize];
+            return b.alive.then_some((b.c, b.h));
+        }
+        None
+    }
+    /// The building or bunker a garrison holds has fallen: three in four of the troops inside die,
+    /// the rest are left standing in the rubble.
+    fn garrison_lost(&mut self, gi: usize) {
+        let (x0, y0, x1, y1) = {
+            let g = &self.groups[gi];
+            if g.sb >= 0 {
+                let s = &self.structs[g.sb as usize];
+                (s.x as f32, s.y as f32, (s.x + s.w) as f32, (s.y + s.h) as f32)
+            } else {
+                let b = &self.world.buildings[g.b as usize];
+                (b.x0.max(1.0), b.y0.max(1.0), b.x1.min(W as f32 - 2.0), b.y1.min(H as f32 - 2.0))
+            }
+        };
+        let alive: Vec<usize> = (0..self.groups[gi].m.len()).filter(|&k| self.groups[gi].m[k].alive).collect();
+        let lost = (alive.len() as f32 * 0.75).ceil() as usize;
+        // pick the dead at random: shuffle the survivors' order
+        let mut order = alive;
+        for k in (1..order.len()).rev() {
+            let j = self.rng.below(k + 1);
+            order.swap(k, j);
+        }
+        let mut sum = Vec2::ZERO;
+        let mut left = 0;
+        for (n, &k) in order.iter().enumerate() {
+            if n < lost {
+                self.groups[gi].m[k].alive = false;
+                continue;
+            }
+            // somewhere on the floor of the ruin that isn't still standing
+            let mut p = vec2((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            for _ in 0..12 {
+                let q = vec2(x0 + self.rng.f() * (x1 - x0), y0 + self.rng.f() * (y1 - y0));
+                let c = q.y as usize * W + q.x as usize;
+                if self.world.bid[c] < 0 && self.world.terrain[c] != T_WATER {
+                    p = q;
+                    break;
+                }
+            }
+            self.groups[gi].m[k].p = p;
+            sum += p;
+            left += 1;
+        }
+        let g = &mut self.groups[gi];
+        g.state = GState::Hold;
+        g.b = -1;
+        g.sb = -1;
+        g.tf = None;
+        if left > 0 {
+            g.target = sum / left as f32;
+        }
+    }
     /// Re-orders an existing group to a new spot (or into a building, for rifle squads).
     pub fn order(&mut self, gi: usize, at: Vec2) -> bool {
         if self.world.irradiated_at(at) || self.groups[gi].dead {
             return false;
         }
         let kind = self.groups[gi].kind;
-        let roof = if kind == U::Rifle {
-            self.roof_at(at)
-        } else {
-            None
-        };
-        let Some(tc) = self.order_cell(roof, at) else {
+        let (roof, bunker) = self.order_into(kind, at);
+        let Some(tc) = self.order_cell(roof, bunker, at) else {
             return false;
         };
         // garrisoned troops step back out onto the street first
         if self.groups[gi].state == GState::Garrison {
-            let b = self.groups[gi].b as usize;
-            let c = self.world.buildings[b].c;
-            if let Some(out) = self.nearest_walkable(c, 30) {
-                for m in &mut self.groups[gi].m {
-                    m.p = Self::cell_pos(out);
+            if let Some((c, _)) = self.garrison_spot(&self.groups[gi]) {
+                if let Some(out) = self.nearest_walkable(c, 30) {
+                    let o = Self::cell_pos(out);
+                    for k in 0..self.groups[gi].m.len() {
+                        let j = vec2(self.rng.f() - 0.5, self.rng.f() - 0.5) * 0.9;
+                        self.groups[gi].m[k].p = o + j;
+                    }
                 }
             }
         }
@@ -3662,6 +3900,7 @@ impl Game {
         g.state = GState::Wait;
         g.tf = None;
         g.b = roof.map(|r| r.0 as i32).unwrap_or(-1);
+        g.sb = bunker.map(|i| i as i32).unwrap_or(-1);
         g.target = Self::cell_pos(tc);
         true
     }
@@ -3673,8 +3912,7 @@ impl Game {
                 continue;
             }
             if g.state == GState::Garrison {
-                let b = g.b as usize;
-                let c = self.world.buildings[b].c;
+                let Some((c, _)) = self.garrison_spot(g) else { continue };
                 if c.distance(p) < bd {
                     bd = c.distance(p);
                     best = Some(i);
@@ -3691,6 +3929,21 @@ impl Game {
         best
     }
 
+    /// Where soldier `k` of a squad stands around its spot: rings of 6, 12, 18… a little over two
+    /// cells apart, so a squad spreads out instead of piling onto one cell.
+    fn slot(k: usize) -> Vec2 {
+        if k == 0 {
+            return Vec2::ZERO;
+        }
+        let (mut ring, mut first) = (1, 1);
+        while k >= first + 6 * ring {
+            first += 6 * ring;
+            ring += 1;
+        }
+        let a = (k - first) as f32 / (6 * ring) as f32 * std::f32::consts::TAU + ring as f32 * 0.5;
+        vec2(libm::cosf(a), libm::sinf(a)) * 2.3 * ring as f32
+    }
+
     fn groups_tick(&mut self) {
         let obj = self.obj.clone();
         let atk = self.faction().stats.atk;
@@ -3700,15 +3953,14 @@ impl Game {
             }
             let kind = self.groups[gi].kind;
             let d = udef(kind);
-            let gar = self.groups[gi].state == GState::Garrison;
-            let b = self.groups[gi].b;
-            if gar && !self.world.buildings[b as usize].alive {
-                for m in &mut self.groups[gi].m {
-                    m.alive = false;
-                }
+            if self.groups[gi].state == GState::Garrison && self.garrison_spot(&self.groups[gi]).is_none() {
+                self.garrison_lost(gi);
             }
+            let gar = self.groups[gi].state == GState::Garrison;
+            let spot = if gar { self.garrison_spot(&self.groups[gi]) } else { None };
             let state = self.groups[gi].state;
             let tf = self.groups[gi].tf.clone();
+            let target = self.groups[gi].target;
             let (mut live, mut arrived) = (0, 0);
             let mut shots = Vec::new();
             for mi in 0..self.groups[gi].m.len() {
@@ -3716,6 +3968,7 @@ impl Game {
                 if !m.alive {
                     continue;
                 }
+                let was = m.p;
                 if !gar {
                     let c = m.p.y as usize * W + m.p.x as usize;
                     let v = self.swarm.at(c)
@@ -3729,35 +3982,74 @@ impl Game {
                             continue;
                         }
                     }
+                    let mut near = state == GState::Hold;
                     if state == GState::Move {
                         if let Some(tf) = &tf {
-                            Self::step_on_field(&obj, &mut m.p, tf, d.spd, &mut self.rng);
-                            if tf[m.p.y as usize * W + m.p.x as usize] <= 40 {
+                            let v = tf[m.p.y as usize * W + m.p.x as usize];
+                            // riflemen close to their spot walk to their own place in the formation
+                            near = v <= 60 && kind == U::Rifle;
+                            if !near {
+                                Self::step_on_field(&obj, &mut m.p, tf, d.spd, &mut self.rng);
+                            }
+                            if near || tf[m.p.y as usize * W + m.p.x as usize] <= 40 {
                                 arrived += 1;
                             }
                         }
                     }
+                    if near && kind == U::Rifle {
+                        let to = target + Self::slot(mi);
+                        if to.x > 1.0 && to.y > 1.0 && to.x < W as f32 - 1.0 && to.y < H as f32 - 1.0 && obj[to.y as usize * W + to.x as usize] == FREE {
+                            Self::step_toward(&obj, &mut m.p, to, d.spd);
+                        }
+                    }
+                }
+                if m.p.distance_squared(was) > 1e-4 {
+                    m.hd = libm::atan2f(m.p.y - was.y, m.p.x - was.x);
                 }
                 live += 1;
                 m.cd -= DT;
                 if m.cd <= 0.0 && self.ammo >= d.ammo {
-                    let (origin, muzzle, range) = if gar {
-                        let bb = &self.world.buildings[b as usize];
-                        (bb.c, (bb.c, bb.h + 1.0), d.range * 1.6)
-                    } else {
-                        (m.p, (m.p, 1.0), d.range)
+                    let (origin, muzzle, range) = match spot {
+                        Some((c, h)) => (c, (c, h + 1.0), d.range * 1.6),
+                        None => (m.p, (m.p, 1.0), d.range),
                     };
-                    if let Some(t) = self
-                        .find_target(origin, range)
-                        .or_else(|| self.hive_in_range(origin, range))
-                    {
+                    let tg = if kind == U::Tank {
+                        self.cluster_target(origin, range, d.rad, &[])
+                    } else {
+                        self.find_target(origin, range)
+                    };
+                    if let Some(t) = tg.or_else(|| self.hive_in_range(origin, range)) {
                         shots.push((muzzle, t));
+                        m.aim = libm::atan2f(t.y - origin.y, t.x - origin.x);
                         m.cd = d.rate * (0.85 + 0.3 * self.rng.f());
                     } else {
                         m.cd = 0.2;
                     }
                 }
                 self.groups[gi].m[mi] = m;
+            }
+            // riflemen on the street keep a little room between them
+            if kind == U::Rifle && !gar {
+                let ms = &mut self.groups[gi].m;
+                for a in 0..ms.len() {
+                    for b in a + 1..ms.len() {
+                        if !ms[a].alive || !ms[b].alive {
+                            continue;
+                        }
+                        let dd = ms[b].p - ms[a].p;
+                        let l = dd.length();
+                        if l >= 1.7 {
+                            continue;
+                        }
+                        let dir = if l > 1e-3 { dd / l } else { vec2(libm::cosf(b as f32), libm::sinf(b as f32)) };
+                        let push = dir * (1.7 - l) * 0.25;
+                        for (k, q) in [(a, ms[a].p - push), (b, ms[b].p + push)] {
+                            if q.x > 1.0 && q.y > 1.0 && q.x < W as f32 - 1.0 && q.y < H as f32 - 1.0 && obj[q.y as usize * W + q.x as usize] == FREE {
+                                ms[k].p = q;
+                            }
+                        }
+                    }
+                }
             }
             let src = if shots.is_empty() {
                 0
@@ -3785,18 +4077,35 @@ impl Game {
                     });
                 }
             }
-            let g = &mut self.groups[gi];
             if live == 0 {
-                g.dead = true;
+                self.groups[gi].dead = true;
                 continue;
             }
+            let g = &self.groups[gi];
             if g.state == GState::Move && arrived >= (live as f32 * 0.6).ceil() as usize {
-                g.state = if g.b >= 0 && self.world.buildings[g.b as usize].alive {
-                    GState::Garrison
+                let inside = g.sb >= 0 || g.b >= 0;
+                if inside && self.garrison_spot(g).is_some() {
+                    self.groups[gi].state = GState::Garrison;
+                    self.join_garrison(gi);
                 } else {
-                    GState::Hold
-                };
+                    self.groups[gi].state = GState::Hold;
+                }
             }
+        }
+    }
+
+    /// Squads garrisoning the same place become one squad (so any number of troops fit, and one
+    /// click brings them all back out). The newcomer takes the others in.
+    fn join_garrison(&mut self, gi: usize) {
+        let (b, sb) = (self.groups[gi].b, self.groups[gi].sb);
+        for oj in 0..self.groups.len() {
+            let o = &self.groups[oj];
+            if oj == gi || o.dead || o.state != GState::Garrison || o.kind != self.groups[gi].kind || o.b != b || o.sb != sb {
+                continue;
+            }
+            let ms: Vec<Member> = std::mem::take(&mut self.groups[oj].m).into_iter().filter(|m| m.alive).collect();
+            self.groups[oj].dead = true;
+            self.groups[gi].m.extend(ms);
         }
     }
 

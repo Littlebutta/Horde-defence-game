@@ -129,6 +129,7 @@ pub fn gallery(g: &mut Game) {
     put(g, S::Rescue, 28, 30);
     put(g, S::ScrapDepot, -30, 44);
     put(g, S::AmmoDepot, -20, 44);
+    put(g, S::Bunker, -10, 44);
     for _ in 0..40 {
         g.tick();
     }
@@ -205,5 +206,85 @@ pub fn towers(g: &mut Game) {
     eprintln!("station squads (found, done, wiped): {:?}; rescued {} waiting {}", st, g.rescued, g.waiting);
     if let Some(p) = pad {
         eprintln!("pad cd {:.1} gunship {:?}", g.structs[p].cd, g.pad_gunship(p).map(|s| (s.phase, s.t)));
+    }
+}
+
+/// Headless check of troops (`PH_UNITS=1`): a squad spreading out, squads manning a bunker with a
+/// mounted turret, a garrisoned building and bunker collapsing, a tank, and a B-2 run.
+pub fn units(g: &mut Game) {
+    g.scrap = 1e6;
+    g.ammo = 1e6;
+    let h = g.world.hq;
+    let spread = |g: &Game, gi: usize| {
+        let ms: Vec<Vec2> = g.groups[gi].m.iter().filter(|m| m.alive).map(|m| m.p).collect();
+        let mut close = f32::MAX;
+        for a in 0..ms.len() {
+            for b in a + 1..ms.len() {
+                close = close.min(ms[a].distance(ms[b]));
+            }
+        }
+        (ms.len(), close)
+    };
+    // a bunker, a turret on it, two squads inside
+    let mut bunker = None;
+    'b: for k in 0..80 {
+        let (x, y) = (h.x as i32 + 20 + (k % 10) * 3, h.y as i32 - 30 + (k / 10) * 3);
+        if g.place(S::Bunker, x, y) {
+            bunker = Some(g.structs.len() - 1);
+            break 'b;
+        }
+    }
+    let Some(bi) = bunker else {
+        eprintln!("could not place a bunker");
+        return;
+    };
+    let bc = g.structs[bi].center();
+    eprintln!("mount before research {}", g.place_mount(S::Gun, bi));
+    g.complete_research(R::Mounts);
+    eprintln!("mount {} second mount {}", g.place_mount(S::Gun, bi), g.place_mount(S::Cannon, bi));
+    let gun = g.structs.len() - 1;
+    eprintln!("gun on bunker: base {:.1} range {:.0} occupies ground {}", g.struct_base(gun), g.turret_range(S::Gun, g.structs[gun].up()), !g.structs[gun].up());
+    let n0 = g.groups.len();
+    eprintln!("rifles to bunker {} {}", g.deploy(U::Rifle, bc), g.deploy(U::Rifle, bc));
+    // a squad to open ground, and one into a city building
+    let street = h + vec2(-50.0, 0.0);
+    eprintln!("rifles to street {}", g.deploy(U::Rifle, street));
+    let bld = g.world.buildings.iter().enumerate().filter(|(_, b)| b.alive && b.c.distance(h) > 60.0 && b.c.distance(h) < 400.0).min_by(|a, b| a.1.c.distance(h).total_cmp(&b.1.c.distance(h))).map(|(i, b)| (i, b.c));
+    if let Some((_, c)) = bld {
+        eprintln!("rifles to building {}", g.deploy(U::Rifle, c));
+    }
+    eprintln!("tank {}", g.deploy(U::Tank, h + vec2(40.0, 60.0)));
+    let ammo0 = g.ammo;
+    for _ in 0..900 {
+        g.tick();
+    }
+    for gi in n0..g.groups.len() {
+        let gr = &g.groups[gi];
+        eprintln!("group {} {:?} {:?} dead {} b {} sb {} alive/closest {:?}", gi, gr.kind, gr.state == game::GState::Garrison, gr.dead, gr.b, gr.sb, spread(g, gi));
+    }
+    eprintln!("ammo used by troops {:.1}", ammo0 - g.ammo);
+    // knock the garrisoned building and the bunker down
+    let inside = |g: &Game, f: &dyn Fn(&game::Group) -> bool| g.groups.iter().enumerate().find(|(_, gr)| !gr.dead && gr.state == game::GState::Garrison && f(gr)).map(|(i, _)| i);
+    if let Some(gi) = inside(g, &|gr| gr.b >= 0) {
+        let before = spread(g, gi).0;
+        let b = g.groups[gi].b as usize;
+        g.destroy_building(b);
+        g.tick();
+        eprintln!("building fell: {} inside, {} left standing {:?}", before, spread(g, gi).0, g.groups[gi].state == game::GState::Hold);
+    }
+    if let Some(gi) = inside(g, &|gr| gr.sb >= 0) {
+        let before = spread(g, gi).0;
+        g.kill_struct(bi);
+        g.tick();
+        eprintln!("bunker fell: {} inside, {} left standing; mounted gun dead {}", before, spread(g, gi).0, g.structs[gun].dead);
+    }
+    let a = h + vec2(-150.0, -80.0);
+    eprintln!("b2 {}", g.use_ability(A::Air, a, a + vec2(200.0, 0.0)));
+    if let Some(game::Strike::Air { bombs, .. }) = g.strikes.last() {
+        let xs: Vec<f32> = bombs.iter().map(|b| (b.0 - a).x.round()).collect();
+        eprintln!("bombs at {:?}", xs);
+    }
+    for _ in 0..40 {
+        g.tick();
     }
 }

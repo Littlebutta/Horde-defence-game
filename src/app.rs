@@ -174,6 +174,8 @@ pub struct App {
     banner: Option<(String, String, String, f32)>,
     /// the slider being dragged
     drag: Option<u32>,
+    /// B-2 bomb run: where the right button went down
+    rpress: Option<Vec2>,
     /// the settings dialog is open over the screen
     settings_open: bool,
     /// opening settings paused the game (it resumes when they close)
@@ -324,6 +326,7 @@ impl App {
             banner: None,
             auto_place: ["PH_SHOT", "PH_NETTEST"].iter().any(|k| std::env::var(k).is_ok()) && std::env::var("PH_PLACE").is_err(),
             drag: None,
+            rpress: None,
             settings_open: std::env::var("PH_SETTINGS").is_ok(),
             settings_paused: false,
             blocked: false,
@@ -364,18 +367,23 @@ impl App {
         if self.screen == Screen::Play {
             // the game draws its 3D view in pixels and switches to points for the HUD itself
             self.play(dt);
-            return;
+        } else {
+            ui::begin();
+            self.blocked = self.settings_open || self.invite_open;
+            match self.screen {
+                Screen::Menu => self.menu(),
+                Screen::Loading => self.loading(),
+                Screen::Hub => self.hub(),
+                Screen::Play => {}
+            }
+            self.overlays();
+            ui::end();
         }
-        ui::begin();
-        self.blocked = self.settings_open || self.invite_open;
-        match self.screen {
-            Screen::Menu => self.menu(),
-            Screen::Loading => self.loading(),
-            Screen::Hub => self.hub(),
-            Screen::Play => {}
-        }
-        self.overlays();
-        ui::end();
+        // our own pointer, over everything (the system one is hidden)
+        show_mouse(false);
+        set_default_camera();
+        gl_use_default_material();
+        render::cursor(self.px_mouse());
     }
 
     /// What goes over any screen, in points: the settings dialog and the tooltip.
@@ -856,7 +864,9 @@ impl App {
                 Sfx::ArtilleryShot => (music::Snd::ArtilleryShot, 0.8, jitter),
                 Sfx::ArtilleryHit => (music::Snd::ArtilleryHit, 0.8, jitter),
                 Sfx::Bomb => (music::Snd::ArtilleryHit, 0.9, 0.85 * jitter),
-                Sfx::Nuke => (music::Snd::ArtilleryHit, 1.0, 0.5),
+                Sfx::Nuke => (music::Snd::Nuke, 1.0, 1.0),
+                Sfx::Gun => (music::Snd::Gun, 0.4, jitter),
+                Sfx::HeliGun => (music::Snd::HeliGun, 0.6, jitter),
                 Sfx::FlameStop => continue,
             };
             // a nuke is heard anywhere on the map
@@ -2162,6 +2172,25 @@ impl App {
         match self.tool {
             Tool::Build(t) => {
                 let d = def(t);
+                // a turret on top of a bunker (with Turret mounts)
+                if d.turret && !d.ground && self.press.is_none() {
+                    if let Some(bi) = g.bunker_at(mw) {
+                        let c = g.structs[bi].center();
+                        let can = g.can_mount(t, bi);
+                        let cost = g.cost_at(t, c);
+                        let afford = g.scrap >= cost;
+                        ghost(c.x - d.w as f32 / 2.0, c.y - d.h as f32 / 2.0, d.w as f32, d.h as f32, def(S::Bunker).ht, can && afford);
+                        let s = if !g.research.mounts {
+                            "Research turret mounts to build on bunkers".to_string()
+                        } else if !can {
+                            "This bunker already has a turret".to_string()
+                        } else {
+                            draw_circle_lines(c.x, c.y, g.turret_range(t, true), 0.4, rgba(255, 212, 59, 0.6));
+                            format!("On the bunker  ${:.0}  +60% range", cost)
+                        };
+                        return Some((s, if can && afford { WHITE } else { rgb(255, 140, 140) }));
+                    }
+                }
                 // rooftop spot for turrets
                 if d.turret && !d.ground && self.press.is_none() {
                     if let Some((b, p)) = g.roof_at(mw) {
@@ -2269,7 +2298,9 @@ impl App {
                 let d = udef(u);
                 draw_circle_lines(mw.x, mw.y, d.range, 0.4, rgba(116, 192, 252, 0.6));
                 let roof = if u == U::Rifle { g.roof_at(mw) } else { None };
-                let s = if roof.is_some() {
+                let s = if u == U::Rifle && g.bunker_at(mw).is_some() {
+                    format!("${:.0}  man the bunker (+60% range)", d.cost)
+                } else if roof.is_some() {
                     format!("${:.0}  garrison building (+60% range)", d.cost)
                 } else {
                     format!("${:.0}", d.cost)
@@ -2290,6 +2321,9 @@ impl App {
                         let r = if g.research.nuke { 190.0 } else { 120.0 };
                         draw_circle(mw.x, mw.y, r, rgba(234, 67, 53, 0.08));
                         draw_circle_lines(mw.x, mw.y, r, 1.0, rgba(234, 67, 53, 0.8));
+                        // the core where nothing survives; the blast weakens out to the edge
+                        draw_circle(mw.x, mw.y, r * NUKE_CORE, rgba(234, 67, 53, 0.12));
+                        draw_circle_lines(mw.x, mw.y, r * NUKE_CORE, 0.6, rgba(234, 67, 53, 0.6));
                     }
                     A::Rescue => {
                         let r = if g.research.rescue { 90.0 } else { 60.0 };
@@ -2297,17 +2331,26 @@ impl App {
                     }
                     A::Gunship => draw_circle_lines(mw.x, mw.y, 25.0 + 34.0, 0.6, blue),
                     A::Air => {
-                        let (s, e) = match self.press {
-                            Some((_, w)) if g.research.air => (w, mw),
-                            _ => (mw - vec2(24.0, 0.0), mw + vec2(24.0, 0.0)),
-                        };
-                        draw_line(s.x, s.y, e.x, e.y, 1.0, rgba(255, 212, 59, 0.8));
-                        draw_circle_lines(mw.x, mw.y, 30.0, 0.5, rgba(255, 212, 59, 0.5));
+                        let start = self.rpress.or(self.press.map(|p| p.1)).filter(|w| w.distance(mw) > 8.0);
+                        let n = if g.research.air { 12 } else { 5 };
+                        match start {
+                            Some(s) => {
+                                // the run as it will fly: a line from the start, a ring where each bomb lands
+                                let e = s + (mw - s).clamp_length_max(AIR_RUN_MAX);
+                                draw_circle(s.x, s.y, 1.6, rgba(255, 212, 59, 0.9));
+                                draw_line(s.x, s.y, e.x, e.y, 1.0, rgba(255, 212, 59, 0.8));
+                                for k in 0..n {
+                                    let p = s.lerp(e, k as f32 / (n - 1) as f32);
+                                    draw_circle_lines(p.x, p.y, 12.0, 0.4, rgba(255, 212, 59, 0.55));
+                                }
+                            }
+                            None => draw_circle_lines(mw.x, mw.y, 12.0, 0.5, rgba(255, 212, 59, 0.6)),
+                        }
                     }
                 }
                 let hint = match a {
-                    A::Air if g.research.air => "Drag the bomb run from start to end",
-                    A::Air => "Click where the bombs should fall",
+                    A::Air if self.rpress.is_some() => "Let go to send the bomber along this line",
+                    A::Air => "Right-click the start of the bomb run, hold and drag to its end",
                     _ => "Click the target",
                 };
                 Some((hint.to_string(), WHITE))
@@ -2863,8 +2906,22 @@ impl App {
         self.cam.t = self.cam.t.clamp(vec2(0.0, 0.0), vec2(W as f32, H as f32));
         let _ = sc;
 
+        // B-2: right press marks where the bomb run starts, release sends it to where the mouse is
+        let air = self.tool == Tool::Ability(A::Air);
+        if air && is_mouse_button_pressed(MouseButton::Right) && !ui {
+            self.rpress = Some(mw);
+        }
+        if let (true, Some(w0)) = (air && is_mouse_button_released(MouseButton::Right), self.rpress) {
+            self.rpress = None;
+            if self.act(g, Cmd::Ability(A::Air, w0, mw)) != Some(net::BAD_TARGET) {
+                self.tool = Tool::None;
+            }
+        }
+        if !air {
+            self.rpress = None;
+        }
         // right click: order the selected group, or drop the tool
-        if is_mouse_button_pressed(MouseButton::Right) && !ui {
+        if is_mouse_button_pressed(MouseButton::Right) && !ui && !air {
             if self.tool != Tool::None {
                 self.tool = Tool::None;
                 self.press = None;
@@ -2918,6 +2975,10 @@ impl App {
                 Tool::Build(t) => {
                     let d = def(t);
                     if d.turret && !d.ground && w0.distance(mw) < 2.0 {
+                        if let Some(b) = g.bunker_at(mw) {
+                            self.act(g, Cmd::Mount { t, b: b as u32 });
+                            return;
+                        }
                         if let Some((b, p)) = g.roof_at(mw) {
                             self.act(g, Cmd::Roof { t, b: b as u32, p });
                             return;
@@ -2929,7 +2990,7 @@ impl App {
                     self.act(g, Cmd::Deploy(u, mw));
                 }
                 Tool::Ability(a) => {
-                    let from = if a == A::Air && g.research.air { w0 } else { mw };
+                    let from = if a == A::Air { w0 } else { mw };
                     if self.act(g, Cmd::Ability(a, from, mw)) != Some(net::BAD_TARGET) {
                         self.tool = Tool::None;
                     }

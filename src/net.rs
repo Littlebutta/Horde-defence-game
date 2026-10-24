@@ -49,9 +49,11 @@ pub enum Cmd {
     Aim(u32, Vec2),
     /// stop an artillery piece firing
     Cease(u32),
+    /// a turret on top of a bunker
+    Mount { t: S, b: u32 },
 }
 
-const ALL_S: [S; 18] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue, S::ScrapDepot, S::AmmoDepot];
+const ALL_S: [S; 19] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue, S::ScrapDepot, S::AmmoDepot, S::Bunker];
 const ALL_U: [U; 2] = [U::Rifle, U::Tank];
 
 fn s_id(t: S) -> u32 {
@@ -124,6 +126,11 @@ impl Wr {
                 self.u32(21);
                 self.u32(i);
             }
+            Cmd::Mount { t, b } => {
+                self.u32(22);
+                self.u32(s_id(t));
+                self.u32(b);
+            }
         }
     }
 }
@@ -152,6 +159,7 @@ impl Rd<'_> {
             7 => Cmd::Stress(self.u32()?.min(10_000_000)),
             20 => Cmd::Aim(self.u32()?, self.v2()?),
             21 => Cmd::Cease(self.u32()?),
+            22 => Cmd::Mount { t: self.s()?, b: self.u32()? },
             _ => return None,
         })
     }
@@ -206,6 +214,7 @@ pub fn apply(g: &mut Game, c: Cmd) -> Option<&'static str> {
             let ok = (b as usize) < g.world.buildings.len() && g.place_roof(t, b as usize, p);
             (!ok).then_some("Can't put a turret on that roof")
         }
+        Cmd::Mount { t, b } => (!g.place_mount(t, b as usize)).then_some("Can't put a turret on that bunker"),
         Cmd::Sell(p) => g.sell_at(p).then_some("Sold for half price"),
         Cmd::Deploy(u, p) => (!g.deploy(u, p)).then_some("Can't deploy there"),
         Cmd::Order(gi, p) => {

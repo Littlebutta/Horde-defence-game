@@ -27,19 +27,25 @@ pub enum Snd {
     ArtilleryHit,
     Flame,
     Railgun,
+    Gun,
+    HeliGun,
+    Nuke,
 }
-const SNDS: usize = 5;
+const SNDS: usize = 8;
 static SFX: [&[u8]; SNDS] = [
     include_bytes!("../assets/sfx/cannon-shell.wav"),
     include_bytes!("../assets/sfx/artillery-shot.mp3"),
     include_bytes!("../assets/sfx/artillery-explosion.mp3"),
     include_bytes!("../assets/sfx/flame-bunker.mp3"),
     include_bytes!("../assets/sfx/railgun.wav"),
+    include_bytes!("../assets/sfx/gun-turret.mp3"),
+    include_bytes!("../assets/sfx/helicopter-fire.mp3"),
+    include_bytes!("../assets/sfx/icbm-explosion.mp3"),
 ];
 /// at most this many copies of one effect play at once, and a new copy waits this long after the
 /// last one, so a hundred cannons firing together stay a rumble instead of a wall of noise
-const VOICES: [usize; SNDS] = [5, 3, 5, 3, 3];
-const GAP_MS: [u64; SNDS] = [70, 120, 90, 250, 150];
+const VOICES: [usize; SNDS] = [5, 3, 5, 3, 3, 5, 3, 2];
+const GAP_MS: [u64; SNDS] = [70, 120, 90, 250, 150, 70, 200, 300];
 
 /// seconds each music crossfade takes; the end of a track fades out while the next fades in
 const FADE: f32 = 6.0;

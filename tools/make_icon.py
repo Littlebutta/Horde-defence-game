@@ -1,6 +1,6 @@
-# Draws the Pixel Horde icon: four squares, one unit each in its army's colour (defs.rs FACTIONS
-# col/deep, Palette civ). Writes assets/icon.ico (exe), assets/icon.png and the 16/32/64 RGBA
-# windows that main.rs passes to the window. Run: python3 tools/make_icon.py
+# Draws the Pixel Horde icon: four plain squares in the army colours (defs.rs FACTIONS col, and
+# the civilians' white). The unit sprites below are kept for reference. Writes assets/icon.ico
+# (exe), assets/icon.png and the 16/32/64 RGBA windows that main.rs passes to the window. Run: python3 tools/make_icon.py
 from pathlib import Path
 from PIL import Image
 
@@ -90,43 +90,15 @@ CELLS = [
 TUSK = (250, 244, 225)
 GAP = (16, 18, 22)
 
-def master():
-    img = Image.new("RGBA", (32, 32))
-    for i, (spr, bg, body, shade, eye) in enumerate(CELLS):
-        ox, oy = (i % 2) * 16, (i // 2) * 16
-        for y, row in enumerate(spr.strip().splitlines()):
-            for x, ch in enumerate(row):
-                c = {".": bg, "#": body, "o": shade, "x": eye, "w": TUSK}[ch]
-                img.putpixel((ox + x, oy + y), c + (255,))
-    return img
-
 def render(size):
-    m = master()
-    if size < 32:
-        # too small for the units: plain squares in the army colours
-        img = Image.new("RGBA", (size, size), GAP + (255,))
-        h = size // 2
-        for i, (_, _, body, _, _) in enumerate(CELLS):
-            ox, oy = (i % 2) * h, (i // 2) * h
-            for y in range(h):
-                for x in range(h):
-                    img.putpixel((ox + x, oy + y), body + (255,))
-        return img
-    s = (size + 31) // 32
-    img = m.resize((32 * s, 32 * s), Image.NEAREST)
-    if img.size[0] != size:
-        img = img.resize((size, size), Image.LANCZOS)
-    # dark cross between the four squares
-    w = max(1, size // 64)
-    for y in range(size):
-        for x in range(size // 2 - w, size // 2 + w):
-            img.putpixel((x, y), GAP + (255,))
-            img.putpixel((y, x), GAP + (255,))
-    # dark frame
-    for k in range(w):
-        for t in range(size):
-            for p in ((t, k), (t, size - 1 - k), (k, t), (size - 1 - k, t)):
-                img.putpixel(p, GAP + (255,))
+    # plain squares in the army colours, the way the 16 px icon always looked (Devin's pick)
+    img = Image.new("RGBA", (size, size))
+    h = size // 2
+    for i, (_, _, body, _, _) in enumerate(CELLS):
+        ox, oy = (i % 2) * h, (i // 2) * h
+        for y in range(h):
+            for x in range(h):
+                img.putpixel((ox + x, oy + y), body + (255,))
     return img
 
 out = Path(__file__).resolve().parent.parent / "assets"

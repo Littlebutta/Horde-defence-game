@@ -1,5 +1,5 @@
-//! Aircraft and missiles as glowing line art: helicopters, the gunship and the B-2 in yellow, the
-//! ICBM in red. Each stroke is a strip that is hot white-ish down the middle, solid at the core
+//! Aircraft and missiles as glowing line art: helicopters, the gunship, the B-2 and the tank in
+//! yellow, the ICBM in red. Each stroke is a strip that is hot white-ish down the middle, solid at the core
 //! and fades out to the sides, so the lines glow a little against the city.
 
 use super::*;
@@ -270,6 +270,46 @@ pub fn bomber(g: &mut Glow, p: Vec2, heading: f32, k: f32) {
         // leading edge panel line and the elevons
         g.stroke(&[vec2(4.4, 1.1 * side), vec2(-1.2, 10.9 * side)], false, w * 0.5, alpha(AIR, 0.7));
     }
+}
+
+// ------------------------------------------------------------------------------------------ tank
+
+/// A tank in the same golden line art, built up in layers so it reads as a solid: tracks and
+/// lower hull, the sloped upper hull with its engine deck, and on top the turret (turned to
+/// `turret`) with its commander's hatch and long gun.
+pub fn tank(g: &mut Glow, p: Vec2, heading: f32, turret: f32, k: f32) {
+    let s = 1.15 * k;
+    let w = 0.16;
+    let hull = mirrored(&[vec2(2.7, 0.0), vec2(2.7, 1.25), vec2(2.4, 1.7), vec2(-2.4, 1.7), vec2(-2.6, 1.4), vec2(-2.6, 0.0)]);
+    ground_shadow(&hull, p + vec2(0.4, 0.5), heading, s, 0.3);
+    // tracks with their treads, and the lower hull between them
+    g.flat(p, 0.45, heading, s);
+    g.fill(&hull, INK);
+    g.stroke(&hull, true, w, AIR);
+    for side in [-1.0f32, 1.0] {
+        g.stroke(&[vec2(2.55, 1.15 * side), vec2(-2.45, 1.15 * side)], false, w * 0.6, alpha(AIR, 0.8));
+        let mut x = -2.2;
+        while x < 2.4 {
+            g.stroke(&[vec2(x, 1.2 * side), vec2(x, 1.65 * side)], false, w * 0.45, alpha(AIR, 0.6));
+            x += 0.55;
+        }
+    }
+    // upper hull: sloped glacis at the front, engine grille at the back
+    let upper = mirrored(&[vec2(2.1, 0.0), vec2(1.9, 0.95), vec2(-2.2, 0.95), vec2(-2.35, 0.0)]);
+    g.flat(p, 1.05, heading, s);
+    g.fill(&upper, INK);
+    g.stroke(&upper, true, w * 0.85, AIR);
+    for x in [-1.3f32, -1.65, -2.0] {
+        g.stroke(&[vec2(x, -0.6), vec2(x, 0.6)], false, w * 0.45, alpha(AIR, 0.7));
+    }
+    // turret, hatch and gun
+    g.flat(p, 1.55, turret, s);
+    let tur = mirrored(&[vec2(1.25, 0.0), vec2(1.1, 0.55), vec2(0.5, 0.95), vec2(-0.9, 0.95), vec2(-1.35, 0.55), vec2(-1.4, 0.0)]);
+    g.fill(&tur, INK);
+    g.stroke(&tur, true, w, AIR);
+    g.circle(vec2(-0.45, 0.4), 0.32, w * 0.6, AIR);
+    g.stroke(&[vec2(1.2, 0.0), vec2(4.1, 0.0)], false, w * 1.5, AIR);
+    g.stroke(&[vec2(3.7, 0.0), vec2(4.2, 0.0)], false, w * 2.4, AIR);
 }
 
 // ------------------------------------------------------------------------------------------ ICBM

@@ -206,6 +206,14 @@ pub fn structure(mb: &mut MB, g: &Game, i: usize, s: &Structure, base: f32, t: f
     let c = s.center();
     match s.t {
         S::Wall => wall(mb, d, c, w, h, base),
+        S::Bunker => {
+            let manned = g.groups.iter().filter(|gr| !gr.dead && gr.state == GState::Garrison && gr.sb == i as i32).map(|gr| gr.m.iter().filter(|m| m.alive).count()).sum::<usize>();
+            let top = bunker(mb, d, c, w, h, base, manned > 0, t);
+            if manned > 0 {
+                labels.items.push((p3(c, top + 3.0), format!("{}", manned), WHITE, 12.0));
+            }
+            top
+        }
         S::Gun => gun(mb, d, c, w, h, base, s.aim),
         S::Cannon => cannon(mb, d, c, w, h, base, s.aim),
         S::Extractor => extractor(mb, d, c, w, h, base, t),
@@ -549,6 +557,29 @@ fn wall(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32) -> f32 {
     loft(mb, &mid, &hi, base + 0.35, top, Some(d.top), mix(d.side, d.top, 0.3));
     mb.poly_at(&rect(c, -hw + 0.45, -0.18, hw - 0.45, 0.18, 0.0), top + 0.02, mix(d.top, WHITE, 0.2));
     top
+}
+
+/// A squat concrete bunker with sloped walls, a dark firing slit all the way round, and a
+/// steel roof hatch that doubles as the seat for a mounted turret. Lit slits when manned.
+#[allow(clippy::too_many_arguments)]
+fn bunker(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, manned: bool, t: f32) -> f32 {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    plinth(mb, c, hw, hh, base);
+    let lo = chamfer(c, hw - 0.2, hh - 0.2, 1.3, 0.0);
+    let mid = chamfer(c, hw - 0.55, hh - 0.55, 1.15, 0.0);
+    let hi = chamfer(c, hw - 0.95, hh - 0.95, 1.0, 0.0);
+    let z1 = base + d.ht;
+    let wall = mix(CONCRETE, d.side, 0.35);
+    let zs = base + 1.3;
+    loft(mb, &lo, &mid, base + 0.5, zs, None, wall);
+    // the firing slit, glowing faintly with muzzle flashes when troops are inside
+    let flick = 0.5 + 0.5 * (t * 9.0).sin().abs();
+    let slit = if manned { mix(rgb(40, 34, 20), rgb(255, 200, 90), 0.35 * flick) } else { rgb(28, 30, 32) };
+    loft(mb, &shrink(&mid, 0.15), &shrink(&mid, 0.15), zs, zs + 0.35, None, slit);
+    loft(mb, &mid, &hi, zs + 0.35, z1, Some(mix(CONCRETE, d.top, 0.5)), wall);
+    band(mb, &hi, z1 - 0.3, z1 - 0.12, d.top);
+    cyl(mb, c, 1.1, z1, z1 + 0.18, STEEL, STEEL_DARK);
+    z1
 }
 
 /// A sandbagged concrete emplacement with a turning head and twin barrels.
