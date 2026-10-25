@@ -90,6 +90,7 @@ fn swatch(i: usize, k: usize, c: Color) -> Color {
 
 /// Height of a faction card on the menu.
 const FAC_ROW: f32 = 56.0;
+const FAC_ROW_COMPACT: f32 = 46.0;
 
 const DIFFS: [(&str, f32); 4] = [
     ("Easy", 0.6),
@@ -182,6 +183,8 @@ pub struct App {
     banner: Option<(String, String, String, f32)>,
     /// this match's news broadcasts and headline ticker
     news: Option<News>,
+    /// the main menu's own headline ticker
+    menu_news: News,
     /// the mouse is held inside the window (while a match is being played)
     grabbed: bool,
     /// the slider being dragged
@@ -383,6 +386,14 @@ impl App {
             place_go: false,
             banner: None,
             news: None,
+            menu_news: {
+                let mut n = News::menu(macroquad::miniquad::date::now().to_bits());
+                if let Some(x) = std::env::var("PH_NEWS").ok().and_then(|v| v.parse().ok()) {
+                    n.preview(x);
+                    n.since_news = f32::MAX;
+                }
+                n
+            },
             grabbed: false,
             auto_place: ["PH_SHOT", "PH_NETTEST"].iter().any(|k| std::env::var(k).is_ok()) && std::env::var("PH_PLACE").is_err(),
             drag: None,
@@ -998,6 +1009,7 @@ impl App {
         // In co-op this is the lobby: the same column, with the players beside it.
         let lobby = self.sess.is_some();
         let (r, pr) = self.menu_rects();
+        self.menu_ticker(r);
         self.panel(r);
         // a strip in the three faction colours along the top
         for (i, c) in Rect::new(r.x + R_PANEL, r.y, r.w - 2.0 * R_PANEL, 3.0).cols(3, 0.0).into_iter().enumerate() {
@@ -1161,7 +1173,16 @@ impl App {
         let y = self.heading("Faction", a.x, a.y);
         a.cut_top(y - a.y, 0.0);
         let nf = FACTIONS.len();
-        let rows = a.cut_top(nf as f32 * FAC_ROW + (nf - 1) as f32 * 6.0, 18.0).rows(nf, 6.0);
+        // the difficulty picker needs its 20 + 38 points under the factions; when the mode's
+        // details leave too little room the factions go two by two with one line of blurb each
+        let full = nf as f32 * FAC_ROW + (nf - 1) as f32 * 6.0;
+        let compact = a.h - 18.0 - 58.0 < full;
+        let rows: Vec<Rect> = if compact {
+            let g = a.cut_top(2.0 * FAC_ROW_COMPACT + 6.0, 14.0);
+            g.rows(2, 6.0).into_iter().flat_map(|r| r.cols(2, 6.0)).collect()
+        } else {
+            a.cut_top(full, 18.0).rows(nf, 6.0)
+        };
         for (i, f) in FACTIONS.iter().enumerate() {
             let cr = rows[i];
             let active = self.fac == i;
@@ -1176,8 +1197,12 @@ impl App {
             }
             text(&self.fonts.head, f.name, cr.x + 56.0, cr.y + 21.0, 16.0, p.text);
             let lines = wrap_lines(&self.fonts.mono, f.blurb, cr.w - 70.0, 11.0);
-            for (k, l) in lines.iter().take(2).enumerate() {
-                text(&self.fonts.mono, l, cr.x + 56.0, cr.y + 36.0 + k as f32 * 13.0, 11.0, p.dim);
+            for (k, l) in lines.iter().take(if compact { 1 } else { 2 }).enumerate() {
+                let l = if compact && lines.len() > 1 { fit(&self.fonts.mono, &format!("{} {}", l, lines[1]), cr.w - 64.0, 11.0) } else { l.clone() };
+                text(&self.fonts.mono, &l, cr.x + 56.0, cr.y + 36.0 + k as f32 * 13.0, 11.0, p.dim);
+            }
+            if compact && hot {
+                self.tip = Some(f.blurb.into());
             }
             if self.pressed(hot && !self.blocked) {
                 self.fac = i;
@@ -2170,7 +2195,12 @@ impl App {
     /// scrolls across a few times like an old cinema marquee and then the strip goes away for a
     /// while. Returns how much room it takes (0 while it's hidden).
     fn news_ticker(&mut self, r: Rect) -> f32 {
-        let Some(n) = self.news.as_mut() else { return 0.0 };
+        let Some(mut n) = self.news.take() else { return 0.0 };
+        let h = self.ticker_strip(&mut n, r);
+        self.news = Some(n);
+        h
+    }
+    fn ticker_strip(&self, n: &mut News, r: Rect) -> f32 {
         let size = 12.0;
         let tag_w = 52.0;
         let lane = r.w - tag_w - 8.0;
@@ -2182,7 +2212,7 @@ impl App {
         }
         let live = n.since_news < news::LIVE;
         let x = n.offset(lane, tw);
-        rrect(r, 5.0, Color::new(0.03, 0.035, 0.05, 0.62 * a));
+        rrect(r, 5.0, Color::new(0.03, 0.035, 0.05, 0.74 * a));
         let tag = Rect::new(r.x + 3.0, r.y + 3.0, tag_w - 6.0, r.h - 6.0);
         let (tag_bg, tag_s) = if live { (rgb(200, 40, 40), "LIVE") } else { (rgb(150, 105, 30), "NEWS") };
         rrect(tag, 3.0, alpha(tag_bg, 0.9 * a));
@@ -2198,6 +2228,20 @@ impl App {
         let gl = unsafe { get_internal_gl() }.quad_gl;
         gl.scissor(None);
         r.h + 6.0
+    }
+
+    /// The main menu's headline ticker, along the bottom of the city beside the menu column.
+    fn menu_ticker(&mut self, col: Rect) {
+        let s = ui::screen();
+        let left = col.right() + 32.0;
+        let w = (s.right() - 24.0 - left).min(640.0);
+        if w < 280.0 {
+            return;
+        }
+        let r = Rect::new(s.right() - 24.0 - w, col.bottom() - 22.0, w, 22.0);
+        let mut n = std::mem::replace(&mut self.menu_news, News::menu(1));
+        self.ticker_strip(&mut n, r);
+        self.menu_news = n;
     }
 
     /// "DEFENDING TOKYO": a band across the top of the view when a campaign city starts. It opens

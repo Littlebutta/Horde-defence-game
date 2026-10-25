@@ -104,8 +104,9 @@ pub struct News {
     /// the headline crossing now, and how far it has scrolled (points)
     pub cur: Option<(usize, usize)>,
     pub x: f32,
-    /// seconds until the next headline comes on
+    /// seconds until the next headline comes on, and the rest between headlines
     wait: f32,
+    quiet: f32,
     /// game time of the next broadcast, and how many have gone out
     next_news: f32,
     pub aired: u32,
@@ -116,8 +117,17 @@ pub struct News {
 impl News {
     pub fn new(fac: usize, seed: u64) -> News {
         let armies = if fac == CHAOS { vec![0, 1, 2] } else { vec![fac.min(2)] };
-        let mut n = News { rng: seed | 1, order: Vec::new(), armies, cur: None, x: 0.0, wait: FIRST, next_news: 0.0, aired: 0, since_news: f32::MAX };
+        let mut n = News { rng: seed | 1, order: Vec::new(), armies, cur: None, x: 0.0, wait: FIRST, quiet: QUIET, next_news: 0.0, aired: 0, since_news: f32::MAX };
         n.next_news = n.range(FIRST_NEWS);
+        n
+    }
+    /// The main menu's ticker: all three armies' headlines, starting soon, with shorter rests
+    /// (and never a broadcast).
+    pub fn menu(seed: u64) -> News {
+        let mut n = News::new(CHAOS, seed);
+        n.wait = 2.0;
+        n.quiet = 12.0;
+        n.aired = 2;
         n
     }
     fn rand(&mut self) -> u64 {
@@ -171,7 +181,7 @@ impl News {
                 let end = Self::run(w, tw);
                 if self.x > end + FADE * SPEED {
                     self.cur = None;
-                    self.wait = QUIET;
+                    self.wait = self.quiet;
                     return 0.0;
                 }
                 let fin = (self.x / (FADE * SPEED) + 1.0).clamp(0.0, 1.0);
