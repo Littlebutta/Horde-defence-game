@@ -244,7 +244,7 @@ impl App {
             }
             if hot {
                 hovered = Some(t);
-                if can && is_mouse_button_pressed(MouseButton::Left) {
+                if self.pressed(can) {
                     self.hub_act(c, HubAct::Tech(t));
                 }
             }

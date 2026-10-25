@@ -8,6 +8,7 @@ use crate::net::{self, Cmd};
 use crate::osm::{self, OsmMsg};
 use crate::menubg::MenuBg;
 use crate::music;
+use crate::news::{self, News};
 use crate::storage;
 use crate::render::{self, text, text_w, Fonts, Scene, ViewInfo, WorldLabels};
 use crate::ui::{self, alpha, mix, pal, rrect, rrect_lines, Flow, RectExt};
@@ -179,6 +180,10 @@ pub struct App {
     auto_place: bool,
     /// the "Defending <city>" banner at the start of a campaign city: (city, country, line, start)
     banner: Option<(String, String, String, f32)>,
+    /// this match's news broadcasts and headline ticker
+    news: Option<News>,
+    /// the mouse is held inside the window (while a match is being played)
+    grabbed: bool,
     /// the slider being dragged
     drag: Option<u32>,
     /// B-2 bomb run: where the right button went down
@@ -377,6 +382,8 @@ impl App {
             place_at: None,
             place_go: false,
             banner: None,
+            news: None,
+            grabbed: false,
             auto_place: ["PH_SHOT", "PH_NETTEST"].iter().any(|k| std::env::var(k).is_ok()) && std::env::var("PH_PLACE").is_err(),
             drag: None,
             rpress: None,
@@ -433,11 +440,28 @@ impl App {
             self.overlays();
             ui::end();
         }
+        self.grab_mouse();
         // our own pointer, over everything (the system one is hidden)
         show_mouse(false);
         set_default_camera();
         gl_use_default_material();
         render::cursor(self.px_mouse());
+    }
+
+    /// While a match is being played the mouse can't leave the window; pausing (or the settings,
+    /// the end of the match, any other screen) lets it go.
+    fn grab_mouse(&mut self) {
+        let over = self.game.as_ref().is_some_and(|g| g.over);
+        let want = self.screen == Screen::Play && !self.paused_now() && !self.settings_open && !over && std::env::var("PH_SHOT").is_err();
+        if want != self.grabbed {
+            self.grabbed = want;
+            set_cursor_grab(want);
+        }
+    }
+
+    /// The click of a button being pressed.
+    pub(super) fn click(&self) {
+        self.music.play(music::Play { snd: music::Snd::Button, gain: 0.55, pan: 0.0, speed: 1.0, key: 0 });
     }
 
     /// What goes over any screen, in points: the settings dialog and the tooltip.
@@ -644,7 +668,7 @@ impl App {
                 text(&self.fonts.mono, "+", pr.x + 22.0, pr.y + 32.0, 14.0, p.dim);
                 text(&self.fonts.mono, "Open slot · invite a friend", pr.x + 46.0, pr.y + 32.0, 13.0, if hot { p.text } else { p.dim });
                 self.ui_rects.push(pr);
-                invite |= hot && is_mouse_button_pressed(MouseButton::Left);
+                invite |= self.pressed(hot);
             }
         }
         a.cut_top(4.0, 0.0);
@@ -931,10 +955,16 @@ impl App {
                 Sfx::Nuke => (music::Snd::Nuke, 1.0, 1.0),
                 Sfx::Gun => (music::Snd::Gun, 0.4, jitter),
                 Sfx::HeliGun => (music::Snd::HeliGun, 0.6, jitter),
+                Sfx::BaseAttacked => (music::Snd::BaseAttacked, 0.45, 1.0),
                 Sfx::FlameStop => continue,
             };
-            // a nuke is heard anywhere on the map
-            let gain = if s == Sfx::Nuke { gain * near.max(0.7) } else { gain * near * near * zoom };
+            // a nuke is heard anywhere on the map, and the alarm wherever you're looking
+            let gain = match s {
+                Sfx::Nuke => gain * near.max(0.7),
+                Sfx::BaseAttacked => gain,
+                _ => gain * near * near * zoom,
+            };
+            let pan = if s == Sfx::BaseAttacked { 0.0 } else { pan };
             let key = if s == Sfx::Flame { key } else { 0 };
             self.music.play(music::Play { snd, gain, pan, speed, key });
         }
@@ -1105,7 +1135,7 @@ impl App {
                     if hx {
                         self.tip = Some("Delete this downloaded city".into());
                     }
-                    if is_mouse_button_pressed(MouseButton::Left) && !self.blocked {
+                    if self.pressed((hot || hx) && !self.blocked) {
                         if hot {
                             pick = Some(i);
                         } else if hx {
@@ -1149,7 +1179,7 @@ impl App {
             for (k, l) in lines.iter().take(2).enumerate() {
                 text(&self.fonts.mono, l, cr.x + 56.0, cr.y + 36.0 + k as f32 * 13.0, 11.0, p.dim);
             }
-            if hot && !self.blocked && is_mouse_button_pressed(MouseButton::Left) {
+            if self.pressed(hot && !self.blocked) {
                 self.fac = i;
             }
             self.ui_rects.push(cr);
@@ -1426,7 +1456,7 @@ impl App {
                 self.vote_marks(rr, HubAct::City(j));
                 if hot {
                     self.tip = Some(self.city_tip(&c, j));
-                    if is_mouse_button_pressed(MouseButton::Left) {
+                    if self.pressed(true) {
                         self.hub_act(&mut c, HubAct::City(j));
                     }
                 }
@@ -1683,6 +1713,12 @@ impl App {
         let aa = self.aa;
         let painter = *self.depth.get_or_insert_with(|| pick_depth(aa)) == render::DepthMode::Painter;
         self.scene = Some(Scene::new(&g, self.theme(), painter));
+        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
+        let mut n = News::new(g.fac, seed);
+        if let Some(x) = std::env::var("PH_NEWS").ok().and_then(|v| v.parse().ok()) {
+            n.preview(x);
+        }
+        self.news = Some(n);
         self.game = Some(g);
         self.tool = Tool::None;
         self.selected = None;
@@ -1915,6 +1951,11 @@ impl App {
             sc.retheme(&g, th);
         }
         self.play_sfx(&mut g);
+        if let (Some(n), None, false) = (self.news.as_mut(), &self.placing, g.over) {
+            if let Some(army) = n.broadcast(g.time, dt) {
+                self.music.news(army);
+            }
+        }
         // fixed 20 Hz simulation; in co-op, in lockstep with the host. Nothing runs while the HQ
         // spot is being chosen.
         if self.placing.is_some() {
@@ -2123,6 +2164,40 @@ impl App {
         }
         self.place_at = None;
         self.place_go = false;
+    }
+
+    /// The headline ticker: a thin dark strip under the top bar, `r` wide, where each headline
+    /// scrolls across a few times like an old cinema marquee and then the strip goes away for a
+    /// while. Returns how much room it takes (0 while it's hidden).
+    fn news_ticker(&mut self, r: Rect) -> f32 {
+        let Some(n) = self.news.as_mut() else { return 0.0 };
+        let size = 12.0;
+        let tag_w = 52.0;
+        let lane = r.w - tag_w - 8.0;
+        let tw = n.line().map_or(0.0, |l| text_w(&self.fonts.mono, l, size));
+        let a = n.scroll(get_frame_time().min(0.1), lane, tw);
+        let Some(line) = n.line() else { return 0.0 };
+        if a <= 0.0 {
+            return 0.0;
+        }
+        let live = n.since_news < news::LIVE;
+        let x = n.offset(lane, tw);
+        rrect(r, 5.0, Color::new(0.03, 0.035, 0.05, 0.62 * a));
+        let tag = Rect::new(r.x + 3.0, r.y + 3.0, tag_w - 6.0, r.h - 6.0);
+        let (tag_bg, tag_s) = if live { (rgb(200, 40, 40), "LIVE") } else { (rgb(150, 105, 30), "NEWS") };
+        rrect(tag, 3.0, alpha(tag_bg, 0.9 * a));
+        let ts = 10.0;
+        let tsw = text_w(&self.fonts.mono, tag_s, ts);
+        text(&self.fonts.mono, tag_s, tag.x + (tag.w - tsw) / 2.0, tag.y + tag.h / 2.0 + 3.5, ts, Color::new(1.0, 1.0, 1.0, a));
+        // the text only shows inside the lane (scissor is in pixels, top left origin)
+        let k = ui::draw_scale();
+        let lx = r.x + tag_w;
+        let gl = unsafe { get_internal_gl() }.quad_gl;
+        gl.scissor(Some(((lx * k) as i32, (r.y * k) as i32, (lane * k) as i32, (r.h * k).ceil() as i32)));
+        text(&self.fonts.mono, line, lx + x, r.y + r.h / 2.0 + 4.0, size, Color::new(1.0, 0.78, 0.42, 0.88 * a));
+        let gl = unsafe { get_internal_gl() }.quad_gl;
+        gl.scissor(None);
+        r.h + 6.0
     }
 
     /// "DEFENDING TOKYO": a band across the top of the view when a campaign city starts. It opens
@@ -2499,9 +2574,10 @@ impl App {
             let tw = text_w(&self.fonts.mono, &s, 11.0);
             text(&self.fonts.mono, &s, scr.right() - tw - 10.0, scr.bottom() - 8.0, 11.0, alpha(p.dim, 0.8));
         }
+        let tick_h = self.news_ticker(Rect::new(top.x, top.bottom() + 6.0, (area.w * 0.42).clamp(320.0, 620.0), 20.0));
         if let Some(s) = &self.sess {
             let names: Vec<String> = s.players.iter().map(|p| p.name.clone()).collect();
-            text(&self.fonts.mono, &format!("Co-op: {}", names.join(", ")), top.x + 4.0, top.bottom() + 20.0, 12.0, p.dim);
+            text(&self.fonts.mono, &format!("Co-op: {}", names.join(", ")), top.x + 4.0, top.bottom() + 20.0 + tick_h, 12.0, p.dim);
         }
 
         // ---- build bar, centred along the bottom; wraps to two rows when the HUD is too narrow
@@ -2573,7 +2649,7 @@ impl App {
             self.ui_rects.push(r);
             if hot {
                 self.tip = Some(format!("{} [{}]: {}", name, key.to_ascii_uppercase(), tip));
-                if is_mouse_button_pressed(MouseButton::Left) {
+                if self.pressed(true) {
                     self.tool = if active { Tool::None } else { *it };
                 }
             }
@@ -2626,7 +2702,7 @@ impl App {
             }
             if hot {
                 self.tip = Some(d.tip.to_string());
-                if is_mouse_button_pressed(MouseButton::Left) && usable {
+                if self.pressed(usable) {
                     self.tool = if active { Tool::None } else { Tool::Ability(a) };
                 }
             }
@@ -2700,7 +2776,7 @@ impl App {
         let (msg, t) = if g.banner.1 > 0.0 { (g.banner.0.clone(), g.banner.1) } else { (self.msg.0.clone(), self.msg.1) };
         self.msg.1 -= get_frame_time();
         if t > 0.0 && !msg.is_empty() {
-            self.toast(top.bottom() + 14.0, &msg, p.accent, t.min(1.0));
+            self.toast(top.bottom() + 14.0 + tick_h, &msg, p.accent, t.min(1.0));
         }
         if self.paused_now() && !g.over && !self.settings_open {
             let r = area.centered(260.0, 76.0);
@@ -2842,7 +2918,7 @@ impl App {
         text(&self.fonts.mono, &label, ur.x + 8.0, ur.y + 16.0, 11.5, if en { p.accent } else if done { p.good } else { p.dim });
         if hot {
             self.tip = Some(format!("{}: {}", d.name, d.tip));
-            if en && is_mouse_button_pressed(MouseButton::Left) {
+            if self.pressed(en) {
                 self.act(g, Cmd::Research(rs));
             }
         }

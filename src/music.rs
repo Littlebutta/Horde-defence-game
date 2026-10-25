@@ -1,6 +1,6 @@
-//! Sound: Devin's music tracks as a shuffled playlist, the battle ambience under a game, and the
-//! weapon sound effects. Everything is embedded in the exe and plays on one audio thread (rodio,
-//! with symphonia's pure-Rust MP3 decoder); the game only sends it volumes and effects to play.
+//! Sound: Devin's music tracks as a shuffled playlist, the battle ambience under a game, the
+//! sound effects and the news broadcasts. Everything is embedded in the exe and plays on one
+//! audio thread (rodio, with symphonia's pure-Rust MP3 decoder); the game only sends it volumes and effects to play.
 //! Neither the music nor the ambience loops cleanly on its own, so each one crossfades into its
 //! next play.
 
@@ -19,6 +19,49 @@ static TRACKS: [&[u8]; 4] = [
 ];
 static AMBIENCE: [&[u8]; 1] = [include_bytes!("../assets/sfx/ambience.mp3")];
 
+/// The news broadcast, from Devin's recordings: an opener, a report about the army in the game
+/// (indexed like `FACTIONS`: zombies, alien bugs, orcs) and a closer, over the newsroom bed.
+static OPENERS: [&[u8]; 3] = [
+    include_bytes!("../assets/news/opener-1.mp3"),
+    include_bytes!("../assets/news/opener-2.mp3"),
+    include_bytes!("../assets/news/opener-3.mp3"),
+];
+static REPORTS: [[&[u8]; 5]; 3] = [
+    [
+        include_bytes!("../assets/news/zombie-1.mp3"),
+        include_bytes!("../assets/news/zombie-2.mp3"),
+        include_bytes!("../assets/news/zombie-3.mp3"),
+        include_bytes!("../assets/news/zombie-4.mp3"),
+        include_bytes!("../assets/news/zombie-5.mp3"),
+    ],
+    [
+        include_bytes!("../assets/news/alien-1.mp3"),
+        include_bytes!("../assets/news/alien-2.mp3"),
+        include_bytes!("../assets/news/alien-3.mp3"),
+        include_bytes!("../assets/news/alien-4.mp3"),
+        include_bytes!("../assets/news/alien-5.mp3"),
+    ],
+    [
+        include_bytes!("../assets/news/orc-1.mp3"),
+        include_bytes!("../assets/news/orc-2.mp3"),
+        include_bytes!("../assets/news/orc-3.mp3"),
+        include_bytes!("../assets/news/orc-4.mp3"),
+        include_bytes!("../assets/news/orc-5.mp3"),
+    ],
+];
+static CLOSERS: [&[u8]; 3] = [
+    include_bytes!("../assets/news/closer-1.mp3"),
+    include_bytes!("../assets/news/closer-2.mp3"),
+    include_bytes!("../assets/news/closer-3.mp3"),
+];
+static NEWSROOM: &[u8] = include_bytes!("../assets/news/newsroom.mp3");
+/// the announcer sits under the game (Devin: not too loud), the newsroom bed lower still
+const NEWS_GAIN: f32 = 0.42;
+const BED_GAIN: f32 = 0.16;
+/// the bed fades in this long before the opener and out after the closer
+const BED_LEAD: f32 = 1.2;
+const BED_FADE: f32 = 1.5;
+
 /// The sound effects, by the name of the file Devin made them for.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Snd {
@@ -30,8 +73,10 @@ pub enum Snd {
     Gun,
     HeliGun,
     Nuke,
+    Button,
+    BaseAttacked,
 }
-const SNDS: usize = 8;
+const SNDS: usize = 10;
 static SFX: [&[u8]; SNDS] = [
     include_bytes!("../assets/sfx/cannon-shell.wav"),
     include_bytes!("../assets/sfx/artillery-shot.mp3"),
@@ -41,11 +86,13 @@ static SFX: [&[u8]; SNDS] = [
     include_bytes!("../assets/sfx/gun-turret.mp3"),
     include_bytes!("../assets/sfx/helicopter-fire.mp3"),
     include_bytes!("../assets/sfx/icbm-explosion.mp3"),
+    include_bytes!("../assets/sfx/button.mp3"),
+    include_bytes!("../assets/sfx/base-attacked.mp3"),
 ];
 /// at most this many copies of one effect play at once, and a new copy waits this long after the
 /// last one, so a hundred cannons firing together stay a rumble instead of a wall of noise
-const VOICES: [usize; SNDS] = [5, 3, 5, 3, 3, 5, 3, 2];
-const GAP_MS: [u64; SNDS] = [70, 120, 90, 250, 150, 70, 200, 300];
+const VOICES: [usize; SNDS] = [5, 3, 5, 3, 3, 5, 3, 2, 2, 1];
+const GAP_MS: [u64; SNDS] = [70, 120, 90, 250, 150, 70, 200, 300, 40, 20_000];
 
 /// seconds each music crossfade takes; the end of a track fades out while the next fades in
 const FADE: f32 = 6.0;
@@ -70,6 +117,8 @@ pub struct Play {
 enum Cmd {
     Play(Play),
     Stop(u64),
+    /// a news broadcast about army 0..3 (see `REPORTS`)
+    News(usize),
 }
 /// seconds a stopped effect takes to fade out
 const STOP_FADE: f32 = 0.15;
@@ -114,6 +163,13 @@ impl Music {
     pub fn play(&self, p: Play) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Cmd::Play(p));
+        }
+    }
+    /// Starts a news broadcast about `army` (0 zombies, 1 alien bugs, 2 orcs). It is cut short
+    /// when the game ends (the ambience goes off).
+    pub fn news(&self, army: usize) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Cmd::News(army.min(2)));
         }
     }
     /// Fades out the effects started with this key.
@@ -227,6 +283,66 @@ impl Playlist {
     }
 }
 
+// ------------------------------------------------------------------------------------ news
+
+/// A broadcast on the air: the announcer's lines queued one after another on `voice`, the
+/// newsroom bed easing in under them and out once they're done.
+struct News {
+    voice: Sink,
+    bed: Sink,
+    /// seconds since it started
+    t: f32,
+    /// set when the voice has finished (or the game ended): seconds since
+    done: Option<f32>,
+}
+
+fn pick(rng: &mut u64, n: usize) -> usize {
+    *rng ^= *rng << 13;
+    *rng ^= *rng >> 7;
+    *rng ^= *rng << 17;
+    (*rng % n as u64) as usize
+}
+
+fn start_news(handle: &OutputStreamHandle, rng: &mut u64, army: usize) -> Option<News> {
+    let voice = Sink::try_new(handle).ok()?;
+    let bed = Sink::try_new(handle).ok()?;
+    voice.set_volume(0.0);
+    voice.append(rodio::source::Zero::<f32>::new(1, 44100).take_duration(Duration::from_secs_f32(BED_LEAD)));
+    let parts = [OPENERS[pick(rng, OPENERS.len())], REPORTS[army][pick(rng, 5)], CLOSERS[pick(rng, CLOSERS.len())]];
+    for (i, b) in parts.into_iter().enumerate() {
+        if i > 0 {
+            voice.append(rodio::source::Zero::<f32>::new(1, 44100).take_duration(Duration::from_secs_f32(0.35)));
+        }
+        voice.append(Decoder::new(Cursor::new(b)).ok()?);
+    }
+    bed.set_volume(0.0);
+    bed.append(Decoder::new(Cursor::new(NEWSROOM)).ok()?);
+    Some(News { voice, bed, t: 0.0, done: None })
+}
+
+impl News {
+    /// One step: `on` is false once the game is over. Returns false when it's finished.
+    fn update(&mut self, on: bool, gain: f32, dt: f32) -> bool {
+        self.t += dt;
+        if self.done.is_none() && (self.voice.empty() || !on) {
+            self.done = Some(0.0);
+        }
+        let mut bed = (self.t / BED_LEAD).min(1.0);
+        let mut voice = 1.0;
+        if let Some(d) = self.done.as_mut() {
+            *d += dt;
+            bed = bed.min(1.0 - *d / BED_FADE);
+            voice = (1.0 - *d / 0.3).max(0.0);
+            if bed <= 0.0 {
+                return false;
+            }
+        }
+        self.voice.set_volume(gain * NEWS_GAIN * voice);
+        self.bed.set_volume(gain * BED_GAIN * bed.max(0.0));
+        true
+    }
+}
+
 // --------------------------------------------------------------------------------- effects
 
 /// A decoded effect, shared by every copy that plays it.
@@ -305,6 +421,7 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx
     let clips: Vec<Option<Clip>> = SFX.iter().map(|b| decode(b)).collect();
     let mut last_play = [Instant::now() - Duration::from_secs(1); SNDS];
     let mut keyed: Vec<(u64, Arc<AtomicBool>)> = Vec::new();
+    let mut news: Option<News> = None;
     let mut t = Instant::now();
     loop {
         let dt = t.elapsed().as_secs_f32().min(0.5);
@@ -316,7 +433,11 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx
         };
         let (mv, sv) = (sq(&vol), sq(&sfx_vol));
         music.update(&handle, &mut rng, true, mv * MAX_GAIN, dt);
-        ambience.update(&handle, &mut rng, amb.load(Ordering::Relaxed) && sv > 0.0, sv * AMB_GAIN, dt);
+        let in_game = amb.load(Ordering::Relaxed);
+        ambience.update(&handle, &mut rng, in_game && sv > 0.0, sv * AMB_GAIN, dt);
+        if news.as_mut().is_some_and(|n| !n.update(in_game, sv, dt)) {
+            news = None;
+        }
         // effects queued since the last step; wait for the next one for up to 50 ms
         let deadline = t + Duration::from_millis(50);
         while let Ok(cmd) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
@@ -327,6 +448,12 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx
                         if *k == key {
                             s.store(true, Ordering::Relaxed);
                         }
+                    }
+                    continue;
+                }
+                Cmd::News(army) => {
+                    if news.is_none() && sv > 0.0 {
+                        news = start_news(&handle, &mut rng, army);
                     }
                     continue;
                 }
@@ -388,10 +515,19 @@ mod tests {
         assert_eq!(c.playing.load(Ordering::Relaxed), 0);
     }
     #[test]
+    fn news_decodes() {
+        let all = OPENERS.iter().chain(REPORTS.iter().flatten()).chain(CLOSERS.iter());
+        for b in all {
+            let len = length(b);
+            assert!(len > 0.5 && len < 20.0, "{len}");
+        }
+        assert!(length(NEWSROOM) > 60.0);
+    }
+    #[test]
     fn effects_decode() {
         for b in SFX {
             let c = decode(b).expect("decodes");
-            assert!(c.data.len() > 10_000);
+            assert!(c.data.len() > 4_000);
         }
     }
 }

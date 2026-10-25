@@ -31,6 +31,15 @@ impl App {
         self.hot(r) && is_mouse_button_pressed(MouseButton::Left)
     }
 
+    /// A control under the mouse was clicked just now (it clicks).
+    pub(super) fn pressed(&self, hot: bool) -> bool {
+        let p = hot && is_mouse_button_pressed(MouseButton::Left);
+        if p {
+            self.click();
+        }
+        p
+    }
+
     /// A floating panel with a soft shadow.
     pub(super) fn panel(&mut self, r: Rect) {
         let p = pal(self.dark);
@@ -83,7 +92,7 @@ impl App {
         let size = (r.h * 0.42).clamp(12.0, 16.0);
         self.label_in(r, label, size, fc);
         self.ui_rects.push(r);
-        hot && is_mouse_button_pressed(MouseButton::Left)
+        self.pressed(hot)
     }
     /// The main action of a screen: a filled accent button.
     pub(super) fn button_primary(&mut self, r: Rect, label: &str, enabled: bool) -> bool {
@@ -105,7 +114,7 @@ impl App {
         let size = (r.h * 0.4).clamp(14.0, 22.0);
         self.label_in(r, label, size, fc);
         self.ui_rects.push(r);
-        hot && is_mouse_button_pressed(MouseButton::Left)
+        self.pressed(hot)
     }
     /// A label centred in `r`, shrunk to fit.
     pub(super) fn label_in(&self, r: Rect, label: &str, size: f32, c: Color) {
@@ -133,7 +142,7 @@ impl App {
             }
             let fc = if i == sel { p.on_accent } else if hot { p.text } else { p.dim };
             self.label_in(c, labels[i], (r.h * 0.4).clamp(12.0, 16.0), fc);
-            if hot && is_mouse_button_pressed(MouseButton::Left) {
+            if self.pressed(hot) {
                 out = Some(i);
             }
         }
@@ -149,7 +158,7 @@ impl App {
         let k = if on { sw.right() - 12.0 } else { sw.x + 12.0 };
         draw_circle(k, sw.y + 12.0, 9.0, if on { p.on_accent } else { p.text });
         self.ui_rects.push(r);
-        hot && is_mouse_button_pressed(MouseButton::Left)
+        self.pressed(hot)
     }
     /// A 0..=100 slider with its label and value, filling `r`. `id` tells the sliders apart while
     /// one is dragged. Returns the new value while it is being changed.

@@ -762,8 +762,14 @@ unsafe extern "system" fn win32_wndproc(
         }
         WM_ACTIVATE => {
             if LOWORD(wparam as _) == WA_ACTIVE || LOWORD(wparam as _) == WA_CLICKACTIVE {
+                // patched for Pixel Horde: a grabbed cursor is held again when the window comes back
+                if payload.cursor_grabbed {
+                    update_clip_rect(hwnd);
+                }
                 event_handler.window_restored_event();
             } else {
+                // patched for Pixel Horde: alt-tabbing away lets the cursor go
+                ClipCursor(NULL as _);
                 event_handler.window_minimized_event();
             }
         }

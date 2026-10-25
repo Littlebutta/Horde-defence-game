@@ -271,7 +271,11 @@ pub enum Sfx {
     Gun,
     /// a gunship's chain gun (raised as each burst sound runs out)
     HeliGun,
+    /// the horde is hitting the base (not just its walls); raised at most every ALARM_GAP
+    BaseAttacked,
 }
+/// seconds between two base-under-attack alarms
+const ALARM_GAP: f32 = 30.0;
 /// Orcs that just lost one of their own near `from`: everyone around falls back to `to`, bunches
 /// up, then charges in together (see `Game::regroup`).
 pub struct Regroup {
@@ -416,6 +420,8 @@ pub struct Game {
     pub booms: Vec<Boom>,
     /// sound cues since the app last drained them
     pub sfx: Vec<(Sfx, Vec2)>,
+    /// game time of the last base-under-attack alarm (sound only, not part of the checksum)
+    alarm_at: f32,
     pub portals: Vec<Portal>,
     spawnq: Vec<SpawnQ>,
     conv: Vec<Vec2>,
@@ -528,6 +534,7 @@ impl Game {
             tracers: Vec::new(),
             booms: Vec::new(),
             sfx: Vec::new(),
+            alarm_at: -ALARM_GAP,
             portals: Vec::new(),
             spawnq: Vec::new(),
             conv: Vec::new(),
@@ -1805,6 +1812,10 @@ impl Game {
             let v = self.sd[i].load(Relaxed);
             if v > 0 && !self.structs[i].dead {
                 self.structs[i].hp -= v as f32 / DMG_SCALE;
+                if self.structs[i].t != S::Wall && self.time - self.alarm_at >= ALARM_GAP {
+                    self.alarm_at = self.time;
+                    self.sfx.push((Sfx::BaseAttacked, self.structs[i].center()));
+                }
                 if self.structs[i].hp <= 0.0 {
                     self.kill_struct(i);
                 }

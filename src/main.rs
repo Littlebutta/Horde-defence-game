@@ -11,6 +11,7 @@ mod globe;
 mod menubg;
 mod music;
 mod net;
+mod news;
 mod osm;
 mod render;
 mod selftest;
