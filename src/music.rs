@@ -11,11 +11,13 @@ use std::time::{Duration, Instant};
 
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 
-static TRACKS: [&[u8]; 4] = [
+static TRACKS: [&[u8]; 6] = [
     include_bytes!("../assets/music/horde-defense.mp3"),
     include_bytes!("../assets/music/approaching-danger.mp3"),
     include_bytes!("../assets/music/night-watch-protocol.mp3"),
     include_bytes!("../assets/music/night-watch-protocol-2.mp3"),
+    include_bytes!("../assets/music/siege-pulse.mp3"),
+    include_bytes!("../assets/music/night-watch-pulse.mp3"),
 ];
 static AMBIENCE: [&[u8]; 1] = [include_bytes!("../assets/sfx/ambience.mp3")];
 
@@ -55,8 +57,9 @@ static CLOSERS: [&[u8]; 3] = [
     include_bytes!("../assets/news/closer-3.mp3"),
 ];
 static NEWSROOM: &[u8] = include_bytes!("../assets/news/newsroom.mp3");
-/// the announcer sits under the game (Devin: not too loud), the newsroom bed lower still
-const NEWS_GAIN: f32 = 0.42;
+/// the announcer sits under the game (Devin: a little louder than at first, with its own
+/// volume setting), the newsroom bed lower still
+const NEWS_GAIN: f32 = 0.55;
 const BED_GAIN: f32 = 0.16;
 /// the bed fades in this long before the opener and out after the closer
 const BED_LEAD: f32 = 1.2;
@@ -127,16 +130,18 @@ pub struct Music {
     /// volumes 0..=100, read by the audio thread
     vol: Arc<AtomicU32>,
     sfx_vol: Arc<AtomicU32>,
+    news_vol: Arc<AtomicU32>,
     /// the battle ambience plays while this is set (a game is on screen)
     amb: Arc<AtomicBool>,
     tx: Option<mpsc::Sender<Cmd>>,
 }
 
 impl Music {
-    pub fn start(vol: u32, sfx: u32) -> Music {
+    pub fn start(vol: u32, sfx: u32, news: u32) -> Music {
         let mut m = Music {
             vol: Arc::new(AtomicU32::new(vol.min(100))),
             sfx_vol: Arc::new(AtomicU32::new(sfx.min(100))),
+            news_vol: Arc::new(AtomicU32::new(news.min(100))),
             amb: Arc::new(AtomicBool::new(false)),
             tx: None,
         };
@@ -144,8 +149,8 @@ impl Music {
         let quiet = ["PH_SHOT", "PH_FETCH", "PH_NETTEST"].iter().any(|k| std::env::var(k).is_ok()) && std::env::var("PH_SOUND").is_err();
         if !quiet {
             let (tx, rx) = mpsc::channel();
-            let (v, s, a) = (m.vol.clone(), m.sfx_vol.clone(), m.amb.clone());
-            if std::thread::Builder::new().name("audio".into()).spawn(move || player(v, s, a, rx)).is_ok() {
+            let (v, s, n, a) = (m.vol.clone(), m.sfx_vol.clone(), m.news_vol.clone(), m.amb.clone());
+            if std::thread::Builder::new().name("audio".into()).spawn(move || player(v, s, n, a, rx)).is_ok() {
                 m.tx = Some(tx);
             }
         }
@@ -156,6 +161,9 @@ impl Music {
     }
     pub fn set_sfx_volume(&self, vol: u32) {
         self.sfx_vol.store(vol.min(100), Ordering::Relaxed);
+    }
+    pub fn set_news_volume(&self, vol: u32) {
+        self.news_vol.store(vol.min(100), Ordering::Relaxed);
     }
     pub fn ambience(&self, on: bool) {
         self.amb.store(on, Ordering::Relaxed);
@@ -412,7 +420,7 @@ impl Source for Voice {
     }
 }
 
-fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx: mpsc::Receiver<Cmd>) {
+fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx: mpsc::Receiver<Cmd>) {
     // no audio device: no sound, the game carries on
     let Ok((_stream, handle)) = OutputStream::try_default() else { return };
     let mut rng = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
@@ -431,11 +439,11 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx
             let v = a.load(Ordering::Relaxed) as f32 / 100.0;
             v * v
         };
-        let (mv, sv) = (sq(&vol), sq(&sfx_vol));
+        let (mv, sv, nv) = (sq(&vol), sq(&sfx_vol), sq(&news_vol));
         music.update(&handle, &mut rng, true, mv * MAX_GAIN, dt);
         let in_game = amb.load(Ordering::Relaxed);
         ambience.update(&handle, &mut rng, in_game && sv > 0.0, sv * AMB_GAIN, dt);
-        if news.as_mut().is_some_and(|n| !n.update(in_game, sv, dt)) {
+        if news.as_mut().is_some_and(|n| !n.update(in_game, nv, dt)) {
             news = None;
         }
         // effects queued since the last step; wait for the next one for up to 50 ms
@@ -452,7 +460,7 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx
                     continue;
                 }
                 Cmd::News(army) => {
-                    if news.is_none() && sv > 0.0 {
+                    if news.is_none() && nv > 0.0 {
                         news = start_news(&handle, &mut rng, army);
                     }
                     continue;

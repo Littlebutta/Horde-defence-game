@@ -271,7 +271,7 @@ pub enum Sfx {
     Gun,
     /// a gunship's chain gun (raised as each burst sound runs out)
     HeliGun,
-    /// the horde is hitting the base (not just its walls); raised at most every ALARM_GAP
+    /// the horde is hitting the HQ; raised at most every ALARM_GAP
     BaseAttacked,
 }
 /// seconds between two base-under-attack alarms
@@ -422,6 +422,8 @@ pub struct Game {
     pub sfx: Vec<(Sfx, Vec2)>,
     /// game time of the last base-under-attack alarm (sound only, not part of the checksum)
     alarm_at: f32,
+    /// game time a horde last hit an HQ, and which player's (for the HUD popup, not in the checksum)
+    pub hq_hit: (f32, u8),
     pub portals: Vec<Portal>,
     spawnq: Vec<SpawnQ>,
     conv: Vec<Vec2>,
@@ -535,6 +537,7 @@ impl Game {
             booms: Vec::new(),
             sfx: Vec::new(),
             alarm_at: -ALARM_GAP,
+            hq_hit: (f32::NEG_INFINITY, 0),
             portals: Vec::new(),
             spawnq: Vec::new(),
             conv: Vec::new(),
@@ -1812,9 +1815,13 @@ impl Game {
             let v = self.sd[i].load(Relaxed);
             if v > 0 && !self.structs[i].dead {
                 self.structs[i].hp -= v as f32 / DMG_SCALE;
-                if self.structs[i].t != S::Wall && self.time - self.alarm_at >= ALARM_GAP {
-                    self.alarm_at = self.time;
-                    self.sfx.push((Sfx::BaseAttacked, self.structs[i].center()));
+                // only the HQ itself sounds the alarm (Devin: not every turret and wall)
+                if self.structs[i].t == S::Hq {
+                    self.hq_hit = (self.time, self.structs[i].owner);
+                    if self.time - self.alarm_at >= ALARM_GAP {
+                        self.alarm_at = self.time;
+                        self.sfx.push((Sfx::BaseAttacked, self.structs[i].center()));
+                    }
                 }
                 if self.structs[i].hp <= 0.0 {
                     self.kill_struct(i);

@@ -73,8 +73,12 @@ impl App {
             self.music_vol = v;
             self.music.set_volume(v);
         }
-        if let Some(v) = self.slider(l.cut_top(44.0, 6.0), 2, "Effects", self.sfx_vol) {
+        if let Some(v) = self.slider(l.cut_top(44.0, 14.0), 2, "Effects", self.sfx_vol) {
             self.set_sfx(v);
+        }
+        if let Some(v) = self.slider(l.cut_top(44.0, 6.0), 3, "News broadcasts", self.news_vol) {
+            self.news_vol = v;
+            self.music.set_news_volume(v);
         }
         let n = l.cut_top(18.0, 26.0);
         text(&self.fonts.mono, "M mutes the music during a game.", n.x, n.y + 12.0, 12.0, p.dim);
@@ -98,10 +102,6 @@ impl App {
         }
         if self.hot(r) {
             self.tip = Some("Centred keeps the HUD within a 21:9 area in the middle of a 32:9 or other very wide screen, so you don't have to turn your head to read it.".into());
-        }
-        let r = row(&mut l, self, "Map style");
-        if let Some(i) = self.segmented(r, &["Dark", "Light"], (!self.dark) as usize) {
-            self.dark = i == 0;
         }
 
         // ---- graphics

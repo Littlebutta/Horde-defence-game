@@ -9,6 +9,16 @@ use crate::render::{text, text_w};
 use crate::ui::{self, alpha, mix, pal, rrect, rrect_lines, RectExt};
 use macroquad::prelude::*;
 
+/// Small L-shaped brackets just outside the corners of `r`, the HUD's targeting-frame accent.
+pub fn corner_ticks(r: Rect, c: Color) {
+    let (l, o) = (8.0, 3.0);
+    let (x0, y0, x1, y1) = (r.x - o, r.y - o, r.right() + o, r.bottom() + o);
+    for (x, y, sx, sy) in [(x0, y0, 1.0, 1.0), (x1, y0, -1.0, 1.0), (x0, y1, 1.0, -1.0), (x1, y1, -1.0, -1.0)] {
+        draw_line(x, y, x + sx * l, y, 1.5, c);
+        draw_line(x, y, x, y + sy * l, 1.5, c);
+    }
+}
+
 /// Corner radius of panels and of controls.
 pub const R_PANEL: f32 = 12.0;
 pub const R_CTRL: f32 = 8.0;
@@ -100,12 +110,13 @@ impl App {
         let hot = self.hot(r) && enabled;
         let down = hot && is_mouse_button_down(MouseButton::Left);
         if enabled {
-            let base = if down { mix(p.accent, BLACK, 0.12) } else if hot { mix(p.accent, WHITE, 0.12) } else { p.accent };
-            ui::shadow(r, R_CTRL, alpha(p.accent, 0.35));
+            let base = if down { mix(p.accent, BLACK, 0.12) } else if hot { mix(p.accent, WHITE, 0.14) } else { p.accent };
+            ui::shadow(r, R_CTRL, alpha(p.accent, if hot { 0.4 } else { 0.25 }));
             rrect(r, R_CTRL, base);
-            // a light sheen on the top half
-            let top = Rect::new(r.x + 2.0, r.y + 2.0, r.w - 4.0, r.h * 0.45);
-            rrect(top, R_CTRL - 2.0, Color::new(1.0, 1.0, 1.0, 0.10));
+            // a bright edge along the top and darker along the bottom: a machined plate, not a gloss
+            draw_rectangle(r.x + R_CTRL, r.y + 1.0, r.w - 2.0 * R_CTRL, 1.0, Color::new(1.0, 1.0, 1.0, 0.35));
+            draw_rectangle(r.x + R_CTRL, r.bottom() - 3.0, r.w - 2.0 * R_CTRL, 2.0, Color::new(0.0, 0.0, 0.0, 0.18));
+            corner_ticks(r, alpha(p.accent, if hot { 0.95 } else { 0.6 }));
         } else {
             rrect(r, R_CTRL, p.panel2);
             rrect_lines(r, R_CTRL, 1.0, p.line);
@@ -136,11 +147,14 @@ impl App {
         for (i, c) in r.inset(3.0).cols(labels.len(), 3.0).into_iter().enumerate() {
             let hot = self.hot(c);
             if i == sel {
-                rrect(c, R_CTRL - 2.0, p.accent);
+                // a lit panel with a bar under it, like a selected mode on a console
+                rrect(c, R_CTRL - 2.0, mix(p.panel2, p.accent, 0.30));
+                rrect_lines(c, R_CTRL - 2.0, 1.0, alpha(p.accent, 0.85));
+                draw_rectangle(c.x + 10.0, c.bottom() - 3.0, c.w - 20.0, 2.0, p.accent);
             } else if hot {
                 rrect(c, R_CTRL - 2.0, alpha(p.text, 0.07));
             }
-            let fc = if i == sel { p.on_accent } else if hot { p.text } else { p.dim };
+            let fc = if i == sel { WHITE } else if hot { p.text } else { p.dim };
             self.label_in(c, labels[i], (r.h * 0.4).clamp(12.0, 16.0), fc);
             if self.pressed(hot) {
                 out = Some(i);

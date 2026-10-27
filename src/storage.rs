@@ -26,6 +26,8 @@ pub struct Settings {
     pub music: u32,
     /// sound effects volume 0..=100
     pub sfx: u32,
+    /// news broadcast volume 0..=100
+    pub news: u32,
     /// UI size in percent of the automatic scale
     pub ui_scale: u32,
     /// HUD across the whole width of an ultrawide screen instead of its centre
@@ -40,7 +42,7 @@ pub struct Settings {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { dark: true, fac: 0, diff: 1, real: false, city: String::new(), campaign: false, music: 70, sfx: 80, ui_scale: 100, hud_wide: false, fullscreen: false, fps: true, aa: 0, render: 100 }
+        Settings { dark: true, fac: 0, diff: 1, real: false, city: String::new(), campaign: false, music: 70, sfx: 80, news: 80, ui_scale: 100, hud_wide: false, fullscreen: false, fps: true, aa: 0, render: 100 }
     }
 }
 
@@ -51,7 +53,8 @@ pub fn load_settings() -> Settings {
         let Some((k, v)) = line.split_once('=') else { continue };
         let v = v.trim();
         match k.trim() {
-            "dark" => s.dark = v == "1",
+            // the light map is gone: every map is dark
+            "dark" => {}
             "faction" => s.fac = v.parse().unwrap_or(0).min(2),
             "difficulty" => s.diff = v.parse().unwrap_or(1).min(3),
             "real" => s.real = v == "1",
@@ -59,6 +62,7 @@ pub fn load_settings() -> Settings {
             "campaign" => s.campaign = v == "1",
             "music" => s.music = v.parse().unwrap_or(70).min(100),
             "sfx" => s.sfx = v.parse().unwrap_or(80).min(100),
+            "news" => s.news = v.parse().unwrap_or(80).min(100),
             "ui_scale" => s.ui_scale = v.parse().unwrap_or(100).clamp(50, 200),
             "hud_wide" => s.hud_wide = v == "1",
             "fullscreen" => s.fullscreen = v == "1",
@@ -73,6 +77,7 @@ pub fn load_settings() -> Settings {
 
 pub fn save_settings(s: &Settings) {
     let mut t = format!("dark={}\nfaction={}\ndifficulty={}\nreal={}\ncity={}\ncampaign={}\nmusic={}\nsfx={}\n", s.dark as u8, s.fac, s.diff, s.real as u8, s.city.replace('\n', " "), s.campaign as u8, s.music, s.sfx);
+    t.push_str(&format!("news={}\n", s.news));
     t.push_str(&format!("ui_scale={}\nhud_wide={}\nfullscreen={}\nfps={}\naa={}\nrender={}\n", s.ui_scale, s.hud_wide as u8, s.fullscreen as u8, s.fps as u8, s.aa, s.render));
     let _ = std::fs::write(data_dir().join("settings.txt"), t);
 }

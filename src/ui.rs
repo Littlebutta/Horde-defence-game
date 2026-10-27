@@ -264,8 +264,9 @@ pub fn pal(dark: bool) -> Pal {
             line: rgba(255, 255, 255, 0.09),
             text: rgba(234, 237, 242, 1.0),
             dim: rgba(146, 154, 168, 1.0),
-            accent: rgba(255, 176, 46, 1.0),
-            on_accent: rgba(26, 18, 4, 1.0),
+            // a cool tactical cyan (Devin: the old amber didn't fit the rest of the UI)
+            accent: rgba(66, 180, 222, 1.0),
+            on_accent: rgba(4, 20, 28, 1.0),
             good: rgba(81, 207, 102, 1.0),
             warn: rgba(255, 212, 59, 1.0),
             bad: rgba(255, 99, 99, 1.0),

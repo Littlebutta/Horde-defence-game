@@ -108,6 +108,10 @@ pub struct App {
     music_vol: u32,
     /// effects volume 0..=100, saved in settings
     sfx_vol: u32,
+    /// news broadcast volume 0..=100, saved in settings
+    news_vol: u32,
+    /// a match left running behind the menu (alone only): Resume or Abandon picks it up again
+    suspended: bool,
     /// the volume to go back to when M unmutes
     music_prev: u32,
     fac: usize,
@@ -326,19 +330,24 @@ fn to_screen(m: &Mat4, p: Vec3) -> Option<Vec2> {
 impl App {
     pub fn new(steam: Option<net::Steam>) -> App {
         let st = storage::load_settings();
+        // closing the window comes to App::frame, which quits at once (see App::quit)
+        prevent_quit();
         ui::set_user_scale(st.ui_scale);
         ui::set_wide(st.hud_wide);
         App {
             screen: Screen::Menu,
             fonts: render::load_fonts(),
-            dark: st.dark,
+            // the light map was removed: always dark
+            dark: true,
             fac: st.fac,
             diff: st.diff,
             real: st.real,
             city: st.city,
             camp_mode: st.campaign,
-            music: music::Music::start(st.music, st.sfx),
+            music: music::Music::start(st.music, st.sfx, st.news),
             sfx_vol: st.sfx,
+            news_vol: st.news,
+            suspended: false,
             music_vol: st.music,
             music_prev: if st.music > 0 { st.music } else { 70 },
             camp: None,
@@ -416,11 +425,7 @@ impl App {
     }
 
     fn theme(&self) -> &'static Theme {
-        if self.dark {
-            &DARK
-        } else {
-            &LIGHT
-        }
+        &DARK
     }
 
     pub fn frame(&mut self) {
@@ -435,6 +440,11 @@ impl App {
         self.sync_hub();
         if is_key_pressed(KeyCode::F11) {
             self.set_fullscreen(!self.fullscreen);
+        }
+        // Alt+F4 and the window's close button quit at once, whatever is on screen
+        let alt = is_key_down(KeyCode::LeftAlt) || is_key_down(KeyCode::RightAlt);
+        if (alt && is_key_pressed(KeyCode::F4)) || is_quit_requested() {
+            self.quit();
         }
         if self.screen == Screen::Play {
             // the game draws its 3D view in pixels and switches to points for the HUD itself
@@ -607,6 +617,72 @@ impl App {
             }
         }
     }
+    /// The Menu button: playing alone, the match keeps waiting behind the menu (paused) until
+    /// Resume or Abandon. In co-op everybody's game runs in lockstep, so it still ends it.
+    fn open_menu(&mut self) {
+        if self.sess.is_some() {
+            self.leave_game();
+            return;
+        }
+        self.suspended = true;
+        self.paused = true;
+        self.status.clear();
+        self.screen = if self.in_camp { Screen::Hub } else { Screen::Menu };
+    }
+    /// Back into the match left behind the menu.
+    fn resume_game(&mut self) {
+        self.suspended = false;
+        self.paused = false;
+        self.status.clear();
+        self.screen = Screen::Play;
+    }
+    /// Gives up the match left behind the menu. A campaign city counts as lost, and its end
+    /// screen carries on to the next map; any other match just ends.
+    fn abandon_game(&mut self) {
+        self.suspended = false;
+        self.paused = false;
+        self.status.clear();
+        if self.in_camp {
+            if let Some(g) = self.game.as_mut() {
+                g.over = true;
+                g.won = false;
+                self.screen = Screen::Play;
+                return;
+            }
+        }
+        self.game = None;
+        self.in_camp = false;
+        self.screen = Screen::Menu;
+    }
+    /// Resume / Abandon side by side in `r`, in place of the start button. Returns true when
+    /// one was pressed (the screen has changed).
+    fn suspended_buttons(&mut self, r: Rect, resume: &str, abandon: &str) -> bool {
+        let c = r.cols(2, 10.0);
+        if self.button_primary(c[0], resume, true) || (!self.blocked && is_key_pressed(KeyCode::Enter)) {
+            self.resume_game();
+            return true;
+        }
+        if self.button(c[1], abandon, true, false) {
+            self.abandon_game();
+            return true;
+        }
+        if self.hot(c[1]) {
+            self.tip = Some(if self.in_camp {
+                "Ends the battle as a loss: the city falls and the campaign moves on to the next map. Surviving troops pull out with you.".into()
+            } else {
+                "Ends this match and drops it.".into()
+            });
+        }
+        false
+    }
+    /// Quits the game straight away (Quit game, Alt+F4, closing the window). Settings and the
+    /// campaign are saved as they change, so there is nothing to lose here.
+    pub(super) fn quit(&mut self) {
+        self.save_settings();
+        self.leave_coop();
+        std::process::exit(0);
+    }
+
     fn leave_coop(&mut self) {
         if let Some(mut s) = self.sess.take() {
             if s.is_host() && s.in_game {
@@ -841,6 +917,11 @@ impl App {
     /// A campaign screen action: done right away alone, a vote in co-op. True when it's time to
     /// go and defend the picked city.
     fn hub_act(&mut self, c: &mut Campaign, a: HubAct) -> bool {
+        // the battle left running behind the menu is still that city's
+        if self.suspended && matches!(a, HubAct::City(_)) {
+            self.status = format!("Resume or abandon the defense of {} first.", c.city().name);
+            return false;
+        }
         // a guest's purchases and votes go to the host, who keeps the campaign
         if self.client() {
             if let Some(s) = self.sess.as_mut() {
@@ -966,7 +1047,7 @@ impl App {
                 Sfx::Nuke => (music::Snd::Nuke, 1.0, 1.0),
                 Sfx::Gun => (music::Snd::Gun, 0.4, jitter),
                 Sfx::HeliGun => (music::Snd::HeliGun, 0.6, jitter),
-                Sfx::BaseAttacked => (music::Snd::BaseAttacked, 0.45, 1.0),
+                Sfx::BaseAttacked => (music::Snd::BaseAttacked, 0.8, 1.0),
                 Sfx::FlameStop => continue,
             };
             // a nuke is heard anywhere on the map, and the alarm wherever you're looking
@@ -1254,7 +1335,12 @@ impl App {
             (true, false, true) => "Start campaign",
             _ => "Start",
         };
-        if self.button_primary(start, label, can) || (can && !self.blocked && is_key_pressed(KeyCode::Enter)) {
+        if self.suspended && self.game.is_some() {
+            let (resume, abandon) = if self.in_camp { ("Resume defense", "Abandon city") } else { ("Resume game", "Abandon game") };
+            if self.suspended_buttons(start, resume, abandon) {
+                return;
+            }
+        } else if self.button_primary(start, label, can) || (can && !self.blocked && is_key_pressed(KeyCode::Enter)) {
             self.start();
             return;
         }
@@ -1268,9 +1354,8 @@ impl App {
         if self.button(fc[0], "Settings", true, false) {
             self.open_settings();
         }
-        if self.button(fc[1], if self.dark { "Light map" } else { "Dark map" }, true, false) {
-            self.dark = !self.dark;
-            self.save_settings();
+        if self.button(fc[1], "Quit game", true, false) {
+            self.quit();
         }
         // updater line, under the panel
         let st = self.updater.get();
@@ -1491,6 +1576,15 @@ impl App {
                 wrap(&self.fonts.mono, &self.status, x0, by + 6.0, w, 12.0, rgb(250, 82, 82));
             }
             let gr = Rect::new(x0, by + 30.0, w, 46.0);
+            if self.suspended {
+                self.camp = Some(c);
+                self.suspended_buttons(gr, "Resume defense", "Abandon city");
+                if self.screen != Screen::Hub {
+                    return;
+                }
+                let Some(cc) = self.camp.take() else { return };
+                c = cc;
+            } else {
             let label = if self.hub_votes() { format!("Ready to defend {}", city.name) } else { format!("Defend {}", city.name) };
             let go = (self.button(gr, &label, true, true) || (!self.blocked && is_key_pressed(KeyCode::Enter))) && self.hub_act(&mut c, HubAct::Go);
             self.vote_marks(gr, HubAct::Go);
@@ -1499,6 +1593,7 @@ impl App {
                 self.camp = Some(c);
                 self.start_city();
                 return;
+            }
             }
         }
         if guest {
@@ -1514,6 +1609,13 @@ impl App {
             self.camp = Some(c);
             self.screen = Screen::Menu;
             return;
+        }
+        if self.button(Rect::new(x0 + 140.0, left.y + left.h - 38.0, 130.0, 30.0), "Quit game", true, false) {
+            // a guest's screen shows the host's campaign: never saved here
+            if !guest {
+                campaign::save(&c);
+            }
+            self.quit();
         }
 
         // ---- right: research and the army
@@ -1647,6 +1749,7 @@ impl App {
             campaign: self.camp_mode,
             music: self.music_vol,
             sfx: self.sfx_vol,
+            news: self.news_vol,
             ui_scale: ui::user_scale(),
             hud_wide: ui::wide(),
             fullscreen: self.fullscreen,
@@ -2570,7 +2673,7 @@ impl App {
             self.toggle_pause();
         }
         if self.button(b[4], "Menu", true, false) {
-            self.leave_game();
+            self.open_menu();
             return;
         }
         let f = g.faction();
@@ -2822,6 +2925,28 @@ impl App {
         if t > 0.0 && !msg.is_empty() {
             self.toast(top.bottom() + 14.0 + tick_h, &msg, p.accent, t.min(1.0));
         }
+        // the HQ under attack: a red alert under the banners while the hits keep coming
+        let since = g.time - g.hq_hit.0;
+        if since < 5.0 && g.hq_hit.1 as usize == self.me() && !g.over {
+            let a = (5.0 - since).min(1.0);
+            let r = Rect::new(area.x + (area.w - 360.0) / 2.0, top.bottom() + 58.0 + tick_h, 360.0, 58.0);
+            let red = rgb(255, 82, 82);
+            let pulse = 0.55 + 0.45 * (self.clock * 6.0).sin().abs();
+            ui::shadow(r, R_CTRL, alpha(red, 0.28 * a * pulse));
+            rrect(r, R_CTRL, alpha(rgb(28, 12, 14), 0.94 * a));
+            rrect_lines(r, R_CTRL, 1.0, alpha(red, 0.75 * a));
+            draw_rectangle(r.x, r.y + 8.0, 4.0, r.h - 16.0, alpha(red, a * pulse));
+            // a warning triangle
+            let (cx, cy) = (r.x + 30.0, r.y + 29.0);
+            draw_triangle(vec2(cx, cy - 12.0), vec2(cx - 13.0, cy + 10.0), vec2(cx + 13.0, cy + 10.0), alpha(red, a * pulse));
+            text(&self.fonts.head, "!", cx - 2.5, cy + 7.0, 15.0, alpha(rgb(28, 12, 14), a));
+            text(&self.fonts.head, "HQ UNDER ATTACK", r.x + 54.0, r.y + 26.0, 19.0, alpha(WHITE, a));
+            text(&self.fonts.mono, "Click or press H to look", r.x + 54.0, r.y + 44.0, 12.0, alpha(rgb(255, 180, 180), a));
+            self.ui_rects.push(r);
+            if self.pressed(self.hot(r)) {
+                self.cam.t = self.my_hq(g);
+            }
+        }
         if self.paused_now() && !g.over && !self.settings_open {
             let r = area.centered(260.0, 76.0);
             ui::shadow(r, R_PANEL, p.shadow);
@@ -2993,7 +3118,6 @@ impl App {
             } else {
                 match ch {
                     't' => self.toggle_top(),
-                    'k' => self.dark = !self.dark,
                     'm' => self.set_music(if self.music_vol > 0 { 0 } else { self.music_prev }),
                     'p' | ' ' => self.toggle_pause(),
                     'h' => self.cam.t = self.my_hq(g),
