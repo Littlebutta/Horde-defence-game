@@ -460,6 +460,8 @@ pub struct Game {
     /// campaign game: research is unlocked between cities, not at the lab
     pub campaign: bool,
     pub income_mult: f32,
+    /// the horde's health and attack, ×: campaign research into its army weakens it
+    pub potency: f32,
     pub banner: (String, f32),
     pub dirty_buildings: Vec<usize>,
     pub zone_dirty: bool,
@@ -569,6 +571,7 @@ impl Game {
             won: false,
             campaign: false,
             income_mult: 1.0,
+            potency: 1.0,
             banner: (String::new(), 0.0),
             dirty_buildings: Vec::new(),
             zone_dirty: true,
@@ -620,6 +623,13 @@ impl Game {
 
     pub fn faction(&self) -> &'static Faction {
         &FACTIONS[self.fac]
+    }
+    /// The horde's stats in this game, after campaign research.
+    pub fn stats(&self) -> crate::swarm::FactionStats {
+        let mut s = self.faction().stats;
+        s.hp *= self.potency;
+        s.atk *= self.potency;
+        s
     }
     /// This army is in the game: the one picked, or all three in chaos.
     pub fn has_army(&self, k: usize) -> bool {
@@ -1723,7 +1733,7 @@ impl Game {
         };
         self.pump_fields();
         lap(&mut self.prof[0]);
-        let stats = self.faction().stats;
+        let stats = self.stats();
         let chaos = self.fac == CHAOS;
         let army_hp = |fl: u8| if chaos { FACTIONS[kind_of(fl).min(2)].stats.hp } else { stats.hp };
         // spawns
@@ -4130,7 +4140,7 @@ impl Game {
 
     fn groups_tick(&mut self) {
         let obj = self.obj.clone();
-        let atk = self.faction().stats.atk;
+        let atk = self.stats().atk;
         for gi in 0..self.groups.len() {
             if self.groups[gi].dead {
                 continue;

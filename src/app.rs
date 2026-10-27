@@ -19,7 +19,9 @@ use macroquad::prelude::*;
 mod invite;
 mod settings;
 mod techtree;
+mod war;
 mod widgets;
+use war::{army_col, campaign_army_name, level_col, turns_s};
 use widgets::{R_CTRL, R_PANEL};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -39,6 +41,8 @@ enum HubAct {
     Recruit(U),
     City(usize),
     Go,
+    /// the next step of research into an army (shared by everybody, paid from its kills)
+    Hunt(usize),
 }
 impl HubAct {
     fn code(self) -> u32 {
@@ -47,6 +51,7 @@ impl HubAct {
             HubAct::Recruit(u) => 1000 + (u == U::Tank) as u32,
             HubAct::City(i) => 2000 + i as u32,
             HubAct::Go => 3000,
+            HubAct::Hunt(a) => 4000 + a as u32,
         }
     }
     fn from_code(v: u32) -> Option<HubAct> {
@@ -56,13 +61,14 @@ impl HubAct {
             1001 => HubAct::Recruit(U::Tank),
             2000..=2999 => HubAct::City((v - 2000) as usize),
             3000 => HubAct::Go,
+            4000..=4002 => HubAct::Hunt((v - 4000) as usize),
             _ => return None,
         })
     }
     /// A player has one vote of each kind at a time: a city, ready to go. (Kind 0, buying, is no vote.)
     fn kind(self) -> u8 {
         match self {
-            HubAct::Tech(_) | HubAct::Recruit(_) => 0,
+            HubAct::Tech(_) | HubAct::Recruit(_) | HubAct::Hunt(_) => 0,
             HubAct::City(_) => 1,
             HubAct::Go => 2,
         }
@@ -92,7 +98,7 @@ fn swatch(i: usize, k: usize, c: Color) -> Color {
 const FAC_ROW: f32 = 56.0;
 const FAC_ROW_COMPACT: f32 = 46.0;
 
-const DIFFS: [(&str, f32); 4] = [
+pub(crate) const DIFFS: [(&str, f32); 4] = [
     ("Easy", 0.6),
     ("Normal", 1.0),
     ("Hard", 1.6),
@@ -120,6 +126,14 @@ pub struct App {
     city: String,
     /// "World campaign" picked on the menu
     camp_mode: bool,
+    /// asking before a new campaign erases the saved one
+    confirm_new: bool,
+    /// the turn the campaign screen's alien trails started drawing for, and when
+    trail_t: Option<(u32, f32)>,
+    /// bulletins acknowledged here (a co-op guest can't mark them in the host's campaign)
+    told_local: u8,
+    /// the last bulletin whose newscaster line was played: (campaign seed, bulletin bit)
+    bulletin_played: Option<(u64, u8)>,
     camp: Option<Campaign>,
     /// the game being played (or loaded) is a campaign city
     in_camp: bool,
@@ -344,6 +358,10 @@ impl App {
             real: st.real,
             city: st.city,
             camp_mode: st.campaign,
+            confirm_new: std::env::var("PH_CONFIRM").is_ok(),
+            trail_t: None,
+            told_local: 0,
+            bulletin_played: None,
             music: music::Music::start(st.music, st.sfx, st.news),
             sfx_vol: st.sfx,
             news_vol: st.news,
@@ -451,7 +469,7 @@ impl App {
             self.play(dt);
         } else {
             ui::begin();
-            self.blocked = self.settings_open || self.invite_open;
+            self.blocked = self.settings_open || self.invite_open || self.confirm_new;
             match self.screen {
                 Screen::Menu => self.menu(),
                 Screen::Loading => self.loading(),
@@ -491,6 +509,10 @@ impl App {
         if self.invite_open && self.screen != Screen::Play && !self.settings_open {
             self.tip = None;
             self.invites();
+        }
+        if self.confirm_new && matches!(self.screen, Screen::Menu | Screen::Hub) && !self.settings_open {
+            self.tip = None;
+            self.confirm_new_dialog();
         }
         if self.settings_open {
             self.tip = None;
@@ -946,6 +968,9 @@ impl App {
             }
             HubAct::City(i) => c.select(i),
             HubAct::Go => return true,
+            HubAct::Hunt(a) => {
+                c.fbuy(a);
+            }
         }
         false
     }
@@ -988,7 +1013,7 @@ impl App {
         let (mode, fac, diff, city) = match &camp {
             _ if !self.camp_mode => (if self.real { net::MODE_REAL } else { net::MODE_RANDOM }, self.fac, self.diff, if self.real { self.city.trim().to_string() } else { String::new() }),
             Some(c) if c.fired() || c.finished() => (net::MODE_CAMPAIGN, c.fac, c.diff, "over, a new one starts in New York".to_string()),
-            Some(c) => (net::MODE_CAMPAIGN, c.fac, c.diff, format!("day {:.0}, {} cities fought, next up {}", c.fought as f32 * campaign::DAYS_PER_CITY, c.fought, c.city().name)),
+            Some(c) => (net::MODE_CAMPAIGN, c.fac, c.diff, format!("turn {}, {} cities held, next up {}", c.fought + 1, c.held(), c.city().name)),
             None => (net::MODE_CAMPAIGN, self.fac, self.diff, "a new one, starting in New York".to_string()),
         };
         let line = match self.screen {
@@ -1136,7 +1161,7 @@ impl App {
         let mut d = a.cut_top(detail_h, 18.0);
         if self.camp_mode {
             while get_char_pressed().is_some() {}
-            let blurb = "Start in New York, then pick cities on the globe. Near-fallen cities have bigger hordes. Civilians flown out of held cities buy research and troops; survivors march on. A lost city pays nothing. Lose three and the world's governments fire you.";
+            let blurb = "Start in New York, then pick one city a turn on the globe; the rest run down, and you can't save them all. Harder cities pay more. Aliens and orcs join the zombies a few turns in. Civilians flown out buy research and troops. Fail three defences and the world's governments fire you.";
             let lines = wrap_lines(&self.fonts.mono, blurb, d.w, 13.0);
             for (i, l) in lines.iter().enumerate() {
                 text(&self.fonts.mono, l, d.x, d.y + 13.0 + i as f32 * 18.0, 13.0, p.dim);
@@ -1157,18 +1182,13 @@ impl App {
             self.progress(Rect::new(m.x, m.y + 21.0, m.w, 4.0), f, if f >= 1.0 { p.good } else { p.accent });
             if let Some(c) = &saved_camp {
                 let line = if c.fired() {
-                    format!("fired after {} lost cities ({})", c.lost, FACTIONS[c.fac].name)
+                    format!("fired after {} failed defences", c.lost)
+                } else if c.saved_world() {
+                    "the world is saved".to_string()
                 } else if c.finished() {
-                    format!("over, {} cities held ({})", c.held(), FACTIONS[c.fac].name)
+                    format!("over, {} cities held", c.held())
                 } else {
-                    format!(
-                        "day {} · next {} · {} · {} · {} civilians to spend",
-                        c.fought as f32 * campaign::DAYS_PER_CITY,
-                        c.city().name,
-                        FACTIONS[c.fac].name,
-                        DIFFS[c.diff].0,
-                        c.points(0)
-                    )
+                    format!("turn {} · next {} · {} · {} RP to spend", c.fought + 1, c.city().name, DIFFS[c.diff].0, c.points(0))
                 };
                 let sr = d.cut_top(42.0, 0.0);
                 rrect(sr, R_CTRL, alpha(p.accent, 0.1));
@@ -1178,11 +1198,10 @@ impl App {
                 let line = fit(&self.fonts.mono, &line, sr2.w, 12.5);
                 text(&self.fonts.mono, &line, sr2.x, sr2.y + 27.0, 12.5, p.text);
                 if self.button(nr, "New campaign", true, false) {
-                    self.open_campaign(Some(Campaign::new(self.fac, self.diff)));
-                    return;
+                    self.confirm_new = true;
                 }
                 if self.hot(nr) {
-                    self.tip = Some("Starts over in New York with the faction and difficulty picked here. The saved campaign is lost.".into());
+                    self.tip = Some("Starts over in New York with the difficulty picked here. The saved campaign is erased.".into());
                 }
             }
         } else if self.real {
@@ -1371,7 +1390,7 @@ impl App {
 
     /// Opens the campaign screen with a saved or new campaign.
     fn open_campaign(&mut self, c: Option<Campaign>) {
-        let c = c.unwrap_or_else(|| Campaign::new(self.fac, self.diff));
+        let c = c.unwrap_or_else(|| Campaign::new(self.diff));
         campaign::save(&c);
         self.camp = Some(c);
         self.camp_mode = true;
@@ -1413,10 +1432,11 @@ impl App {
         // this campaign's maps, the city picked first
         let want: Vec<&City> = std::iter::once(c.city()).chain(c.all()).collect();
         self.pack.want(&want);
-        let before = (c.crew.clone(), c.units.len(), c.current);
+        let before = (c.crew.clone(), c.units.len(), c.current, c.ftier);
         // the tech tree covers the screen: nothing under it reacts
         let tree = self.tree_open && !c.finished();
-        if tree {
+        let news = c.bulletin(self.told_local).is_some();
+        if tree || news {
             self.blocked = true;
         }
         // co-op: a guest sees the host's campaign and votes; the host carries out what wins
@@ -1464,17 +1484,37 @@ impl App {
             .enumerate()
             .map(|(i, city)| {
                 let s = &c.cities[i];
+                let army = c.army_at(i);
                 let (col, label) = match s.fate {
-                    Fate::Open => (mix(rgb(255, 196, 64), rgb(255, 64, 48), s.threat()), format!("{} · {:.0}d", city.name, s.days)),
-                    Fate::Held => (rgb(64, 192, 87), format!("{} · held", city.name)),
-                    Fate::Lost => (rgb(150, 70, 70), format!("{} · lost", city.name)),
-                    Fate::Fallen => (rgb(110, 24, 24), format!("{} · fallen", city.name)),
+                    Fate::Open => (level_col(c.level(i)), format!("{} · {}", city.name, turns_s(s.turns))),
+                    Fate::Held => (rgb(64, 192, 87), format!("{} · saved", city.name)),
+                    Fate::Lost | Fate::Fallen => (rgb(58, 60, 66), format!("{} · fallen", city.name)),
                 };
-                globe::Mark { lat: city.lat, lon: city.lon, col, label, picked: i == c.current && !c.finished() }
+                let open = s.fate == Fate::Open;
+                let reticle = (open && army != campaign::ZOMBIES).then(|| army_col(army));
+                let dots = if open { c.level(i) } else { 0 };
+                globe::Mark { lat: city.lat, lon: city.lon, col, label, picked: i == c.current && !c.finished(), reticle, dots, dot_col: army_col(army) }
+            })
+            .collect();
+        // the alien swarms that flew this turn trail purple from where they left
+        let start = match self.trail_t {
+            Some((turn, t)) if turn == c.fought => t,
+            _ => {
+                self.trail_t = Some((c.fought, self.clock));
+                self.clock
+            }
+        };
+        let trails: Vec<globe::Trail> = c
+            .aliens
+            .iter()
+            .filter(|s| s.moved == c.fought)
+            .filter_map(|s| {
+                let (f, t) = (c.info(s.from?), c.info(s.city));
+                Some(globe::Trail { from: (f.lat, f.lon), to: (t.lat, t.lon), prog: (self.clock - start - 0.6) / 2.8, col: army_col(campaign::ALIENS) })
             })
             .collect();
         let over_globe = !left.contains(m) && !right.contains(m) && !self.blocked;
-        let (hover, clicked) = globe.draw(gc, gr, &marks, &self.fonts.head, over_globe, get_frame_time());
+        let (hover, clicked) = globe.draw(gc, gr, &marks, &trails, &self.fonts.head, over_globe, get_frame_time());
         if let Some(i) = clicked {
             self.hub_act(&mut c, HubAct::City(i));
         }
@@ -1483,26 +1523,38 @@ impl App {
         }
         let title = "WORLD CAMPAIGN";
         text(&self.fonts.head, title, sw / 2.0 - text_w(&self.fonts.head, title, 28.0) / 2.0, 44.0, 28.0, p.text);
-        let sub = format!("Day {} · {} cities held · {} lost of {} allowed", c.fought as f32 * campaign::DAYS_PER_CITY, c.held(), c.lost, campaign::MAX_LOST);
+        let sub = format!("Turn {} · {} saved · {} fallen · {} of {} failed defences", c.fought + 1, c.held(), c.fallen(), c.lost, campaign::MAX_LOST);
         text(&self.fonts.mono, &sub, sw / 2.0 - text_w(&self.fonts.mono, &sub, 13.0) / 2.0, 66.0, 13.0, p.dim);
         let n = self.sess.as_ref().map(|s| s.players.len()).unwrap_or(1);
         let vote_hint = format!("Co-op: the next city and going in are votes ({} of {} players carry them). Research is each player's own.", n / 2 + 1, n);
-        let hint = if self.hub_votes() { vote_hint.as_str() } else { "Drag to turn the globe, scroll to zoom, click a city to pick it" };
+        let hint = if self.hub_votes() { vote_hint.as_str() } else { "One city a turn: the rest run down. Drag to turn the globe, scroll to zoom, click a city to pick it" };
         text(&self.fonts.mono, hint, sw / 2.0 - text_w(&self.fonts.mono, hint, 12.0) / 2.0, sh - 22.0, 12.0, p.dim);
 
         // ---- left: the campaign and the picked city
         self.panel(left);
         let (x0, w) = (left.x + 20.0, left.w - 40.0);
         let mut y = left.y + 34.0;
-        text(&self.fonts.head, FACTIONS[c.fac].name, x0, y, 20.0, p.text);
+        text(&self.fonts.head, "The war", x0, y, 20.0, p.text);
+        // the armies on Earth, in their colours
+        let mut ax = x0 + w;
+        for a in (0..3).rev() {
+            if !c.present(a) {
+                continue;
+            }
+            let name = campaign_army_name(a);
+            let tw = text_w(&self.fonts.mono, name, 11.0);
+            ax -= tw;
+            text(&self.fonts.mono, name, ax, y - 2.0, 11.0, army_col(a));
+            ax -= 12.0;
+        }
         y += 20.0;
         text(&self.fonts.mono, &format!("{} · {} flown out · {} kills", DIFFS[c.diff].0, c.flown, fmt_n(c.kills as usize)), x0, y, 12.0, p.dim);
         y += 18.0;
-        // lost cities: three strikes
-        text(&self.fonts.mono, "Cities lost", x0, y + 4.0, 12.0, p.dim);
+        // failed defences: three strikes
+        text(&self.fonts.mono, "Failed defences", x0, y + 4.0, 12.0, p.dim);
         for k in 0..campaign::MAX_LOST {
             let on = k < c.lost;
-            let r = Rect::new(x0 + 96.0 + k as f32 * 26.0, y - 8.0, 20.0, 16.0);
+            let r = Rect::new(x0 + 124.0 + k as f32 * 26.0, y - 8.0, 20.0, 16.0);
             draw_rectangle(r.x, r.y, r.w, r.h, if on { rgb(224, 49, 49) } else { p.panel2 });
         }
         y += 26.0;
@@ -1512,42 +1564,68 @@ impl App {
             let i = c.current;
             let city = c.city();
             let s = *c.state();
-            let card = Rect::new(left.x + 10.0, y, left.w - 20.0, 196.0);
+            let army = c.army();
+            let lvl = c.level(i);
+            let card = Rect::new(left.x + 10.0, y, left.w - 20.0, 214.0);
             draw_rectangle(card.x, card.y, card.w, card.h, p.panel2);
-            draw_rectangle(card.x, card.y, 4.0, card.h, mix(rgb(255, 196, 64), rgb(255, 64, 48), s.threat()));
+            draw_rectangle(card.x, card.y, 4.0, card.h, level_col(lvl));
             let mut cy = card.y + 34.0;
             text(&self.fonts.head, city.name, x0, cy, 26.0, p.text);
             let ct = city.country();
             text(&self.fonts.mono, ct, card.x + card.w - 12.0 - text_w(&self.fonts.mono, ct, 12.0), cy - 4.0, 12.0, p.dim);
             cy += 26.0;
-            text(&self.fonts.head, &format!("{:.0} days until it falls", s.days), x0, cy, 17.0, mix(rgb(255, 196, 64), rgb(255, 90, 70), s.threat()));
-            cy += 22.0;
+            let falls = if s.turns <= 1 { "Falls after this turn".to_string() } else { format!("Falls in {} turns", s.turns) };
+            text(&self.fonts.head, &falls, x0, cy, 17.0, if s.turns <= 2 { rgb(255, 90, 70) } else { rgb(255, 196, 64) });
+            cy += 20.0;
+            let who = match army {
+                campaign::ALIENS => {
+                    let major = c.swarms_at(i).any(|k| c.aliens[k].major);
+                    format!("{} alien swarm · eats 2 turns a turn", if major { "The main" } else { "A minor" })
+                }
+                campaign::ORCS => "Orc portals".to_string(),
+                _ => "Zombie outbreak".to_string(),
+            };
+            text(&self.fonts.mono, &who, x0, cy, 12.5, army_col(army));
+            cy += 18.0;
             text(&self.fonts.mono, &format!("{:.1}M people alive of {:.1}M", c.alive(i), city.pop), x0, cy, 12.5, p.text);
-            cy += 18.0;
+            cy += 16.0;
             // threat bar
-            let bw = w;
-            draw_rectangle(x0, cy, bw, 8.0, rgba(255, 255, 255, 0.08));
-            draw_rectangle(x0, cy, bw * s.threat().max(0.03), 8.0, mix(rgb(255, 196, 64), rgb(255, 64, 48), s.threat()));
+            draw_rectangle(x0, cy, w, 8.0, rgba(255, 255, 255, 0.08));
+            draw_rectangle(x0, cy, w * (lvl as f32 / 16.0).clamp(0.03, 1.0), 8.0, level_col(lvl));
             cy += 26.0;
-            text(&self.fonts.mono, &format!("Horde ×{:.2} of {} · grows with each city held", c.horde_mult(), DIFFS[c.diff].0), x0, cy, 12.5, p.text);
+            text(&self.fonts.head, &format!("Threat level {}", lvl), x0, cy, 15.0, level_col(lvl));
+            let pay = format!("pays ${} each", fmt_n(c.city_pay(i) as usize));
+            text(&self.fonts.mono, &pay, card.x + card.w - 12.0 - text_w(&self.fonts.mono, &pay, 12.5), cy, 12.5, p.good);
             cy += 18.0;
-            text(&self.fonts.mono, &format!("Hold out {} for the evac", mmss(c.hold_secs())), x0, cy, 12.5, p.text);
+            text(&self.fonts.mono, &format!("Horde ×{:.2} of {} · hold out {}", c.horde_mult(), DIFFS[c.diff].0, mmss(c.hold_secs())), x0, cy, 12.5, p.text);
             cy += 18.0;
             let map = if campaign::have_map(city) { "map ready" } else { "map downloads first" };
             text(&self.fonts.mono, &format!("{} civilians on the map · {}", fmt_n(c.civilians_at(i)), map), x0, cy, 12.5, p.dim);
             y = card.y + card.h + 18.0;
-            // every city, closest to falling first
+            // the cities still standing, closest to falling first, then the rest
             text(&self.fonts.head, "Cities", x0, y, 16.0, p.text);
+            let tally = format!("{} standing · {} saved · {} fallen", (0..c.cities.len()).filter(|j| c.open(*j)).count(), c.held(), c.fallen());
+            text(&self.fonts.mono, &tally, x0 + w - text_w(&self.fonts.mono, &tally, 11.0), y, 11.0, p.dim);
             y += 8.0;
             let mut order: Vec<usize> = (0..c.cities.len()).collect();
-            order.sort_by(|a, b| {
-                let k = |i: usize| (c.cities[i].fate != Fate::Open, c.cities[i].days);
-                let (ka, kb) = (k(*a), k(*b));
-                ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
+            order.sort_by_key(|&j| {
+                let st = &c.cities[j];
+                (match st.fate {
+                    Fate::Open => 0,
+                    Fate::Held => 1,
+                    _ => 2,
+                }, st.turns, j)
             });
             let by = left.y + left.h - 120.0;
-            let rh = ((by - y - 8.0) / c.cities.len() as f32).clamp(14.0, 26.0);
-            for j in order {
+            let rh = 20.0f32.min((by - y - 8.0) / c.cities.len() as f32).max(15.0);
+            let room = ((by - y - 4.0) / rh).max(1.0) as usize;
+            let more = order.len().saturating_sub(room);
+            for (n, j) in order.into_iter().enumerate() {
+                if more > 0 && n + 1 >= room {
+                    let rest = format!("+{} more saved or fallen", more + 1);
+                    text(&self.fonts.mono, &rest, left.x + 20.0, y + rh / 2.0 + 4.0, 11.5, p.dim);
+                    break;
+                }
                 let st = &c.cities[j];
                 let rr = Rect::new(left.x + 10.0, y, left.w - 20.0, rh - 2.0);
                 let hot = self.hot(rr) && st.fate == Fate::Open;
@@ -1555,14 +1633,17 @@ impl App {
                     draw_rectangle(rr.x, rr.y, rr.w, rr.h, if j == c.current { mix(p.panel2, p.accent, 0.25) } else { p.panel2 });
                 }
                 let (col, right_s) = match st.fate {
-                    Fate::Open => (p.text, format!("{:.0} days · {:.1}M", st.days, c.alive(j))),
-                    Fate::Held => (rgb(64, 192, 87), "held".to_string()),
-                    Fate::Lost => (rgb(200, 90, 90), "lost".to_string()),
-                    Fate::Fallen => (p.dim, "fallen".to_string()),
+                    Fate::Open => (p.text, format!("lvl {} · {}", c.level(j), turns_s(st.turns))),
+                    Fate::Held => (rgb(64, 192, 87), "saved".to_string()),
+                    Fate::Lost => (rgb(120, 122, 128), "lost".to_string()),
+                    Fate::Fallen => (rgb(120, 122, 128), "fallen".to_string()),
                 };
                 let ty = rr.y + rh / 2.0 + 4.0;
-                text(&self.fonts.mono, c.info(j).name, rr.x + 10.0, ty, 12.5, col);
-                text(&self.fonts.mono, &right_s, rr.x + rr.w - 10.0 - text_w(&self.fonts.mono, &right_s, 12.0), ty, 12.0, if st.fate == Fate::Open { p.dim } else { col });
+                if st.fate == Fate::Open {
+                    draw_rectangle(rr.x + 8.0, ty - 7.0, 5.0, 5.0, army_col(c.army_at(j)));
+                }
+                text(&self.fonts.mono, c.info(j).name, rr.x + 20.0, ty, 12.5, col);
+                text(&self.fonts.mono, &right_s, rr.x + rr.w - 10.0 - text_w(&self.fonts.mono, &right_s, 12.0), ty, 12.0, if st.fate == Fate::Open { level_col(c.level(j)) } else { col });
                 self.vote_marks(rr, HubAct::City(j));
                 if hot {
                     self.tip = Some(self.city_tip(&c, j));
@@ -1585,15 +1666,15 @@ impl App {
                 let Some(cc) = self.camp.take() else { return };
                 c = cc;
             } else {
-            let label = if self.hub_votes() { format!("Ready to defend {}", city.name) } else { format!("Defend {}", city.name) };
-            let go = (self.button(gr, &label, true, true) || (!self.blocked && is_key_pressed(KeyCode::Enter))) && self.hub_act(&mut c, HubAct::Go);
-            self.vote_marks(gr, HubAct::Go);
-            if go {
-                campaign::save(&c);
-                self.camp = Some(c);
-                self.start_city();
-                return;
-            }
+                let label = if self.hub_votes() { format!("Ready to defend {}", city.name) } else { format!("Defend {}", city.name) };
+                let go = (self.button(gr, &label, true, true) || (!self.blocked && is_key_pressed(KeyCode::Enter))) && self.hub_act(&mut c, HubAct::Go);
+                self.vote_marks(gr, HubAct::Go);
+                if go {
+                    campaign::save(&c);
+                    self.camp = Some(c);
+                    self.start_city();
+                    return;
+                }
             }
         }
         if guest {
@@ -1620,12 +1701,15 @@ impl App {
 
         // ---- right: research and the army
         self.research_column(&mut c, right);
-        if tree {
-            self.blocked = self.settings_open || self.invite_open;
+        if tree && !news {
+            self.blocked = self.settings_open || self.invite_open || self.confirm_new;
             self.tech_tree(&mut c);
         }
+        if news {
+            self.bulletin(&mut c);
+        }
 
-        if (&c.crew, c.units.len(), c.current) != (&before.0, before.1, before.2) && !guest {
+        if (&c.crew, c.units.len(), c.current, c.ftier) != (&before.0, before.1, before.2, before.3) && !guest {
             campaign::save(&c);
         }
         if c.current != before.2 {
@@ -1639,56 +1723,80 @@ impl App {
         let city = c.info(i);
         let s = &c.cities[i];
         match s.fate {
-            Fate::Open => format!(
-                "{}, {}: {:.0} days until it falls, {:.1} million alive. Horde ×{:.2}, {} civilians on the map.",
-                city.name,
-                city.country(),
-                s.days,
-                c.alive(i),
-                c.horde_mult_at(i),
-                fmt_n(c.civilians_at(i))
-            ),
-            Fate::Held => format!("{}, {}: held until the evac.", city.name, city.country()),
-            Fate::Lost => format!("{}, {}: lost. The HQ was overrun.", city.name, city.country()),
-            Fate::Fallen => format!("{}, {}: fell to the horde before anyone came.", city.name, city.country()),
+            Fate::Open => {
+                let who = match c.army_at(i) {
+                    campaign::ALIENS => " Aliens are attacking: it loses two turns a turn, and they grow stronger every turn nobody fights them.",
+                    campaign::ORCS => " Orc portals have opened here.",
+                    _ => "",
+                };
+                format!(
+                    "{}, {}: falls in {}, {:.1} million alive. Threat level {} (horde ×{:.2}), {} civilians on the map, pays ${} for holding it.{}",
+                    city.name,
+                    city.country(),
+                    turns_s(s.turns),
+                    c.alive(i),
+                    c.level(i),
+                    c.horde_mult_at(i),
+                    fmt_n(c.civilians_at(i)),
+                    fmt_n(c.city_pay(i) as usize),
+                    who
+                )
+            }
+            Fate::Held => format!("{}, {}: saved. You held it until the evac.", city.name, city.country()),
+            Fate::Lost => format!("{}, {}: fallen. The HQ was overrun, and every horde grew stronger.", city.name, city.country()),
+            Fate::Fallen => format!("{}, {}: fell before anyone came, and every horde grew stronger.", city.name, city.country()),
         }
     }
 
-    /// The end of a campaign, in the left column: fired, or no city left to defend.
+    /// The end of a campaign, in the left column: fired, the world saved, or no city left to defend.
     fn camp_end(&mut self, c: &Campaign, x0: f32, y: f32, w: f32) {
         let p = pal(self.dark);
         let (head, body) = if c.fired() {
             (
                 "You're fired.",
                 format!(
-                    "{} cities fell on your watch, and the world's governments have handed the war to someone else. You held {} and flew {} civilians out.",
+                    "{} defences failed on your watch, and the world's governments have handed the war to someone else. You saved {} cities and flew {} civilians out.",
                     campaign::MAX_LOST,
                     c.held(),
                     c.flown
                 ),
             )
+        } else if c.saved_world() {
+            (
+                "You saved the world.",
+                format!(
+                    "The zombies, the aliens and the orcs are gone. You saved {} cities and flew {} civilians out. And with your newfound knowledge of the unnatural, you've decided to dominate the world with your undead army.",
+                    c.held(),
+                    c.flown
+                ),
+            )
         } else {
-            ("No cities left to defend.", format!("You held {} of the world's biggest cities and flew {} civilians out. The rest are the horde's.", c.held(), c.flown))
+            ("No cities left to defend.", format!("You saved {} of the world's biggest cities and flew {} civilians out. The rest are the hordes'.", c.held(), c.flown))
         };
-        text(&self.fonts.head, head, x0, y + 30.0, 24.0, p.text);
-        wrap(&self.fonts.mono, &body, x0, y + 60.0, w, 13.0, p.dim);
-        if self.button(Rect::new(x0, y + 150.0, w, 46.0), "New campaign", !self.client(), true) {
-            self.open_campaign(Some(Campaign::new(c.fac, c.diff)));
+        text(&self.fonts.head, head, x0, y + 30.0, 24.0, if c.saved_world() { p.good } else { p.text });
+        let lines = wrap_lines(&self.fonts.mono, &body, w, 13.0);
+        for (k, l) in lines.iter().enumerate() {
+            text(&self.fonts.mono, l, x0, y + 60.0 + k as f32 * 18.0, 13.0, p.dim);
+        }
+        let by = y + 80.0 + lines.len() as f32 * 18.0;
+        if self.button(Rect::new(x0, by, w, 46.0), "New campaign", !self.client(), true) {
+            self.confirm_new = true;
         }
     }
 
     /// Headless test hook: a campaign at city `level` with some troops and unlocks, on its screen or
     /// already playing a random city.
     pub fn test_campaign(&mut self, city: usize, play: bool) {
-        let mut c = Campaign::with_seed(std::env::var("PH_FAC").ok().and_then(|s| s.parse().ok()).unwrap_or(0), 1, 42);
-        c.current = city.min(c.cities.len() - 1);
-        c.fought = 3;
-        c.lost = 1;
-        c.cities[0].fate = Fate::Held;
-        c.cities[2].fate = Fate::Lost;
-        c.cities[7].fate = Fate::Fallen;
-        c.cities[7].days = 0.0;
-        c.cities[c.current].fate = Fate::Open;
+        let mut c = Campaign::with_seed(1, 42);
+        // a few turns in, with the aliens and orcs about (PH_TURNS sets how many turns)
+        let turns = std::env::var("PH_TURNS").ok().and_then(|s| s.parse().ok()).unwrap_or(6);
+        c.play_turns(turns);
+        c.select(city);
+        c.fkills = [140_000, 60_000, 9_000];
+        // PH_TOLD=1: no bulletins over the screen
+        if std::env::var("PH_TOLD").is_ok() {
+            c.told = 0xff;
+        }
         c.crew_mut(0).points = 260;
         // a co-op partner's own points
         c.crew_mut(1).points = 180;
@@ -1814,7 +1922,7 @@ impl App {
     fn make_game(&self, d: Desc, seed: u64) -> Game {
         let camp = if self.in_camp { self.camp.as_ref() } else { None };
         let mut g = match camp {
-            Some(c) => Game::new(d, c.fac, DIFFS[c.diff].1 * c.horde_mult(), seed),
+            Some(c) => Game::new(d, c.army(), DIFFS[c.diff].1 * c.horde_mult(), seed),
             None => Game::new(d, self.fac, DIFFS[self.diff].1, seed),
         };
         // co-op: an HQ for every player
@@ -1876,7 +1984,8 @@ impl App {
         let camp = if self.in_camp { self.camp.as_ref() } else { None };
         self.banner = camp.map(|c| {
             let city = c.city();
-            let line = format!("Day {:.0} · {:.0} days until it falls · hold out {} until the evac", c.fought as f32 * campaign::DAYS_PER_CITY, c.state().days, mmss(c.hold_secs()));
+            let turns = c.state().turns;
+            let line = format!("Turn {} · falls in {} turn{} · threat level {} · hold out {} until the evac", c.fought + 1, turns, if turns == 1 { "" } else { "s" }, c.level(c.current), mmss(c.hold_secs()));
             (city.name.to_string(), city.country().to_string(), line, self.clock)
         });
         self.msg = match camp {
@@ -3000,14 +3109,14 @@ impl App {
         if g.won {
             text(&self.fonts.head, &format!("{} held", c.city().name), t.x, t.y + 28.0, 30.0, p.text);
             let l = a.cut_top(22.0, 4.0);
-            text(&self.fonts.mono, &format!("{} civilians flown out: +{} to spend", g.extracted, g.extracted), l.x, l.y + 14.0, 14.0, p.accent);
+            text(&self.fonts.mono, &format!("{} civilians flown out: +{} RP · +${}", g.extracted, g.extracted, fmt_n(c.city_pay(c.current) as usize)), l.x, l.y + 14.0, 14.0, p.accent);
         } else {
             text(&self.fonts.head, &format!("{} is lost", c.city().name), t.x, t.y + 28.0, 30.0, p.text);
             let left = campaign::MAX_LOST.saturating_sub(next.lost);
             let line = match left {
-                0 => "That's three cities. The world's governments are letting you go.".to_string(),
-                1 => "The HQ was overrun. Nothing to spend from here. One more lost city and you're fired.".to_string(),
-                n => format!("The HQ was overrun. Nothing to spend from here. {} more lost cities and you're fired.", n),
+                0 => "That's three failed defences. The world's governments are letting you go.".to_string(),
+                1 => "The city falls, and every horde grows stronger. Nothing to spend from here. One more failed defence and you're fired.".to_string(),
+                n => format!("The city falls, and every horde grows stronger. Nothing to spend from here. {} more failed defences and you're fired.", n),
             };
             let lines = wrap_lines(&self.fonts.mono, &line, a.w, 13.0);
             let l = a.cut_top(lines.len() as f32 * 17.0 + 4.0, 4.0);
@@ -3018,10 +3127,12 @@ impl App {
         let l = a.cut_top(22.0, 2.0);
         text(&self.fonts.mono, &army, l.x, l.y + 14.0, 14.0, p.text);
         let fell: Vec<&str> = (0..c.cities.len()).filter(|i| c.cities[*i].fate == Fate::Open && next.cities[*i].fate == Fate::Fallen).map(|i| c.info(i).name).collect();
+        let army = g.fac.min(2);
+        let fp = next.fpoints(army) as i64 - c.fpoints(army) as i64;
         let world = if fell.is_empty() {
-            format!("{} days pass. {} kills · score {:.0}", campaign::DAYS_PER_CITY, fmt_n(g.kills as usize), g.score)
+            format!("A turn passes. {} kills: +{} FP against the {}", fmt_n(g.kills as usize), fp, campaign_army_name(army).to_lowercase())
         } else {
-            format!("{} days pass. Fallen meanwhile: {}.", campaign::DAYS_PER_CITY, fell.join(", "))
+            format!("A turn passes. Fallen meanwhile: {}.", fell.join(", "))
         };
         let l = a.cut_top(20.0, 0.0);
         let world = fit(&self.fonts.mono, &world, l.w, 13.0);

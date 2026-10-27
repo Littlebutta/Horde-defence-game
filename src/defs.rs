@@ -393,7 +393,7 @@ pub struct Faction {
 }
 pub const FACTIONS: [Faction; 4] = [
     Faction { name: "Zombies", stats: FactionStats { mode: Behaviour::Zombie, spd: 9.0, hp: 12.0, atk: 4.0, jit: 8.0 }, sight: 600, col: [92, 220, 110], deep: [20, 120, 40], reward: 0.04, blurb: "Small outbreaks that spread by eating civilians. Attack anything in sight, then rush your HQ." },
-    Faction { name: "Alien bugs", stats: FactionStats { mode: Behaviour::Alien, spd: 24.0, hp: 6.0, atk: 3.0, jit: 14.0 }, sight: 700, col: [222, 120, 255], deep: [120, 30, 170], reward: 0.03, blurb: "Small drops all over the city. Straight for the HQ, killing anyone in the way." },
+    Faction { name: "Aliens", stats: FactionStats { mode: Behaviour::Alien, spd: 24.0, hp: 6.0, atk: 3.0, jit: 14.0 }, sight: 700, col: [222, 120, 255], deep: [120, 30, 170], reward: 0.03, blurb: "Small drops all over the city. Straight for the HQ, killing anyone in the way." },
     Faction { name: "Orcs", stats: FactionStats { mode: Behaviour::Orc, spd: 8.0, hp: 50.0, atk: 14.0, jit: 5.0 }, sight: 900, col: [255, 140, 50], deep: [170, 50, 0], reward: 0.2, blurb: "A few portals pour out huge waves that destroy everything they see." },
     // the three armies at once: these stats only stand in where the game needs one army's numbers
     // (aiming ahead, troops in a fight); every unit moves by its own army's

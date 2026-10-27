@@ -22,7 +22,7 @@ static TRACKS: [&[u8]; 6] = [
 static AMBIENCE: [&[u8]; 1] = [include_bytes!("../assets/sfx/ambience.mp3")];
 
 /// The news broadcast, from Devin's recordings: an opener, a report about the army in the game
-/// (indexed like `FACTIONS`: zombies, alien bugs, orcs) and a closer, over the newsroom bed.
+/// (indexed like `FACTIONS`: zombies, aliens, orcs) and a closer, over the newsroom bed.
 static OPENERS: [&[u8]; 3] = [
     include_bytes!("../assets/news/opener-1.mp3"),
     include_bytes!("../assets/news/opener-2.mp3"),
@@ -57,6 +57,11 @@ static CLOSERS: [&[u8]; 3] = [
     include_bytes!("../assets/news/closer-3.mp3"),
 ];
 static NEWSROOM: &[u8] = include_bytes!("../assets/news/newsroom.mp3");
+/// The campaign's bulletins when a new army reaches Earth (Devin's recordings), indexed like
+/// `FACTIONS`; the zombies are there from the start.
+static ARRIVALS: [Option<&[u8]>; 3] = [None, Some(include_bytes!("../assets/news/alien-arrive.mp3")), Some(include_bytes!("../assets/news/orc-arrive.mp3"))];
+/// a bulletin plays over the quiet campaign screen, a little louder than a broadcast in battle
+const BULLETIN_GAIN: f32 = 1.5;
 /// the announcer sits under the game (Devin: a little louder than at first, with its own
 /// volume setting), the newsroom bed lower still
 const NEWS_GAIN: f32 = 0.55;
@@ -122,6 +127,8 @@ enum Cmd {
     Stop(u64),
     /// a news broadcast about army 0..3 (see `REPORTS`)
     News(usize),
+    /// the campaign bulletin for army 1..3 arriving (see `ARRIVALS`)
+    Bulletin(usize),
 }
 /// seconds a stopped effect takes to fade out
 const STOP_FADE: f32 = 0.15;
@@ -173,11 +180,17 @@ impl Music {
             let _ = tx.send(Cmd::Play(p));
         }
     }
-    /// Starts a news broadcast about `army` (0 zombies, 1 alien bugs, 2 orcs). It is cut short
+    /// Starts a news broadcast about `army` (0 zombies, 1 aliens, 2 orcs). It is cut short
     /// when the game ends (the ambience goes off).
     pub fn news(&self, army: usize) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Cmd::News(army.min(2)));
+        }
+    }
+    /// Plays the campaign screen's bulletin that `army` has arrived, over the newsroom bed.
+    pub fn bulletin(&self, army: usize) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Cmd::Bulletin(army.min(2)));
         }
     }
     /// Fades out the effects started with this key.
@@ -302,6 +315,8 @@ struct News {
     t: f32,
     /// set when the voice has finished (or the game ended): seconds since
     done: Option<f32>,
+    /// a campaign bulletin: plays on outside a game, a little louder
+    bulletin: bool,
 }
 
 fn pick(rng: &mut u64, n: usize) -> usize {
@@ -325,13 +340,27 @@ fn start_news(handle: &OutputStreamHandle, rng: &mut u64, army: usize) -> Option
     }
     bed.set_volume(0.0);
     bed.append(Decoder::new(Cursor::new(NEWSROOM)).ok()?);
-    Some(News { voice, bed, t: 0.0, done: None })
+    Some(News { voice, bed, t: 0.0, done: None, bulletin: false })
+}
+
+fn start_bulletin(handle: &OutputStreamHandle, army: usize) -> Option<News> {
+    let clip = ARRIVALS.get(army).copied().flatten()?;
+    let voice = Sink::try_new(handle).ok()?;
+    let bed = Sink::try_new(handle).ok()?;
+    voice.set_volume(0.0);
+    voice.append(rodio::source::Zero::<f32>::new(1, 44100).take_duration(Duration::from_secs_f32(BED_LEAD)));
+    voice.append(Decoder::new(Cursor::new(clip)).ok()?);
+    bed.set_volume(0.0);
+    bed.append(Decoder::new(Cursor::new(NEWSROOM)).ok()?);
+    Some(News { voice, bed, t: 0.0, done: None, bulletin: true })
 }
 
 impl News {
     /// One step: `on` is false once the game is over. Returns false when it's finished.
     fn update(&mut self, on: bool, gain: f32, dt: f32) -> bool {
         self.t += dt;
+        let on = on || self.bulletin;
+        let gain = if self.bulletin { gain * BULLETIN_GAIN } else { gain };
         if self.done.is_none() && (self.voice.empty() || !on) {
             self.done = Some(0.0);
         }
@@ -465,6 +494,12 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>
                     }
                     continue;
                 }
+                Cmd::Bulletin(army) => {
+                    if nv > 0.0 {
+                        news = start_bulletin(&handle, army);
+                    }
+                    continue;
+                }
             };
             // forget keys whose voice has finished
             keyed.retain(|(_, s)| Arc::strong_count(s) > 1);
@@ -524,7 +559,7 @@ mod tests {
     }
     #[test]
     fn news_decodes() {
-        let all = OPENERS.iter().chain(REPORTS.iter().flatten()).chain(CLOSERS.iter());
+        let all = OPENERS.iter().chain(REPORTS.iter().flatten()).chain(CLOSERS.iter()).chain(ARRIVALS.iter().flatten());
         for b in all {
             let len = length(b);
             assert!(len > 0.5 && len < 20.0, "{len}");

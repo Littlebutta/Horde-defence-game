@@ -1,5 +1,5 @@
-//! The campaign's research: the column on the campaign screen (points, what's ready to unlock, the
-//! army) and the tech tree itself, drawn as a tree of nodes over the whole screen. Each player has
+//! The campaign's research: the column on the campaign screen (points, the way into the tree,
+//! research into the enemy armies, the army) and the tech tree itself, drawn as a tree of nodes over the whole screen. Each player has
 //! their own points and their own tree.
 
 use super::widgets::{R_CTRL, R_PANEL};
@@ -24,8 +24,8 @@ fn group_col(t: Tech) -> Color {
 }
 
 impl App {
-    /// The right column of the campaign screen: this player's research points, the tree's way in,
-    /// what can be unlocked right now, and the army.
+    /// The right column of the campaign screen: this player's research points and money, the tree's
+    /// way in, research into the enemy armies, and the army.
     pub(super) fn research_column(&mut self, c: &mut Campaign, right: Rect) {
         let p = pal(self.dark);
         let me = self.me();
@@ -64,41 +64,18 @@ impl App {
         if self.button(br, &format!("Open the tech tree (T) · {} of {} unlocked", owned, campaign::TECH.len()), !c.finished(), true) {
             self.tree_open = true;
         }
-        y += 74.0;
+        y += 66.0;
 
-        // what can be unlocked right now: affordable first, then the cheapest
-        text(&self.fonts.head, "Ready to unlock", x0, y, 15.0, p.text);
-        y += 10.0;
+        // research into the enemy armies, between the tree and the army
         let army_h = 150.0;
-        let mut open: Vec<Tech> = campaign::TECH.into_iter().filter(|t| c.open_tech(me, *t)).collect();
-        open.sort_by_key(|t| (!c.can_buy(me, *t), t.cost()));
-        let rh = 34.0;
-        let room = ((right.y + right.h - army_h - y - 8.0) / rh).max(0.0) as usize;
-        if open.is_empty() {
-            text(&self.fonts.mono, "Everything is unlocked.", x0, y + 18.0, 12.0, p.dim);
-        }
-        for t in open.into_iter().take(room) {
-            let rr = Rect::new(right.x + 10.0, y, right.w - 20.0, rh - 4.0);
-            rrect(rr, R_CTRL, p.panel2);
-            draw_rectangle(rr.x + 1.0, rr.y + 6.0, 3.0, rr.h - 12.0, group_col(t));
-            let name = fit(&self.fonts.head, t.name(), rr.w - 130.0, 13.5);
-            text(&self.fonts.head, &name, rr.x + 12.0, rr.y + rr.h / 2.0 + 4.5, 13.5, p.text);
-            let b = Rect::new(rr.x + rr.w - 104.0, rr.y + 3.0, 100.0, rr.h - 6.0);
-            if self.button(b, &format!("{} RP", t.cost()), c.can_buy(me, t) && !c.finished(), false) {
-                self.hub_act(c, HubAct::Tech(t));
-            }
-            if self.hot(rr) {
-                self.tip = Some(format!("{}: {}", t.name(), t.tip()));
-            }
-            y += rh;
-        }
+        self.faction_research(c, Rect::new(right.x + 10.0, y - 16.0, right.w - 20.0, right.y + right.h - army_h - y + 4.0));
 
         // the army, at the bottom
         let mut y = right.y + right.h - army_h + 14.0;
         text(&self.fonts.head, if coop { "The army" } else { "Your army" }, x0, y, 16.0, p.text);
         y += 10.0;
-        let (rs, rn) = c.army(U::Rifle);
-        let (ts, _) = c.army(U::Tank);
+        let (rs, rn) = c.army_size(U::Rifle);
+        let (ts, _) = c.army_size(U::Tank);
         let ar = Rect::new(right.x + 10.0, y, right.w - 20.0, 52.0);
         draw_rectangle(ar.x, ar.y, ar.w, ar.h, p.panel2);
         text(&self.fonts.mono, &format!("{} rifle squads ({} soldiers) · {} tanks", rs, rn, ts), x0, ar.y + 22.0, 12.5, p.text);

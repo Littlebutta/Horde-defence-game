@@ -32,6 +32,30 @@ pub struct Mark {
     pub label: String,
     /// the picked city: a ring around it and a bigger label
     pub picked: bool,
+    /// a targeting reticle around it in this colour (a city under alien or orc attack)
+    pub reticle: Option<Color>,
+    /// little units of its army that roam around it: how many, and their colour
+    pub dots: u32,
+    pub dot_col: Color,
+}
+
+/// A flight path drawn over the globe, dashed, from one point to another; `prog` (0..1) is how
+/// much of it is drawn so far, with a bright head at its end while it's still being drawn.
+pub struct Trail {
+    pub from: (f32, f32),
+    pub to: (f32, f32),
+    pub prog: f32,
+    pub col: Color,
+}
+
+fn noise(a: u32, b: u32) -> f32 {
+    let mut x = a.wrapping_mul(0x9E37_79B9) ^ b.wrapping_mul(0x85EB_CA6B);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x2C1B_3C6D);
+    x ^= x >> 12;
+    x = x.wrapping_mul(0x297A_2D39);
+    x ^= x >> 15;
+    (x >> 8) as f32 / (1u32 << 24) as f32
 }
 
 pub struct Globe {
@@ -83,7 +107,7 @@ impl Globe {
     /// Draws the globe centred at `c` (UI points, inside `ui::begin`) with radius `r` at zoom 1, and its pins. `input`:
     /// whether the mouse is over the globe's part of the screen. Returns the pin under the mouse and
     /// the pin clicked, if any.
-    pub fn draw(&mut self, c: Vec2, r: f32, marks: &[Mark], font: &Font, input: bool, dt: f32) -> (Option<usize>, Option<usize>) {
+    pub fn draw(&mut self, c: Vec2, r: f32, marks: &[Mark], trails: &[Trail], font: &Font, input: bool, dt: f32) -> (Option<usize>, Option<usize>) {
         let (sw, sh) = (crate::ui::sw(), crate::ui::sh());
         let rad = r * self.zoom;
         // turning: drag, wheel, or easing towards a picked city
@@ -168,8 +192,55 @@ impl Globe {
         gl_use_default_material();
         pop_camera_state();
 
-        // pins
         let horizon = 1.0 / dist;
+        let project = |p: Vec3| -> Vec2 {
+            let q = mvp * p.extend(1.0);
+            vec2((q.x / q.w + 1.0) / 2.0 * sw, (1.0 - q.y / q.w) / 2.0 * sh)
+        };
+        let time = get_time() as f32;
+
+        // flight paths: a dashed arc that lifts off the surface, drawn out from where it started
+        for tr in trails {
+            let (a, b) = (dir(tr.from.0, tr.from.1), dir(tr.to.0, tr.to.1));
+            let ang = a.dot(b).clamp(-1.0, 1.0).acos();
+            if ang < 1e-4 {
+                continue;
+            }
+            let steps = 64;
+            let at = |t: f32| -> Vec3 {
+                // slerp, raised in the middle like a flight path on an old map
+                let p = (a * ((1.0 - t) * ang).sin() + b * (t * ang).sin()) / ang.sin();
+                p * (1.003 + 0.06 * ang.min(1.5) * (t * std::f32::consts::PI).sin())
+            };
+            let vis = |p: Vec3| ((p.normalize().dot(view) - horizon) / 0.12).clamp(0.0, 1.0);
+            let end = tr.prog.clamp(0.0, 1.0);
+            let n = (steps as f32 * end).ceil() as usize;
+            for k in 0..n {
+                let (t0, t1) = (k as f32 / steps as f32, ((k + 1) as f32 / steps as f32).min(end));
+                // marching dashes
+                if (k as f32 * 0.5 - time * 2.0).rem_euclid(2.0) > 1.2 {
+                    continue;
+                }
+                let (p0, p1) = (at(t0), at(t1));
+                let v = vis(p0).min(vis(p1));
+                if v <= 0.0 {
+                    continue;
+                }
+                let (s0, s1) = (project(p0), project(p1));
+                draw_line(s0.x, s0.y, s1.x, s1.y, 4.0, Color::new(tr.col.r, tr.col.g, tr.col.b, 0.18 * v));
+                draw_line(s0.x, s0.y, s1.x, s1.y, 2.0, Color::new(tr.col.r, tr.col.g, tr.col.b, 0.9 * v));
+            }
+            if end < 1.0 {
+                let h = at(end);
+                if vis(h) > 0.0 {
+                    let s = project(h);
+                    draw_circle(s.x, s.y, 6.0, Color::new(tr.col.r, tr.col.g, tr.col.b, 0.3));
+                    draw_circle(s.x, s.y, 3.0, Color::new(1.0, 1.0, 1.0, 0.95));
+                }
+            }
+        }
+
+        // pins
         let mut hover = None;
         let mut best = 18.0f32;
         let mut shown = Vec::new();
@@ -179,8 +250,7 @@ impl Globe {
             if facing < horizon + 0.02 {
                 continue;
             }
-            let q = mvp * (p * 1.004).extend(1.0);
-            let s = vec2((q.x / q.w + 1.0) / 2.0 * sw, (1.0 - q.y / q.w) / 2.0 * sh);
+            let s = project(p * 1.004);
             // pins at the rim fade out instead of popping
             let a = ((facing - horizon) / 0.15).clamp(0.0, 1.0);
             shown.push((i, s, a));
@@ -193,10 +263,43 @@ impl Globe {
         // the picked city's label first, so it keeps the best spot
         shown.sort_by_key(|(i, _, _)| !marks[*i].picked);
         let mut taken: Vec<Rect> = Vec::new();
+        // the armies roaming around their cities, as single pixels like in battle
+        let zoom = self.zoom;
+        for &(i, s, a) in &shown {
+            let mk = &marks[i];
+            for k in 0..mk.dots.min(48) {
+                let (h1, h2, h3) = (noise(i as u32 * 97 + k, 1), noise(i as u32 * 97 + k, 2), noise(i as u32 * 97 + k, 3));
+                let spin = (0.15 + 0.35 * h3) * if h2 > 0.5 { 1.0 } else { -1.0 };
+                let ang = h1 * std::f32::consts::TAU + time * spin;
+                let rr = (9.0 + 16.0 * h2 + 2.5 * (time * (0.7 + h3) + h1 * 9.0).sin()) * zoom.sqrt();
+                let p = s + vec2(ang.cos(), ang.sin() * 0.8) * rr;
+                draw_rectangle(p.x - 1.0, p.y - 1.0, 2.2, 2.2, Color::new(mk.dot_col.r, mk.dot_col.g, mk.dot_col.b, 0.9 * a));
+            }
+        }
         for &(i, s, a) in &shown {
             let mk = &marks[i];
             let hot = hover == Some(i);
             let size = if mk.picked { 7.0 } else { 5.0 } + if hot { 1.5 } else { 0.0 };
+            if let Some(rc) = mk.reticle {
+                // a targeting reticle: a ring, four ticks pointing in, brackets turning slowly
+                let col = |k: f32| Color::new(rc.r, rc.g, rc.b, k * a);
+                let pulse = (time * 2.4 + i as f32).sin() * 0.5 + 0.5;
+                let rad = size + 9.0 + pulse * 1.5;
+                draw_circle_lines(s.x, s.y, rad, 1.5, col(0.85));
+                for q in 0..4 {
+                    let t = q as f32 * std::f32::consts::FRAC_PI_2;
+                    let d = vec2(t.cos(), t.sin());
+                    let (p0, p1) = (s + d * (rad + 5.0), s + d * (rad - 3.0));
+                    draw_line(p0.x, p0.y, p1.x, p1.y, 1.5, col(0.95));
+                    let t = t + std::f32::consts::FRAC_PI_4 + time * 0.6;
+                    let br = rad + 6.0 + pulse * 2.0;
+                    for side in [-0.22f32, 0.22] {
+                        let (u, v) = (vec2(t.cos(), t.sin()), vec2((t + side).cos(), (t + side).sin()));
+                        let (q0, q1) = (s + u * br, s + v * br);
+                        draw_line(q0.x, q0.y, q1.x, q1.y, 2.0, col(0.7 + 0.3 * pulse));
+                    }
+                }
+            }
             draw_circle(s.x, s.y, size + 2.5, Color::new(0.0, 0.0, 0.0, 0.55 * a));
             draw_circle(s.x, s.y, size, Color::new(mk.col.r, mk.col.g, mk.col.b, a));
             if mk.picked {

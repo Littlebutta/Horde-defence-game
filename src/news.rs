@@ -5,7 +5,7 @@
 
 use crate::defs::CHAOS;
 
-/// Devin's headlines, indexed like `FACTIONS`: zombies, alien bugs, orcs.
+/// Devin's headlines, indexed like `FACTIONS`: zombies, aliens, orcs.
 pub const HEADLINES: [&[&str]; 3] = [
     &[
         "Toilet paper futures hit record high as nation prepares for third consecutive week indoors.",

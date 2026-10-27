@@ -1,12 +1,18 @@
-//! The world campaign: the outbreak is spreading through the world's biggest cities, and you are
-//! the one the governments send in. It starts in New York. Between cities a globe shows where the
-//! horde stands: every city has days until it falls and civilians still alive, and you pick where
-//! to go next. A city close to falling has a bigger horde.
+//! The world campaign: the zombie outbreak is spreading through the world's biggest cities, and
+//! you are the one the governments send in. It starts in New York. Between cities a globe shows
+//! where the war stands, XCOM style: every city has turns until it falls, its own threat level,
+//! civilians still alive and pay for holding it, and you can only defend one a turn. The cities you
+//! don't pick run down; when one falls the hordes everywhere else grow stronger and another city
+//! joins the war. Harder cities pay more.
 //!
-//! Hold a city until the evac and the civilians you flew out are yours to spend on the same
-//! research the lab sells for scrap in a normal game, or on recruits. Lose one and you get nothing
-//! from it; lose three and the world's governments fire you. Troops that survive march on to the
-//! next city; scrap and buildings don't.
+//! A few turns in, the aliens and the orcs arrive. Alien swarms fly from city to city, attacking
+//! one at a time and eating through it fast; hold the city and they fly on. Orcs open portals in
+//! cities at random. Kills of each army buy research into it, which weakens it and in the end
+//! wipes it out everywhere. Wipe out all three and the world is saved.
+//!
+//! Hold a city until the evac and the civilians you flew out are yours to spend on the tech tree
+//! or on recruits. Fail three defences and the world's governments fire you. Troops that survive
+//! march on to the next city; scrap and buildings don't.
 //!
 //! The maps are downloaded from OpenStreetMap once, by the `cities` GitHub Actions workflow
 //! (`PH_FETCH`), and published as the `cities` release. The game fetches that pack from GitHub in the
@@ -173,9 +179,10 @@ impl Tech {
             Tech::Up(u) => updef(u).tip.to_string(),
         }
     }
-    /// Research points it costs.
+    /// Research points it costs: three times the first campaign's prices, which one good city
+    /// could nearly pay off.
     pub fn cost(self) -> u32 {
-        match self {
+        3 * match self {
             Tech::Build(s) => match s {
                 S::Gun => 60,
                 S::Cannon => 140,
@@ -285,20 +292,35 @@ pub fn tree_layout() -> (Vec<Node>, [(usize, f32); 2]) {
     (out, dims)
 }
 
-/// Civilians it costs to recruit troops between cities.
+/// Research points it costs to recruit troops between cities.
 pub fn recruit_cost(u: U) -> u32 {
     match u {
-        U::Rifle => 30,
-        U::Tank => 100,
+        U::Rifle => 60,
+        U::Tank => 200,
     }
 }
 
-/// Lost cities before the governments fire you.
+/// Failed defences before the governments fire you.
 pub const MAX_LOST: u32 = 3;
-/// Days that pass for every city you fight in (the fight, the flight, the clean-up).
-pub const DAYS_PER_CITY: f32 = 10.0;
-/// A city this many days or more from falling has the mildest horde.
-const CALM_DAYS: f32 = 90.0;
+/// The armies, as indices into `FACTIONS`. Zombies are everywhere from the start; aliens and orcs
+/// turn up a few turns in.
+pub const ZOMBIES: usize = 0;
+pub const ALIENS: usize = 1;
+pub const ORCS: usize = 2;
+/// Every city that falls (or is lost) makes the hordes everywhere else this much stronger.
+const DOOM: f32 = 1.08;
+/// An alien swarm grows this much stronger for every turn nobody fights it.
+const ALIEN_GROWTH: f32 = 0.2;
+/// Turns an alien attack takes off its city each turn (zombies and orcs take one).
+const ALIEN_BITE: u32 = 2;
+/// At most this many minor alien swarms at once.
+const MAX_MINOR: usize = 3;
+/// Chance each turn that the orcs open portals in one more city.
+const ORC_SPREAD: f32 = 0.4;
+/// Chance that a city added to the map later already has orcs in it.
+const ORC_NEW_CITY: f32 = 0.3;
+/// Kills of each army that make one point of research into it.
+pub const KILLS_PER_POINT: [u64; 3] = [1000, 1000, 250];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Fate {
@@ -306,7 +328,7 @@ pub enum Fate {
     Open,
     /// you held it until the evac
     Held,
-    /// you fought there and the HQ fell
+    /// you fought there and the HQ fell (or you abandoned it)
     Lost,
     /// the horde took it before anyone came
     Fallen,
@@ -314,28 +336,96 @@ pub enum Fate {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct CityState {
-    /// days until the city falls by itself
-    pub days: f32,
-    /// days it had when the campaign started, for how many people are left
-    pub start: f32,
-    /// days lost per campaign day: how fast the horde moves there
-    pub rate: f32,
+    /// turns until the city falls by itself
+    pub turns: u32,
+    /// turns it had when it joined the campaign, for how many people are left
+    pub start: u32,
+    /// how hard its horde is by itself; grows by `ramp` every turn
+    pub heat: f32,
+    pub ramp: f32,
+    /// how crowded it still is: more or fewer civilians on the map than its size says
+    pub civ: f32,
+    /// orc portals have opened here
+    pub orcs: bool,
     pub fate: Fate,
 }
 
 impl CityState {
+    /// A city's own numbers, from the campaign's seed and its place in the list. Each one differs
+    /// in all four ways, so no two campaigns play the same order.
+    fn fresh(seed: u64, slot: usize) -> CityState {
+        let k = 1000 + slot as u64 * 8;
+        let turns = 3 + (hash(seed, k) * 8.0) as u32;
+        CityState {
+            turns,
+            start: turns,
+            heat: 0.9 + 1.2 * hash(seed, k + 1),
+            ramp: 0.04 + 0.16 * hash(seed, k + 2),
+            civ: 0.5 + 1.1 * hash(seed, k + 3),
+            orcs: false,
+            fate: Fate::Open,
+        }
+    }
     /// Share of the people still alive: falls as the city nears its end.
     pub fn share(&self) -> f32 {
         match self.fate {
-            Fate::Fallen => 0.0,
-            _ => 0.08 + 0.92 * (self.days / self.start).clamp(0.0, 1.0).powf(0.8),
+            Fate::Fallen | Fate::Lost => 0.0,
+            _ => 0.25 + 0.75 * (self.turns as f32 / self.start.max(1) as f32).clamp(0.0, 1.0),
         }
     }
-    /// 0 for a quiet city, 1 for one about to fall.
-    pub fn threat(&self) -> f32 {
-        (1.0 - self.days / CALM_DAYS).clamp(0.0, 1.0)
-    }
 }
+
+/// An alien swarm on the move: it attacks one city at a time and flies on when that city is
+/// held or taken. Minor swarms (spawned when the aliens take a city) die when their city is held.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Swarm {
+    pub city: usize,
+    /// the city it flew in from, for the trail on the globe
+    pub from: Option<usize>,
+    /// ×horde: grows every turn it's left alone
+    pub power: f32,
+    pub major: bool,
+    /// the turn (cities fought) it last moved on
+    pub moved: u32,
+}
+
+/// One step of research into an army.
+pub struct FTech {
+    pub name: &'static str,
+    pub tip: &'static str,
+    pub cost: u32,
+}
+
+/// Steps on each army's research path; the last wipes the army out everywhere.
+pub const FTIERS: usize = 5;
+/// Each step before the last makes the army's hordes this much smaller...
+const F_SIZE: f32 = 0.10;
+/// ...and its units this much weaker (health and attack).
+const F_STATS: f32 = 0.07;
+
+pub const FTECH: [[FTech; FTIERS]; 3] = [
+    [
+        FTech { name: "Necrotic tissue study", tip: "Autopsies show where the dead are weakest.", cost: 40 },
+        FTech { name: "Pheromone jamming", tip: "Scrambles the scent that draws the dead together.", cost: 80 },
+        FTech { name: "Outbreak containment", tip: "Quarantine teams cut new outbreaks off early.", cost: 130 },
+        FTech { name: "Prion inhibitor", tip: "A spray that slows the infection in the bitten.", cost: 200 },
+        FTech { name: "Global cure", tip: "The cure, everywhere at once. Ends the zombie plague, and with it the war. Needs the aliens and orcs gone first.", cost: 320 },
+    ],
+    [
+        FTech { name: "Chitin analysis", tip: "Finds the soft joints in their shells.", cost: 40 },
+        FTech { name: "Hive signal jamming", tip: "Muddles the signal that coordinates the drops.", cost: 80 },
+        FTech { name: "Xeno-toxin rounds", tip: "Ammunition laced with something they can't digest.", cost: 130 },
+        FTech { name: "Orbital tracking", tip: "Satellites follow their ships between cities.", cost: 200 },
+        FTech { name: "Hive-mind collapse", tip: "Severs the hive mind. Every alien swarm on Earth dies at once.", cost: 320 },
+    ],
+    [
+        FTech { name: "Portal harmonics", tip: "Learns the hum that comes before a portal opens.", cost: 40 },
+        FTech { name: "Warband psychology", tip: "Their chiefs hold them together; snipers know who to hit.", cost: 80 },
+        FTech { name: "Blood-rage suppressant", tip: "Gas that takes the edge off their fury.", cost: 130 },
+        FTech { name: "Rift stabilisers", tip: "Keeps portals small while they're open.", cost: 200 },
+        FTech { name: "Seal the rift", tip: "Closes their dimension's door for good. Every orc on Earth is cut off and falls.", cost: 320 },
+    ],
+];
 
 /// A small fixed generator so a campaign's world is the same everywhere it is loaded.
 fn hash(seed: u64, k: u64) -> f32 {
@@ -348,10 +438,16 @@ fn hash(seed: u64, k: u64) -> f32 {
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
-/// New York, then cities from the pool in a seeded order, skipping any too close to one already in.
-pub fn pick_cities(seed: u64) -> Vec<usize> {
+/// The pool in this campaign's own seeded order (New York left out): where its cities come from.
+fn pool_order(seed: u64) -> Vec<usize> {
     let mut order: Vec<usize> = (1..POOL.len()).collect();
     order.sort_by(|a, b| hash(seed, 500 + *a as u64).total_cmp(&hash(seed, 500 + *b as u64)));
+    order
+}
+
+/// New York, then cities from the pool in a seeded order, skipping any too close to one already in.
+pub fn pick_cities(seed: u64) -> Vec<usize> {
+    let order = pool_order(seed);
     let mut picks = vec![0];
     for &i in &order {
         if picks.len() < CAMPAIGN_CITIES && picks.iter().all(|&p| POOL[p].km_to(&POOL[i]) >= SPREAD_KM) {
@@ -374,24 +470,44 @@ pub fn pick_cities(seed: u64) -> Vec<usize> {
 pub struct Crew {
     pub points: u32,
     pub tech: Vec<Tech>,
+    /// money for the garage, paid for every city held
+    pub money: u32,
 }
-static NO_CREW: Crew = Crew { points: 0, tech: Vec::new() };
+static NO_CREW: Crew = Crew { points: 0, tech: Vec::new(), money: 0 };
 
 /// Players a campaign keeps a crew for (co-op's limit).
 pub const CREWS: usize = 4;
 
+/// News for the campaign screen's bulletin.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Bulletin {
+    /// a new army has reached Earth
+    Arrived(usize),
+    /// research wiped an army out
+    Wiped(usize),
+}
+impl Bulletin {
+    pub fn bit(self) -> u8 {
+        match self {
+            Bulletin::Arrived(a) => 1 << a,
+            Bulletin::Wiped(a) => 8 << a,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Campaign {
+    /// the army the campaign is about: always the zombies
     pub fac: usize,
     pub diff: usize,
-    /// picks the cities' days and speeds
+    /// picks the cities' numbers, when the other armies arrive and where they go
     pub seed: u64,
-    /// this campaign's cities, indices into `POOL`; New York first
+    /// this campaign's cities, indices into `POOL`; New York first, cities added as others fall
     pub picks: Vec<usize>,
     pub cities: Vec<CityState>,
     /// the city picked to defend next
     pub current: usize,
-    /// cities fought in so far, held or lost
+    /// cities fought in so far, held or lost: the campaign's turns
     pub fought: u32,
     pub lost: u32,
     /// each player's research points and tech tree unlocks, host first
@@ -400,39 +516,80 @@ pub struct Campaign {
     pub units: Vec<(U, u32)>,
     pub flown: u32,
     pub kills: u64,
+    /// the alien swarms flying from city to city
+    pub aliens: Vec<Swarm>,
+    /// kills of each army, which pay for research into it
+    pub fkills: [u64; 3],
+    /// points spent on each army's research, and the steps bought
+    pub fspent: [u32; 3],
+    pub ftier: [u32; 3],
+    /// bulletins already shown (see `Bulletin::bit`)
+    pub told: u8,
 }
 
 impl Campaign {
-    pub fn new(fac: usize, diff: usize) -> Campaign {
+    pub fn new(diff: usize) -> Campaign {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1);
-        Campaign::with_seed(fac, diff, seed)
+        Campaign::with_seed(diff, seed)
     }
-    pub fn with_seed(fac: usize, diff: usize, seed: u64) -> Campaign {
-        Campaign::with_picks(fac, diff, seed, pick_cities(seed))
+    pub fn with_seed(diff: usize, seed: u64) -> Campaign {
+        Campaign::with_picks(diff, seed, pick_cities(seed))
     }
-    fn with_picks(fac: usize, diff: usize, seed: u64, picks: Vec<usize>) -> Campaign {
+    fn with_picks(diff: usize, seed: u64, picks: Vec<usize>) -> Campaign {
         let cities = (0..picks.len())
             .map(|i| {
-                // New York is where it starts: the horde is already in the streets
-                let days = if i == 0 { 40.0 } else { 30.0 + 90.0 * hash(seed, i as u64) };
-                CityState { days, start: days, rate: 0.7 + 0.8 * hash(seed, 100 + i as u64), fate: Fate::Open }
+                let mut s = CityState::fresh(seed, i);
+                if i == 0 {
+                    // New York is where it starts: a middling city, not about to fall
+                    s.turns = 4;
+                    s.start = 4;
+                    s.heat = 1.3;
+                    s.civ = 1.0;
+                }
+                s
             })
             .collect();
-        Campaign { fac, diff, seed, picks, cities, current: 0, fought: 0, lost: 0, crew: vec![Crew::default()], units: Vec::new(), flown: 0, kills: 0 }
+        Campaign {
+            fac: ZOMBIES,
+            diff,
+            seed,
+            picks,
+            cities,
+            current: 0,
+            fought: 0,
+            lost: 0,
+            crew: vec![Crew::default()],
+            units: Vec::new(),
+            flown: 0,
+            kills: 0,
+            aliens: Vec::new(),
+            fkills: [0; 3],
+            fspent: [0; 3],
+            ftier: [0; 3],
+            told: 0,
+        }
     }
-    /// Fired after three lost cities.
+    /// Fired after three failed defences.
     pub fn fired(&self) -> bool {
         self.lost >= MAX_LOST
     }
     pub fn open(&self, i: usize) -> bool {
         self.cities.get(i).is_some_and(|c| c.fate == Fate::Open)
     }
-    /// Over: fired, or no city left standing to defend.
+    /// All three armies wiped out by research.
+    pub fn saved_world(&self) -> bool {
+        (0..3).all(|a| self.wiped(a))
+    }
+    /// Over: fired, the world saved, or no city left standing to defend.
     pub fn finished(&self) -> bool {
-        self.fired() || !(0..self.cities.len()).any(|i| self.open(i))
+        self.fired() || self.saved_world() || !(0..self.cities.len()).any(|i| self.open(i))
     }
     pub fn held(&self) -> usize {
         self.cities.iter().filter(|c| c.fate == Fate::Held).count()
+    }
+    /// Cities the hordes have taken, fought for or not.
+    pub fn fallen(&self) -> usize {
+        self.cities.iter().filter(|c| matches!(c.fate, Fate::Fallen | Fate::Lost)).count()
     }
     /// The campaign's city `i`.
     pub fn info(&self, i: usize) -> &'static City {
@@ -452,39 +609,114 @@ impl Campaign {
     pub fn alive(&self, i: usize) -> f32 {
         self.info(i).pop * self.cities[i].share()
     }
-    /// How much bigger the horde is in city `i` than on the chosen difficulty. Two things count: how
-    /// close the city is to falling (×0.7 for a quiet one to ×2.3 for one about to go) and how far
-    /// the campaign has come. The first city is fought at a little over half strength and every
-    /// city held makes the ones after it 14% harder; lost cities don't.
-    pub fn horde_mult_at(&self, i: usize) -> f32 {
-        let t = self.cities[i].threat();
-        (0.7 + 1.6 * t.powf(1.2)) * self.progress()
+
+    // ---- the other armies
+
+    /// The turn (cities fought) each army reaches Earth: zombies from the start, the aliens and
+    /// orcs some time in the first six turns, in a seeded order.
+    pub fn arrives(&self, a: usize) -> u32 {
+        let first = 2 + (hash(self.seed, 41) * 3.0) as u32;
+        let second = (first + 1 + (hash(self.seed, 42) * 2.0) as u32).min(6);
+        let aliens_first = hash(self.seed, 43) < 0.5;
+        match a {
+            ALIENS if aliens_first => first,
+            ORCS if !aliens_first => first,
+            ALIENS | ORCS => second,
+            _ => 0,
+        }
     }
-    /// The campaign's part of the horde's size: ×0.55 at the start, ×1 after four or five cities
-    /// held, ×2 after ten.
+    pub fn arrived(&self, a: usize) -> bool {
+        self.fought >= self.arrives(a)
+    }
+    pub fn wiped(&self, a: usize) -> bool {
+        self.ftier[a.min(2)] as usize >= FTIERS
+    }
+    /// The army is on Earth and not wiped out yet.
+    pub fn present(&self, a: usize) -> bool {
+        self.arrived(a) && !self.wiped(a)
+    }
+    /// Swarm indices attacking city `i`.
+    pub fn swarms_at(&self, i: usize) -> impl Iterator<Item = usize> + '_ {
+        (0..self.aliens.len()).filter(move |&k| self.aliens[k].city == i)
+    }
+    /// Who is attacking city `i`: aliens if a swarm is there, orcs if their portals are, zombies otherwise.
+    pub fn army_at(&self, i: usize) -> usize {
+        if self.swarms_at(i).next().is_some() {
+            ALIENS
+        } else if self.cities.get(i).is_some_and(|c| c.orcs) && self.present(ORCS) {
+            ORCS
+        } else {
+            ZOMBIES
+        }
+    }
+    /// The battle's army in the city picked.
+    pub fn army(&self) -> usize {
+        self.army_at(self.current)
+    }
+
+    // ---- difficulty
+
+    /// How much bigger the horde is in city `i` than on the chosen difficulty: the city's own
+    /// heat, how far the campaign has come, how many cities have fallen, a swarm's strength and
+    /// what research has taken off its army.
+    pub fn horde_mult_at(&self, i: usize) -> f32 {
+        let a = self.army_at(i);
+        let swarm = self.swarms_at(i).map(|k| self.aliens[k].power).fold(1.0f32, f32::max);
+        self.cities[i].heat * self.progress() * self.doom() * swarm * self.size_mult(a)
+    }
+    /// The campaign's part of the horde's size: ×0.55 at the start, 10% more for every city held.
     pub fn progress(&self) -> f32 {
-        0.55 * 1.14f32.powi(self.held() as i32)
+        0.55 * 1.10f32.powi(self.held() as i32)
+    }
+    /// ×1.08 for every city lost or fallen.
+    pub fn doom(&self) -> f32 {
+        DOOM.powi(self.fallen() as i32)
     }
     pub fn horde_mult(&self) -> f32 {
         self.horde_mult_at(self.current)
+    }
+    /// The difficulty of city `i` as a whole number (×0.25 of horde each): what the city list
+    /// shows, and how many of its army roam around it on the globe.
+    pub fn level(&self, i: usize) -> u32 {
+        ((self.horde_mult_at(i) * crate::app::DIFFS[self.diff.min(3)].1 * 4.0).round() as u32).max(1)
+    }
+    /// Money paid to every player for holding city `i`: the harder the city, the more.
+    pub fn city_pay(&self, i: usize) -> u32 {
+        150 * self.level(i)
+    }
+    /// Research steps bought against army `a` that weaken it (the last one wipes it out instead).
+    fn steps(&self, a: usize) -> u32 {
+        self.ftier[a.min(2)].min(FTIERS as u32 - 1)
+    }
+    /// Its hordes' size after research.
+    pub fn size_mult(&self, a: usize) -> f32 {
+        1.0 - F_SIZE * self.steps(a) as f32
+    }
+    /// Its units' health and attack after research.
+    pub fn potency(&self, a: usize) -> f32 {
+        1.0 - F_STATS * self.steps(a) as f32
     }
     /// Seconds to hold out before the evac: 7 minutes, 20 s more per city fought, at most 11.
     pub fn hold_secs(&self) -> f32 {
         (7.0 * 60.0 + 20.0 * self.fought as f32).min(11.0 * 60.0)
     }
-    /// Civilians on the map in city `i`: one for every ~1,700 people still alive there.
+    /// Civilians on the map in city `i`: about one for every ~1,700 people still alive there, more
+    /// or fewer depending on the city.
     pub fn civilians_at(&self, i: usize) -> usize {
-        (self.alive(i) * 600.0).clamp(1500.0, 18000.0) as usize
+        (self.alive(i) * 600.0 * self.cities[i].civ).clamp(1200.0, 20000.0) as usize
     }
     /// The open city closest to falling.
     pub fn most_urgent(&self) -> Option<usize> {
-        (0..self.cities.len()).filter(|i| self.open(*i)).min_by(|a, b| self.cities[*a].days.total_cmp(&self.cities[*b].days))
+        (0..self.cities.len()).filter(|i| self.open(*i)).min_by_key(|i| self.cities[*i].turns)
     }
     pub fn select(&mut self, i: usize) {
         if self.open(i) {
             self.current = i;
         }
     }
+
+    // ---- research
+
     /// Player `p`'s research points and unlocks.
     pub fn crew(&self, p: usize) -> &Crew {
         self.crew.get(p).unwrap_or(&NO_CREW)
@@ -519,6 +751,61 @@ impl Campaign {
         c.tech.push(t);
         true
     }
+    /// Points for research into army `a`, from its kills.
+    pub fn fpoints(&self, a: usize) -> u32 {
+        ((self.fkills[a] / KILLS_PER_POINT[a]) as u32).saturating_sub(self.fspent[a])
+    }
+    /// The next step of research into army `a`, if any are left.
+    pub fn fnext(&self, a: usize) -> Option<&'static FTech> {
+        FTECH[a].get(self.ftier[a] as usize)
+    }
+    /// Why army `a`'s next step can't be bought yet, if it can't (points aside).
+    pub fn fblock(&self, a: usize) -> Option<&'static str> {
+        if !self.arrived(a) {
+            Some("Not on Earth yet")
+        } else if self.wiped(a) {
+            Some("Wiped out")
+        } else if a == ZOMBIES && self.ftier[a] as usize == FTIERS - 1 && !(self.wiped(ALIENS) && self.wiped(ORCS)) {
+            Some("Needs the aliens and orcs gone first")
+        } else {
+            None
+        }
+    }
+    pub fn can_fbuy(&self, a: usize) -> bool {
+        self.fblock(a).is_none() && self.fnext(a).is_some_and(|t| self.fpoints(a) >= t.cost)
+    }
+    /// Buys the next step against army `a` (shared by everybody in co-op). The last one wipes it out.
+    pub fn fbuy(&mut self, a: usize) -> bool {
+        if !self.can_fbuy(a) {
+            return false;
+        }
+        self.fspent[a] += self.fnext(a).map(|t| t.cost).unwrap_or(0);
+        self.ftier[a] += 1;
+        if self.wiped(a) {
+            match a {
+                ALIENS => self.aliens.clear(),
+                ORCS => self.cities.iter_mut().for_each(|c| c.orcs = false),
+                _ => {}
+            }
+        }
+        true
+    }
+    /// The next bulletin the campaign screen should show, if any, leaving out those in `seen`
+    /// as well as those already told.
+    pub fn bulletin(&self, seen: u8) -> Option<Bulletin> {
+        let all = [Bulletin::Arrived(ALIENS), Bulletin::Arrived(ORCS), Bulletin::Wiped(ALIENS), Bulletin::Wiped(ORCS), Bulletin::Wiped(ZOMBIES)];
+        all.into_iter().find(|b| {
+            (self.told | seen) & b.bit() == 0
+                && match *b {
+                    Bulletin::Arrived(a) => self.arrived(a) && self.fought > 0,
+                    Bulletin::Wiped(a) => self.wiped(a),
+                }
+        })
+    }
+    pub fn tell(&mut self, b: Bulletin) {
+        self.told |= b.bit();
+    }
+
     /// What player `p`'s tech tree lets them build, recruit and use in a city.
     pub fn allowed(&self, p: usize) -> Allowed {
         let mut a = Allowed { builds: START_BUILDS.to_vec(), units: vec![U::Rifle], abilities: Vec::new() };
@@ -554,7 +841,7 @@ impl Campaign {
         true
     }
     /// (squads, soldiers) of one kind of troops.
-    pub fn army(&self, u: U) -> (usize, u32) {
+    pub fn army_size(&self, u: U) -> (usize, u32) {
         let v: Vec<u32> = self.units.iter().filter(|x| x.0 == u).map(|x| x.1).collect();
         (v.len(), v.iter().sum())
     }
@@ -564,6 +851,7 @@ impl Campaign {
     pub fn apply(&self, g: &mut Game) {
         g.campaign = true;
         g.goal = self.hold_secs();
+        g.potency = self.potency(g.fac.min(2));
         g.set_civilians(self.civilians_at(self.current));
         // every player gets their own unlocks and upgrades
         for o in 0..g.perks.len() {
@@ -601,20 +889,27 @@ impl Campaign {
         }
     }
 
-    /// After a city: held, bank the civilians; lost, nothing. Survivors march on either way, the
-    /// world moves on `DAYS_PER_CITY` days, and the most urgent city is picked next.
+    /// After a city, one turn of the war. Held: each player banks the civilians they flew out and
+    /// the city's pay; lost: nothing. Survivors march on either way. Then every other city loses a
+    /// turn (two under an alien attack) and grows harder, cities that run out fall and new ones
+    /// join, the aliens fly on and the orcs spread, the other armies may arrive, and the most
+    /// urgent city is picked next.
     pub fn harvest(&mut self, g: &Game) {
         let cur = self.current;
+        self.fkills[g.fac.min(2)] += g.kills;
         if g.won {
+            let pay = self.city_pay(cur);
             // each player's research points are the civilians flown out from their own evac points
             for (o, k) in g.perks.iter().enumerate() {
-                self.crew_mut(o).points += k.flown;
+                let c = self.crew_mut(o);
+                c.points += k.flown;
+                c.money += pay;
             }
             self.flown += g.extracted;
             self.cities[cur].fate = Fate::Held;
         } else {
             self.cities[cur].fate = Fate::Lost;
-            self.cities[cur].days = 0.0;
+            self.cities[cur].turns = 0;
             self.lost += 1;
         }
         self.kills += g.kills;
@@ -626,16 +921,154 @@ impl Campaign {
             .filter(|x| x.1 > 0)
             .collect();
         self.fought += 1;
-        for c in self.cities.iter_mut().filter(|c| c.fate == Fate::Open) {
-            c.days -= DAYS_PER_CITY * c.rate;
-            if c.days <= 0.0 {
-                c.days = 0.0;
+        self.advance(cur, g.won);
+    }
+
+    /// Plays `n` turns without the battles, holding three cities in four: for tests and the
+    /// screenshot hooks.
+    pub fn play_turns(&mut self, n: u32) {
+        for k in 0..n {
+            if self.finished() {
+                return;
+            }
+            let cur = self.current;
+            let held = k % 4 != 3;
+            if held {
+                self.cities[cur].fate = Fate::Held;
+            } else {
+                self.cities[cur].fate = Fate::Lost;
+                self.cities[cur].turns = 0;
+                self.lost += 1;
+            }
+            self.fought += 1;
+            self.advance(cur, held);
+        }
+    }
+
+    /// The world's turn after fighting in city `cur` (held or not).
+    fn advance(&mut self, cur: usize, held: bool) {
+        let turn = self.fought;
+        let mut fell = Vec::new();
+        if !held {
+            fell.push(cur);
+        }
+        for i in 0..self.cities.len() {
+            if !self.open(i) {
+                continue;
+            }
+            let bite = if self.swarms_at(i).next().is_some() { ALIEN_BITE } else { 1 };
+            let c = &mut self.cities[i];
+            c.turns = c.turns.saturating_sub(bite);
+            c.heat += c.ramp;
+            if c.turns == 0 {
                 c.fate = Fate::Fallen;
+                fell.push(i);
+            }
+        }
+        // swarms nobody fought grow
+        for s in self.aliens.iter_mut().filter(|s| s.city != cur) {
+            s.power += ALIEN_GROWTH;
+        }
+        // the city fought: the aliens there fly on if it was held (minor swarms die), and so does
+        // any swarm whose city fell
+        self.aliens_leave(cur, held, turn);
+        for &i in fell.iter().filter(|i| **i != cur) {
+            self.aliens_leave(i, false, turn);
+        }
+        for _ in &fell {
+            self.add_city();
+        }
+        // orcs open portals somewhere new now and then, and always somewhere
+        let orc_city = (0..self.cities.len()).any(|i| self.open(i) && self.cities[i].orcs);
+        if self.present(ORCS) && turn > self.arrives(ORCS) && (!orc_city || hash(self.seed, 7000 + turn as u64) < ORC_SPREAD) {
+            self.orcs_to(1, 7100 + turn as u64);
+        }
+        // the other armies arrive
+        if turn == self.arrives(ORCS) && self.present(ORCS) {
+            self.orcs_to(2, 7200);
+        }
+        if turn == self.arrives(ALIENS) && self.present(ALIENS) {
+            if let Some(i) = self.pick_open(7300, None) {
+                self.aliens.push(Swarm { city: i, from: None, power: 1.0, major: true, moved: turn });
             }
         }
         if let Some(i) = self.most_urgent() {
             self.current = i;
         }
+    }
+
+    /// Orc portals open in `n` more cities that have none (and no aliens).
+    fn orcs_to(&mut self, n: usize, k: u64) {
+        for j in 0..n as u64 {
+            let free: Vec<usize> = (0..self.cities.len()).filter(|&i| self.open(i) && !self.cities[i].orcs && self.swarms_at(i).next().is_none()).collect();
+            if free.is_empty() {
+                return;
+            }
+            let i = free[((hash(self.seed, k + j) * free.len() as f32) as usize).min(free.len() - 1)];
+            self.cities[i].orcs = true;
+        }
+    }
+
+    /// An open city with no swarm in it, picked by the seed; with `near`, one of the three closest to it.
+    fn pick_open(&self, k: u64, near: Option<usize>) -> Option<usize> {
+        let mut free: Vec<usize> = (0..self.cities.len()).filter(|&i| self.open(i) && self.swarms_at(i).next().is_none()).collect();
+        if let Some(n) = near {
+            let from = self.info(n);
+            free.sort_by(|a, b| from.km_to(self.info(*a)).total_cmp(&from.km_to(self.info(*b))));
+            free.truncate(3);
+        }
+        if free.is_empty() {
+            return None;
+        }
+        Some(free[((hash(self.seed, k) * free.len() as f32) as usize).min(free.len() - 1)])
+    }
+
+    /// The swarms in city `i` after a turn: held, the major one flies to a city nearby and minor
+    /// ones die; taken, every swarm flies on and the major one leaves a minor swarm behind to roam.
+    fn aliens_leave(&mut self, i: usize, held: bool, turn: u32) {
+        let here: Vec<usize> = self.swarms_at(i).collect();
+        let mut spawn = false;
+        let mut gone = Vec::new();
+        for (n, &k) in here.iter().enumerate() {
+            let major = self.aliens[k].major;
+            if held && !major {
+                gone.push(k);
+                continue;
+            }
+            spawn |= !held && major;
+            match self.pick_open(7400 + turn as u64 * 16 + n as u64, Some(i)) {
+                Some(to) => {
+                    let s = &mut self.aliens[k];
+                    s.from = Some(i);
+                    s.city = to;
+                    s.moved = turn;
+                }
+                None => gone.push(k),
+            }
+        }
+        gone.sort_unstable();
+        for k in gone.into_iter().rev() {
+            self.aliens.remove(k);
+        }
+        let minors = self.aliens.iter().filter(|s| !s.major).count();
+        if spawn && minors < MAX_MINOR {
+            if let Some(to) = self.pick_open(7600 + turn as u64, Some(i)) {
+                self.aliens.push(Swarm { city: to, from: Some(i), power: 0.8, major: false, moved: turn });
+            }
+        }
+    }
+
+    /// Another city from the pool joins the war (if any are left), as far from the others as it can be.
+    fn add_city(&mut self) {
+        let order = pool_order(self.seed);
+        let spare: Vec<usize> = order.into_iter().filter(|i| !self.picks.contains(i)).collect();
+        let far = |i: &usize| self.picks.iter().all(|&p| POOL[p].km_to(&POOL[*i]) >= SPREAD_KM / 2.0);
+        let Some(&next) = spare.iter().find(|i| far(i)).or(spare.first()) else { return };
+        let slot = self.cities.len();
+        let mut s = CityState::fresh(self.seed, slot);
+        s.orcs = self.present(ORCS) && hash(self.seed, 7700 + slot as u64) < ORC_NEW_CITY;
+        self.picks.push(next);
+        self.cities.push(s);
     }
 }
 
@@ -645,56 +1078,69 @@ fn save_path() -> PathBuf {
     data_dir().join("campaign.txt")
 }
 
+/// The save format: campaigns from before turns (version 1, with days) start over.
+const VERSION: u64 = 2;
+
 pub fn load() -> Option<Campaign> {
     let t = std::fs::read_to_string(save_path()).ok()?;
-    // saves from before the globe (one fixed city order) start over
-    t.contains("cities=").then(|| from_text(&t))
+    t.lines().any(|l| l.trim() == format!("version={}", VERSION)).then(|| from_text(&t))
 }
 
 pub fn save(c: &Campaign) {
     let _ = std::fs::write(save_path(), to_text(c));
 }
 
+/// Throws the saved campaign away.
+pub fn clear() {
+    let _ = std::fs::remove_file(save_path());
+}
+
 pub fn from_text(t: &str) -> Campaign {
     let field = |k: &str| t.lines().find_map(|l| l.split_once('=').filter(|(a, _)| a.trim() == k).map(|(_, v)| v.trim().to_string()));
     let num = |k: &str| field(k).and_then(|v| v.parse::<u64>().ok());
-    // saves from before the city pool had the first eleven cities
+    let three = |k: &str| -> [u64; 3] {
+        let v: Vec<u64> = field(k).unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        [0, 1, 2].map(|i| v.get(i).copied().unwrap_or(0))
+    };
     let picks: Vec<usize> = match field("picks") {
         Some(v) => v.split(',').filter_map(|x| x.trim().parse::<usize>().ok()).filter(|i| *i < POOL.len()).collect(),
         None => (0..CAMPAIGN_CITIES).collect(),
     };
     let picks = if picks.is_empty() { vec![0] } else { picks };
-    let mut c = Campaign::with_picks(
-        num("faction").unwrap_or(0).min(FACTIONS.len() as u64 - 1) as usize,
-        num("difficulty").unwrap_or(1).min(3) as usize,
-        num("seed").unwrap_or(1),
-        picks,
-    );
-    c.current = num("current").unwrap_or(0).min(c.cities.len() as u64 - 1) as usize;
+    let mut c = Campaign::with_picks(num("difficulty").unwrap_or(1).min(3) as usize, num("seed").unwrap_or(1), picks);
     c.fought = num("fought").unwrap_or(0) as u32;
     c.lost = num("lost").unwrap_or(0) as u32;
-    // the host's crew, then any co-op players' (points1=, tech1=, ...)
+    // the host's crew, then any co-op players' (points1=, tech1=, money1=, ...)
     for p in 0..CREWS {
         let k = |name: &str| if p == 0 { name.to_string() } else { format!("{}{}", name, p) };
         let (pts, tech) = (num(&k("points")), field(&k("tech")));
         if p > 0 && pts.is_none() && tech.is_none() {
             continue;
         }
+        let money = num(&k("money"));
         let cr = c.crew_mut(p);
         cr.points = pts.unwrap_or(0) as u32;
+        cr.money = money.unwrap_or(0) as u32;
         if let Some(v) = tech {
             cr.tech = v.split(',').filter_map(|x| x.trim().parse::<usize>().ok()).filter_map(|i| TECH.get(i).copied()).collect();
         }
     }
     c.flown = num("flown").unwrap_or(0) as u32;
     c.kills = num("kills").unwrap_or(0);
+    c.fkills = three("fkills");
+    c.fspent = three("fspent").map(|x| x as u32);
+    c.ftier = three("ftier").map(|x| (x as u32).min(FTIERS as u32));
+    c.told = num("told").unwrap_or(0) as u8;
     if let Some(v) = field("cities") {
         for (s, x) in c.cities.iter_mut().zip(v.split(',')) {
             let p: Vec<&str> = x.split(':').collect();
-            if let [d, st, r, f] = p[..] {
-                s.days = d.parse().unwrap_or(s.days);
+            if let [tu, st, he, ra, cv, o, f] = p[..] {
+                s.turns = tu.parse().unwrap_or(s.turns);
                 s.start = st.parse().unwrap_or(s.start);
-                s.rate = r.parse().unwrap_or(s.rate);
+                s.heat = he.parse().unwrap_or(s.heat);
+                s.ramp = ra.parse().unwrap_or(s.ramp);
+                s.civ = cv.parse().unwrap_or(s.civ);
+                s.orcs = o == "1";
                 s.fate = match f {
                     "h" => Fate::Held,
                     "l" => Fate::Lost,
@@ -703,6 +1149,19 @@ pub fn from_text(t: &str) -> Campaign {
                 };
             }
         }
+    }
+    c.current = num("current").unwrap_or(0).min(c.cities.len() as u64 - 1) as usize;
+    if let Some(v) = field("aliens") {
+        c.aliens = v
+            .split(',')
+            .filter_map(|x| {
+                let p: Vec<&str> = x.trim().split(':').collect();
+                let [city, from, power, major, moved] = p[..] else { return None };
+                let city: usize = city.parse().ok()?;
+                (city < c.cities.len()).then_some(())?;
+                Some(Swarm { city, from: from.parse().ok().filter(|f: &usize| *f < c.cities.len()), power: power.parse().ok()?, major: major == "1", moved: moved.parse().ok()? })
+            })
+            .collect();
     }
     if let Some(v) = field("units") {
         c.units = v
@@ -724,41 +1183,46 @@ pub fn from_text(t: &str) -> Campaign {
 /// The whole campaign as text: the save file, and what the co-op host sends its guests. Floats are
 /// written exactly, so both sides build the same game.
 pub fn to_text(c: &Campaign) -> String {
-    let picks: Vec<String> = c.picks.iter().map(|i| i.to_string()).collect();
+    let join = |v: &mut dyn Iterator<Item = String>| v.collect::<Vec<_>>().join(",");
+    let picks = join(&mut c.picks.iter().map(|i| i.to_string()));
     let tech_of = |cr: &Crew| -> String { cr.tech.iter().filter_map(|t| TECH.iter().position(|x| x == t)).map(|i| i.to_string()).collect::<Vec<_>>().join(",") };
     let mut others = String::new();
     for (p, cr) in c.crew.iter().enumerate().skip(1) {
-        others += &format!("points{}={}\ntech{}={}\n", p, cr.points, p, tech_of(cr));
+        others += &format!("points{}={}\ntech{}={}\nmoney{}={}\n", p, cr.points, p, tech_of(cr), p, cr.money);
     }
-    let units: Vec<String> = c.units.iter().map(|(u, n)| format!("{}{}", if *u == U::Rifle { 'r' } else { 't' }, n)).collect();
-    let cities: Vec<String> = c
-        .cities
-        .iter()
-        .map(|s| {
-            let f = match s.fate {
-                Fate::Open => "o",
-                Fate::Held => "h",
-                Fate::Lost => "l",
-                Fate::Fallen => "f",
-            };
-            format!("{:?}:{:?}:{:?}:{}", s.days, s.start, s.rate, f)
-        })
-        .collect();
+    let units = join(&mut c.units.iter().map(|(u, n)| format!("{}{}", if *u == U::Rifle { 'r' } else { 't' }, n)));
+    let cities = join(&mut c.cities.iter().map(|s| {
+        let f = match s.fate {
+            Fate::Open => "o",
+            Fate::Held => "h",
+            Fate::Lost => "l",
+            Fate::Fallen => "f",
+        };
+        format!("{}:{}:{:?}:{:?}:{:?}:{}:{}", s.turns, s.start, s.heat, s.ramp, s.civ, s.orcs as u8, f)
+    }));
+    let aliens = join(&mut c.aliens.iter().map(|s| format!("{}:{}:{:?}:{}:{}", s.city, s.from.map(|f| f as i64).unwrap_or(-1), s.power, s.major as u8, s.moved)));
+    let three = |v: [u64; 3]| format!("{},{},{}", v[0], v[1], v[2]);
     format!(
-        "faction={}\ndifficulty={}\nseed={}\npicks={}\ncurrent={}\nfought={}\nlost={}\npoints={}\nflown={}\nkills={}\ncities={}\ntech={}\nunits={}\n{}",
-        c.fac,
+        "version={}\ndifficulty={}\nseed={}\npicks={}\ncurrent={}\nfought={}\nlost={}\npoints={}\nmoney={}\nflown={}\nkills={}\ncities={}\naliens={}\nfkills={}\nfspent={}\nftier={}\ntold={}\ntech={}\nunits={}\n{}",
+        VERSION,
         c.diff,
         c.seed,
-        picks.join(","),
+        picks,
         c.current,
         c.fought,
         c.lost,
         c.crew(0).points,
+        c.crew(0).money,
         c.flown,
         c.kills,
-        cities.join(","),
+        cities,
+        aliens,
+        three(c.fkills),
+        three(c.fspent.map(|x| x as u64)),
+        three(c.ftier.map(|x| x as u64)),
+        c.told,
         tech_of(c.crew(0)),
-        units.join(","),
+        units,
         others
     )
 }
@@ -962,7 +1426,7 @@ mod tests {
     use super::*;
 
     fn veteran() -> Campaign {
-        let mut c = Campaign::with_seed(2, 1, 77);
+        let mut c = Campaign::with_seed(1, 77);
         c.fought = 3;
         c.current = 4;
         c.crew_mut(0).tech = vec![Tech::Research(R::Armour), Tech::Build(S::Gun), Tech::Research(R::Barrels), Tech::Ability(A::Rescue), Tech::Research(R::Rescue), Tech::Up(Up::GunAp)];
@@ -1010,7 +1474,7 @@ mod tests {
     /// A lost city pays nothing, and the third one ends the campaign.
     #[test]
     fn fired_after_three() {
-        let mut c = Campaign::with_seed(0, 1, 5);
+        let mut c = Campaign::with_seed(1, 5);
         let mut g = Game::new(crate::citygen::generate(4), 0, 1.0, 5);
         g.extracted = 500;
         g.perks[0].flown = 500;
@@ -1023,31 +1487,144 @@ mod tests {
         assert!(c.fired() && c.finished());
     }
 
-    /// Cities run out of time while you're elsewhere, and a city near its end is harder.
+    /// Cities run out of turns while you're elsewhere; fallen ones make the rest harder and new
+    /// cities join; you can't save them all.
     #[test]
     fn world_moves_on() {
-        let mut c = Campaign::with_seed(0, 1, 9);
+        let mut c = Campaign::with_seed(1, 9);
         let g = {
             let mut g = Game::new(crate::citygen::generate(4), 0, 1.0, 5);
             g.won = true;
             g
         };
-        let d0 = c.cities[3].days;
+        let other = (1..c.cities.len()).find(|i| *i != c.current).unwrap();
+        let (t0, h0, m0) = (c.cities[other].turns, c.cities[other].heat, c.horde_mult_at(other));
         c.harvest(&g);
-        assert!(c.cities[3].days < d0);
-        assert!(c.alive(3) < c.info(3).pop);
-        for _ in 0..30 {
+        assert_eq!(c.cities[other].turns, t0 - 1);
+        assert!(c.cities[other].heat > h0 && c.horde_mult_at(other) > m0);
+        assert!(c.crew(0).money > 0, "a held city pays");
+        let mut held = 0;
+        for _ in 0..40 {
             if c.finished() {
                 break;
             }
             c.harvest(&g);
+            held += 1;
         }
-        assert!(c.finished());
-        assert!(c.cities.iter().any(|s| s.fate == Fate::Fallen));
-        let mut a = Campaign::with_seed(0, 1, 9);
-        a.cities[2].days = 5.0;
-        a.cities[3].days = 80.0;
-        assert!(a.horde_mult_at(2) > 2.0 * a.horde_mult_at(3));
+        assert!(c.cities.iter().any(|s| s.fate == Fate::Fallen), "some fall while you're elsewhere");
+        assert!(c.cities.len() > CAMPAIGN_CITIES, "fallen cities are replaced");
+        assert!(c.doom() > 1.0);
+        assert_eq!(c.held(), held + 1);
+        // cities differ: turns, heat, ramp and civilians all vary
+        let c = Campaign::with_seed(1, 9);
+        for f in [|s: &CityState| s.turns as f32, |s: &CityState| s.heat, |s: &CityState| s.ramp, |s: &CityState| s.civ] {
+            let v: Vec<f32> = c.cities[1..].iter().map(f).collect();
+            let (lo, hi) = v.iter().fold((f32::MAX, f32::MIN), |(a, b), x| (a.min(*x), b.max(*x)));
+            assert!(hi > lo * 1.3, "{:?}", v);
+        }
+        // a harder city pays more
+        let (easy, hard) = (1..c.cities.len()).fold((1, 1), |(e, h), i| (if c.level(i) < c.level(e) { i } else { e }, if c.level(i) > c.level(h) { i } else { h }));
+        assert!(c.city_pay(hard) > c.city_pay(easy));
+    }
+
+    /// The aliens and the orcs both arrive by turn six, with a bulletin each, in every campaign.
+    #[test]
+    fn armies_arrive() {
+        for seed in 0..60 {
+            let mut c = Campaign::with_seed(1, seed);
+            assert!(!c.present(ALIENS) && !c.present(ORCS));
+            assert_eq!(c.bulletin(0), None);
+            let (a, o) = (c.arrives(ALIENS), c.arrives(ORCS));
+            assert!(a >= 2 && o >= 2 && a <= 6 && o <= 6 && a != o, "{} {}", a, o);
+            c.play_turns(6);
+            if c.finished() {
+                continue;
+            }
+            assert!(c.present(ALIENS) && c.present(ORCS));
+            assert!(!c.aliens.is_empty(), "seed {}", seed);
+            assert!((0..c.cities.len()).any(|i| c.open(i) && c.army_at(i) == ORCS), "seed {}", seed);
+            let b = c.bulletin(0).unwrap();
+            c.tell(b);
+            let b2 = c.bulletin(0).unwrap();
+            assert_ne!(b, b2);
+            assert_eq!(c.bulletin(b2.bit()), None);
+        }
+    }
+
+    /// The alien swarm attacks one city, eats it twice as fast, grows when left alone, flies on
+    /// when the city is held and leaves a minor swarm behind when it takes one.
+    #[test]
+    fn aliens_fly_on() {
+        let mut c = Campaign::with_seed(1, 3);
+        c.play_turns(c.arrives(ALIENS));
+        let k = c.aliens.iter().position(|s| s.major).unwrap();
+        let at = c.aliens[k].city;
+        assert_eq!(c.army_at(at), ALIENS);
+        // left alone a turn: two turns gone, stronger
+        let elsewhere = (0..c.cities.len()).find(|i| c.open(*i) && *i != at && c.swarms_at(*i).next().is_none()).unwrap();
+        c.select(elsewhere);
+        let (t0, p0) = (c.cities[at].turns, c.aliens[k].power);
+        let mut won = Game::new(crate::citygen::generate(4), 0, 1.0, 5);
+        won.won = true;
+        c.harvest(&won);
+        if c.open(at) {
+            assert_eq!(c.cities[at].turns, t0.saturating_sub(2));
+            assert!(c.aliens[k].power > p0);
+            // held: the major swarm flies on to another city, trailing from this one
+            c.select(at);
+            won.fac = ALIENS;
+            won.kills = 5000;
+            c.harvest(&won);
+            let s = c.aliens.iter().find(|s| s.major).unwrap();
+            assert_ne!(s.city, at);
+            assert_eq!((s.from, s.moved), (Some(at), c.fought));
+            assert_eq!(c.fkills[ALIENS], 5000);
+        }
+        // taken: it flies on and a minor swarm splits off
+        let mut c = Campaign::with_seed(1, 3);
+        c.play_turns(c.arrives(ALIENS));
+        let at = c.aliens[0].city;
+        c.select(at);
+        let lost = Game::new(crate::citygen::generate(4), 1, 1.0, 5);
+        c.harvest(&lost);
+        assert_eq!(c.cities[at].fate, Fate::Lost);
+        assert!(c.aliens.iter().any(|s| !s.major) && c.aliens.iter().all(|s| s.city != at));
+        // a minor swarm dies when its city is held
+        let m = c.aliens.iter().find(|s| !s.major).unwrap().city;
+        c.select(m);
+        c.harvest(&won);
+        assert!(c.aliens.iter().all(|s| s.major || s.city != m));
+    }
+
+    /// Kills buy research into an army; each step weakens it and the last wipes it out. The
+    /// zombies go last, and wiping them out saves the world.
+    #[test]
+    fn hunt_them_down() {
+        let mut c = Campaign::with_seed(1, 8);
+        c.fkills[ZOMBIES] = 10_000_000;
+        assert!(c.can_fbuy(ZOMBIES) && !c.can_fbuy(ALIENS), "the aliens aren't here yet");
+        let m0 = c.horde_mult_at(0);
+        assert!(c.fbuy(ZOMBIES));
+        assert!(c.potency(ZOMBIES) < 1.0 && c.horde_mult_at(0) < m0);
+        let mut g = Game::new(crate::citygen::generate(4), 0, 1.0, 5);
+        c.apply(&mut g);
+        assert!(g.stats().hp < FACTIONS[0].stats.hp);
+        while c.fbuy(ZOMBIES) {}
+        assert_eq!(c.ftier[ZOMBIES], FTIERS as u32 - 1);
+        assert_eq!(c.fblock(ZOMBIES), Some("Needs the aliens and orcs gone first"));
+        c.play_turns(7);
+        c.lost = 0;
+        c.fkills = [10_000_000; 3];
+        for a in [ALIENS, ORCS] {
+            while c.fbuy(a) {}
+            assert!(c.wiped(a));
+        }
+        assert!(c.aliens.is_empty() && (0..c.cities.len()).all(|i| c.army_at(i) == ZOMBIES));
+        assert!(!c.saved_world() && c.fbuy(ZOMBIES));
+        assert!(c.saved_world() && c.finished());
+        assert_eq!(c.bulletin(0), Some(Bulletin::Arrived(ALIENS)));
+        let d = from_text(&to_text(&c));
+        assert!(d.saved_world());
     }
 
     #[test]
@@ -1066,7 +1643,7 @@ mod tests {
     fn city_picks() {
         let mut seen = std::collections::HashSet::new();
         for seed in 0..40 {
-            let c = Campaign::with_seed(0, 1, seed);
+            let c = Campaign::with_seed(1, seed);
             assert_eq!(c.picks.len(), CAMPAIGN_CITIES);
             assert_eq!(c.picks[0], 0);
             let mut p = c.picks.clone();
@@ -1080,7 +1657,7 @@ mod tests {
         }
         assert!(seen.len() > 30);
         // an old save, from before the pool, keeps its eleven cities
-        let old = from_text("faction=0\nseed=3\ncities=40.0:40.0:1.0:o\n");
+        let old = from_text("seed=3\n");
         assert_eq!(old.picks, (0..CAMPAIGN_CITIES).collect::<Vec<_>>());
         assert!((POOL[0].km_to(&POOL[11]) - 5570.0).abs() < 60.0);
     }
@@ -1093,10 +1670,17 @@ mod tests {
         c.crew_mut(2).tech = vec![Tech::Build(S::Flame), Tech::Ability(A::Air)];
         c.kills = 1_234_567;
         c.lost = 2;
-        c.cities[6].fate = Fate::Fallen;
-        c.cities[2].days = 13.371_337;
+        c.crew_mut(2).money = 900;
+        c.play_turns(7);
+        c.cities[2].heat = 13.371_337;
+        c.fkills = [5, 6, 7];
+        c.fspent = [1, 0, 2];
+        c.ftier = [1, 0, 1];
+        c.told = 6;
+        assert!(!c.aliens.is_empty());
         let d = from_text(&to_text(&c));
-        assert_eq!((d.fac, d.diff, d.seed, d.current, d.fought, d.lost, d.points(0), d.kills), (2, 1, 77, 4, 3, 2, 321, 1_234_567));
+        assert_eq!((d.fac, d.diff, d.seed, d.current, d.fought, d.lost, d.points(0), d.kills), (0, 1, 77, c.current, c.fought, c.lost, 321, 1_234_567));
+        assert_eq!((d.aliens.clone(), d.fkills, d.fspent, d.ftier, d.told), (c.aliens.clone(), c.fkills, c.fspent, c.ftier, c.told));
         assert_eq!(d.cities, c.cities);
         assert_eq!(d.picks, c.picks);
         assert_eq!(d.crew, c.crew);
@@ -1106,8 +1690,8 @@ mod tests {
 
     #[test]
     fn shop() {
-        let mut c = Campaign::new(0, 1);
-        c.crew_mut(0).points = 300;
+        let mut c = Campaign::new(1);
+        c.crew_mut(0).points = 900;
         assert!(!c.buy(0, Tech::Up(Up::GunRapid)), "needs the gun turret first");
         assert!(c.buy(0, Tech::Build(S::Gun)));
         assert!(!c.buy(0, Tech::Build(S::Gun)));
@@ -1116,15 +1700,15 @@ mod tests {
         assert!(c.recruit(0, U::Rifle));
         assert!(!c.recruit(0, U::Tank));
         assert!(!c.buy(1, Tech::Build(S::Gun)), "the other player has no points of their own");
-        assert_eq!(c.points(0), 300 - Tech::Build(S::Gun).cost() - Tech::Up(Up::GunRapid).cost() - recruit_cost(U::Rifle));
-        assert_eq!(c.army(U::Rifle), (1, 6));
+        assert_eq!(c.points(0), 900 - Tech::Build(S::Gun).cost() - Tech::Up(Up::GunRapid).cost() - recruit_cost(U::Rifle));
+        assert_eq!(c.army_size(U::Rifle), (1, 6));
     }
 
     /// Co-op: each player gets their own unlocks and upgrades in the city, and earns research
     /// points from the civilians flown out of their own evac points.
     #[test]
     fn coop_crews() {
-        let mut c = Campaign::with_seed(0, 1, 21);
+        let mut c = Campaign::with_seed(1, 21);
         c.crew_mut(0).tech = vec![Tech::Build(S::Gun), Tech::Up(Up::GunAp), Tech::Research(R::Armour)];
         c.crew_mut(1).tech = vec![Tech::Build(S::Flame)];
         let mut g = Game::new(crate::citygen::generate(6), c.fac, c.horde_mult(), 77);

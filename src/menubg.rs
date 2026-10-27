@@ -21,7 +21,7 @@ const FAR: u16 = u16::MAX;
 const REACH: u16 = 140;
 
 /// (speed in cells/s, hit points, damage per second, how far it hunts in cells) per kind:
-/// civilians, zombies, alien bugs, orcs
+/// civilians, zombies, aliens, orcs
 const KINDS: [(f32, f32, f32, u16); 4] = [
     (5.0, 3.0, 0.0, 0),
     (4.4, 6.0, 3.5, 40),
