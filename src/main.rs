@@ -7,6 +7,7 @@ mod citygen;
 mod defs;
 mod fields;
 mod game;
+mod garage;
 mod globe;
 mod menubg;
 mod music;
@@ -90,6 +91,10 @@ async fn run(steam: Option<net::Steam>) {
             .unwrap_or(42);
         app.quick_start(fac, seed);
     }
+    // PH_GARAGE=1: the garage open (the campaign's with PH_HUB, the free builder with PH_MENU)
+    if std::env::var("PH_GARAGE").is_ok() {
+        app.open_garage_test();
+    }
     let ticks: u32 = std::env::var("PH_TICKS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -161,6 +166,9 @@ async fn run(steam: Option<net::Steam>) {
                 }
                 if std::env::var("PH_TOWERS").is_ok() {
                     selftest::towers(g);
+                }
+                if std::env::var("PH_CUSTOMS").is_ok() {
+                    selftest::customs(g);
                 }
                 if std::env::var("PH_UNITS").is_ok() {
                     selftest::units(g);

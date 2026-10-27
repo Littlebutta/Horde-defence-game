@@ -215,6 +215,7 @@ pub fn structure(mb: &mut MB, g: &Game, i: usize, s: &Structure, base: f32, t: f
             top
         }
         S::Gun => gun(mb, d, c, w, h, base, s.aim),
+        S::Custom => super::custom::in_game(mb, g, s, base, t),
         S::Cannon => cannon(mb, d, c, w, h, base, s.aim),
         S::Extractor => extractor(mb, d, c, w, h, base, t),
         S::Plant => plant(mb, d, c, w, h, base, t),

@@ -31,6 +31,8 @@ pub enum S {
     ScrapDepot,
     AmmoDepot,
     Bunker,
+    /// a turret built in the garage (its parts are in `Structure::cu`)
+    Custom,
 }
 pub const BUILD_ORDER: [S; 18] = [
     S::Wall,
@@ -231,11 +233,13 @@ pub fn def(s: S) -> &'static Def {
     static RESCUE: Def = Def { key: 'j', name: "Rescue station", w: 9, h: 9, hp: 600.0, cost: 500.0, ht: 3.2, top: rgb(105, 219, 124), side: rgb(43, 138, 62), zone: true, tip: "Every 25 s sends a rescue team to the biggest group of civilians it can reach safely and walks them back to the base. Base zone only.", ..BASE };
     static SDEPOT: Def = Def { key: '0', name: "Scrap depot", w: 7, h: 7, hp: 500.0, cost: 250.0, ht: 2.6, top: rgb(56, 217, 169), side: rgb(18, 134, 106), zone: true, tip: "Stores 2500 more scrap (you start with room for 2500). Base zone only.", ..BASE };
     static BUNKER: Def = Def { key: '-', name: "Bunker", w: 7, h: 7, hp: 1400.0, cost: 150.0, ht: 2.4, top: rgb(150, 156, 122), side: rgb(92, 98, 72), tip: "A concrete bunker. Right-click it with a squad selected to send them in: they fire from the slits with +60% range and are safe until it falls, when 3 in 4 of them die. Any number of troops fit. Research turret mounts to put a turret on top for the rooftop range bonus.", ..BASE };
+    static CUSTOM: Def = Def { key: ' ', name: "Custom turret", w: 6, h: 6, hp: 300.0, cost: 0.0, ht: 2.6, top: rgb(150, 160, 140), side: rgb(90, 96, 86), range: 40.0, turret: true, tip: "A turret you built in the garage. Rooftops give +60% range unless its mount needs the ground.", ..BASE };
     static ADEPOT: Def = Def { key: 'v', name: "Ammo depot", w: 7, h: 7, hp: 500.0, cost: 250.0, ht: 2.6, top: rgb(198, 154, 116), side: rgb(134, 96, 63), zone: true, tip: "Stores 2000 more ammo (you start with room for 1500). Base zone only.", ..BASE };
     match s {
         S::ScrapDepot => &SDEPOT,
         S::AmmoDepot => &ADEPOT,
         S::Bunker => &BUNKER,
+        S::Custom => &CUSTOM,
         S::Flame => &FLAME,
         S::Rail => &RAIL,
         S::Helium => &HELIUM,

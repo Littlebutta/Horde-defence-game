@@ -21,6 +21,7 @@
 
 use crate::defs::*;
 use crate::game::{Allowed, Game};
+use crate::garage;
 use crate::storage::{self, data_dir};
 use crate::world::*;
 use macroquad::prelude::vec2;
@@ -120,7 +121,7 @@ pub enum Tech {
 pub const START_BUILDS: [S; 5] = [S::Wall, S::Bunker, S::Extractor, S::Pad, S::Rescue];
 
 /// The whole tree, in the order the campaign screen lists it. Saves store indices into it, so new entries go at the end.
-pub const TECH: [Tech; 40] = [
+pub const TECH: [Tech; 41] = [
     Tech::Build(S::Gun),
     Tech::Build(S::Cannon),
     Tech::Build(S::Flame),
@@ -161,16 +162,18 @@ pub const TECH: [Tech; 40] = [
     Tech::Up(Up::RifleAp),
     Tech::Up(Up::RifleGrenade),
     Tech::Up(Up::RifleRocket),
+    Tech::Build(S::Custom),
 ];
 
 /// Turrets that shoot ammo: the first one unlocked brings the ammo plant with it.
 fn shoots(t: S) -> bool {
-    matches!(t, S::Gun | S::Cannon | S::Flame | S::Rail | S::Artillery)
+    matches!(t, S::Gun | S::Cannon | S::Flame | S::Rail | S::Artillery | S::Custom)
 }
 
 impl Tech {
     pub fn name(self) -> &'static str {
         match self {
+            Tech::Build(S::Custom) => "Turret workshop",
             Tech::Build(s) => def(s).name,
             Tech::Unit(u) => udef(u).name,
             Tech::Ability(a) => adef(a).name,
@@ -185,6 +188,7 @@ impl Tech {
     pub fn tip(self) -> String {
         match self {
             Tech::Build(S::Silo) => format!("{} Unlocks the ICBM.", def(S::Silo).tip),
+            Tech::Build(S::Custom) => "Turret workshop: build the turrets you design in the garage (parts are researched with points and bought with money there).".into(),
             Tech::Build(s) if shoots(s) => format!("{} The first turret also unlocks the ammo plant.", def(s).tip),
             Tech::Build(s) => def(s).tip.to_string(),
             Tech::Unit(u) => format!("{}: a squad you can call in from the build bar.", udef(u).name),
@@ -212,6 +216,7 @@ impl Tech {
                 S::Outpost => 100,
                 S::Helipad => 260,
                 S::Silo => 380,
+                S::Custom => 120,
                 _ => 0,
             },
             Tech::Unit(_) => 150,
@@ -243,7 +248,7 @@ impl Tech {
             Tech::Up(u) if RIFLE_UPS.contains(&u) => up_after(u).map(Tech::Up),
             Tech::Up(u) => Some(Tech::Build(updef(u).on)),
             Tech::Hq(l) if l > 2 => Some(Tech::Hq(l - 1)),
-            Tech::Build(S::Cannon | S::Flame) => Some(Tech::Build(S::Gun)),
+            Tech::Build(S::Cannon | S::Flame | S::Custom) => Some(Tech::Build(S::Gun)),
             Tech::Build(S::Rail | S::Artillery) => Some(Tech::Build(S::Cannon)),
             Tech::Build(S::Silo) => Some(Tech::Ability(A::Air)),
             Tech::Build(S::Helipad) => Some(Tech::Ability(A::Gunship)),
@@ -489,14 +494,24 @@ pub fn pick_cities(seed: u64) -> Vec<usize> {
 /// One player's side of a campaign: their research points and what they have unlocked. In co-op
 /// every player earns points from the civilians flown out of their own evac points and builds up
 /// their own tech tree; alone there is just the one.
-#[derive(Clone, Default, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Crew {
     pub points: u32,
     pub tech: Vec<Tech>,
-    /// money for the garage, paid for every city held
+    /// money for the turret garage, earned by holding cities
     pub money: u32,
+    /// garage parts researched with points, and bought with money (the starter parts are always both)
+    pub parts: Vec<u16>,
+    pub owned: Vec<u16>,
 }
-static NO_CREW: Crew = Crew { points: 0, tech: Vec::new(), money: 0 };
+static NO_CREW: Crew = Crew { points: 0, tech: Vec::new(), money: 0, parts: Vec::new(), owned: Vec::new() };
+/// Money a new crew starts with in the garage.
+pub const START_MONEY: u32 = 600;
+impl Default for Crew {
+    fn default() -> Self {
+        Crew { points: 0, tech: Vec::new(), money: START_MONEY, parts: Vec::new(), owned: Vec::new() }
+    }
+}
 
 /// Players a campaign keeps a crew for (co-op's limit).
 pub const CREWS: usize = 4;
@@ -829,6 +844,42 @@ impl Campaign {
         self.told |= b.bit();
     }
 
+    /// Garage part `i` is researched by player `p` (the starter parts always are).
+    pub fn part_known(&self, p: usize, i: u16) -> bool {
+        garage::STARTER.contains(&garage::part(i).id) || self.crew(p).parts.contains(&i)
+    }
+    pub fn part_owned(&self, p: usize, i: u16) -> bool {
+        garage::STARTER.contains(&garage::part(i).id) || self.crew(p).owned.contains(&i)
+    }
+    /// A part can be researched once the weaker part of its family is.
+    pub fn part_open(&self, p: usize, i: u16) -> bool {
+        let pt = garage::part(i);
+        !self.part_known(p, i) && (pt.lvl == 0 || garage::PARTS.iter().enumerate().any(|(j, q)| q.fam == pt.fam && q.lvl + 1 == pt.lvl && self.part_known(p, j as u16)))
+    }
+    pub fn research_part(&mut self, p: usize, i: u16) -> bool {
+        let cost = garage::part(i).research();
+        if !self.part_open(p, i) || self.points(p) < cost {
+            return false;
+        }
+        let c = self.crew_mut(p);
+        c.points -= cost;
+        c.parts.push(i);
+        true
+    }
+    pub fn buy_part(&mut self, p: usize, i: u16) -> bool {
+        let price = garage::part(i).price();
+        if !self.part_known(p, i) || self.part_owned(p, i) || self.crew(p).money < price {
+            return false;
+        }
+        let c = self.crew_mut(p);
+        c.money -= price;
+        c.owned.push(i);
+        true
+    }
+    /// Every part player `p` can put on a turret.
+    pub fn owned_parts(&self, p: usize) -> Vec<u16> {
+        (0..garage::PARTS.len() as u16).filter(|i| self.part_owned(p, *i)).collect()
+    }
     /// What player `p`'s tech tree lets them build, recruit and use in a city.
     pub fn allowed(&self, p: usize) -> Allowed {
         let mut a = Allowed { builds: START_BUILDS.to_vec(), units: vec![U::Rifle], abilities: Vec::new() };
@@ -879,6 +930,7 @@ impl Campaign {
         // every player gets their own unlocks and upgrades
         for o in 0..g.perks.len() {
             g.perks[o].allowed = Some(self.allowed(o));
+            g.perks[o].parts = Some(self.owned_parts(o));
             for t in &self.crew(o).tech {
                 match *t {
                     Tech::Research(r) => g.complete_research(o, r),
@@ -1141,10 +1193,13 @@ pub fn from_text(t: &str) -> Campaign {
         if p > 0 && pts.is_none() && tech.is_none() {
             continue;
         }
-        let money = num(&k("money"));
+        let ids = |v: Option<String>| -> Vec<u16> { v.map(|v| v.split(',').filter_map(|x| garage::find(x.trim())).collect()).unwrap_or_default() };
+        let (money, parts, owned) = (num(&k("money")), ids(field(&k("parts"))), ids(field(&k("owned"))));
         let cr = c.crew_mut(p);
         cr.points = pts.unwrap_or(0) as u32;
-        cr.money = money.unwrap_or(0) as u32;
+        cr.money = money.unwrap_or(START_MONEY as u64) as u32;
+        cr.parts = parts;
+        cr.owned = owned;
         if let Some(v) = tech {
             cr.tech = v.split(',').filter_map(|x| x.trim().parse::<usize>().ok()).filter_map(|i| TECH.get(i).copied()).collect();
         }
@@ -1210,9 +1265,14 @@ pub fn to_text(c: &Campaign) -> String {
     let join = |v: &mut dyn Iterator<Item = String>| v.collect::<Vec<_>>().join(",");
     let picks = join(&mut c.picks.iter().map(|i| i.to_string()));
     let tech_of = |cr: &Crew| -> String { cr.tech.iter().filter_map(|t| TECH.iter().position(|x| x == t)).map(|i| i.to_string()).collect::<Vec<_>>().join(",") };
+    let ids = |v: &[u16]| v.iter().map(|i| garage::part(*i).id).collect::<Vec<_>>().join(",");
     let mut others = String::new();
-    for (p, cr) in c.crew.iter().enumerate().skip(1) {
-        others += &format!("points{}={}\ntech{}={}\nmoney{}={}\n", p, cr.points, p, tech_of(cr), p, cr.money);
+    for (p, cr) in c.crew.iter().enumerate() {
+        if p > 0 {
+            others += &format!("points{}={}\ntech{}={}\nmoney{}={}\n", p, cr.points, p, tech_of(cr), p, cr.money);
+        }
+        let k = if p == 0 { String::new() } else { p.to_string() };
+        others += &format!("parts{}={}\nowned{}={}\n", k, ids(&cr.parts), k, ids(&cr.owned));
     }
     let units = join(&mut c.units.iter().map(|(u, n)| format!("{}{}", if *u == U::Rifle { 'r' } else { 't' }, n)));
     let cities = join(&mut c.cities.iter().map(|s| {

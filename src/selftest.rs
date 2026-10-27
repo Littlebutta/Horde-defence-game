@@ -360,3 +360,88 @@ pub fn builds(g: &mut Game, level: u8) {
         g.drummers.push(game::Drummer { p, hp: 2000.0, max: 2400.0, hd: 0.6, beat: 0.4, dead: false });
     }
 }
+
+/// PH_CUSTOMS=1: a ring of varied garage designs round the HQ, with a horde coming at them.
+pub fn customs(g: &mut Game) {
+    use crate::garage::{self, Build, Slot, PARTS};
+    g.scrap = 1e6;
+    g.ammo = 1e6;
+    g.scrap_cap = 1e7;
+    g.set_hq_level(0, HQ_MAX);
+    let h = g.world.hq;
+    let of = |s: Slot| -> Vec<u16> {
+        (0..PARTS.len() as u16)
+            .filter(|i| PARTS[*i as usize].slot() == s)
+            .collect()
+    };
+    let (mounts, heads, barrels, mods, gear) = (
+        of(Slot::Mount),
+        of(Slot::Head),
+        of(Slot::Barrel),
+        of(Slot::Mod),
+        of(Slot::Gear),
+    );
+    let mut placed = 0;
+    for k in 0..10usize {
+        let mut b = Build::starter();
+        b.name = format!("Test {k}");
+        b.parts = [
+            Some(mounts[(k * 7 + 3) % mounts.len()]),
+            Some(heads[(k * 5 + 2) % heads.len()]),
+            Some(barrels[(k * 3 + 1) % barrels.len()]),
+            Some(mods[(k * 11) % mods.len()]),
+            None,
+            Some(gear[(k * 13 + 4) % gear.len()]),
+            None,
+        ];
+        b.paint = [
+            [60 + k as u8 * 18, 90, 70],
+            [200, 200 - k as u8 * 12, 60],
+            [40, 40, 48],
+        ];
+        // drop whatever doesn't fit until it's legal
+        for s in [5, 3] {
+            if !b.ok() {
+                b.parts[s] = None;
+            }
+        }
+        if !b.ok() || !g.pick_design(&b) {
+            eprintln!("design {k} refused: {:?}", b.problem());
+            continue;
+        }
+        let a = k as f32 / 10.0 * std::f32::consts::TAU;
+        let at = h + vec2(a.cos(), a.sin()) * 46.0;
+        let ok = (0..30).any(|j| {
+            g.place(
+                S::Custom,
+                at.x as i32 + (j % 6) * 4 - 10,
+                at.y as i32 + (j / 6) * 4 - 10,
+            )
+        });
+        placed += ok as u32;
+        eprintln!(
+            "{} {:?}: {}",
+            b.name,
+            garage::spec(&b).map(|s| (s.fire, s.aim)),
+            if ok { "placed" } else { "no room" }
+        );
+    }
+    eprintln!("placed {placed} custom turrets");
+    for (dx, dy) in [(0.0, -130.0), (-90.0, -100.0), (100.0, 80.0)] {
+        g.queue((h.x + dx, h.y + dy), 2500.0, 4.0);
+    }
+    let n: u32 = std::env::var("PH_CUSTOM_TICKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(260);
+    let k0 = g.kills;
+    for _ in 0..n {
+        g.tick();
+    }
+    eprintln!(
+        "custom turrets killed {} in {} ticks, {} shots in the air",
+        g.kills - k0,
+        n,
+        g.cshots.len()
+    );
+}

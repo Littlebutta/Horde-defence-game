@@ -21,6 +21,7 @@ mod settings;
 mod techtree;
 mod war;
 mod widgets;
+mod workshop;
 use war::{army_col, campaign_army_name, level_col, turns_s};
 use widgets::{R_CTRL, R_PANEL};
 
@@ -30,6 +31,8 @@ enum Tool {
     Build(S),
     Unit(U),
     Ability(A),
+    /// the k-th deployed garage design (F1..F6)
+    Custom(u8),
 }
 
 /// Something done on the campaign screen. In co-op, picking the city and going in are votes, and a
@@ -43,6 +46,10 @@ enum HubAct {
     Go,
     /// the next step of research into an army (shared by everybody, paid from its kills)
     Hunt(usize),
+    /// research a garage part with research points
+    ResearchPart(u16),
+    /// buy a researched garage part with money
+    BuyPart(u16),
 }
 impl HubAct {
     fn code(self) -> u32 {
@@ -52,6 +59,8 @@ impl HubAct {
             HubAct::City(i) => 2000 + i as u32,
             HubAct::Go => 3000,
             HubAct::Hunt(a) => 4000 + a as u32,
+            HubAct::ResearchPart(i) => 5000 + i as u32,
+            HubAct::BuyPart(i) => 6000 + i as u32,
         }
     }
     fn from_code(v: u32) -> Option<HubAct> {
@@ -62,13 +71,15 @@ impl HubAct {
             2000..=2999 => HubAct::City((v - 2000) as usize),
             3000 => HubAct::Go,
             4000..=4002 => HubAct::Hunt((v - 4000) as usize),
+            5000..=5999 if ((v - 5000) as usize) < crate::garage::PARTS.len() => HubAct::ResearchPart((v - 5000) as u16),
+            6000..=6999 if ((v - 6000) as usize) < crate::garage::PARTS.len() => HubAct::BuyPart((v - 6000) as u16),
             _ => return None,
         })
     }
     /// A player has one vote of each kind at a time: a city, ready to go. (Kind 0, buying, is no vote.)
     fn kind(self) -> u8 {
         match self {
-            HubAct::Tech(_) | HubAct::Recruit(_) | HubAct::Hunt(_) => 0,
+            HubAct::Tech(_) | HubAct::Recruit(_) | HubAct::Hunt(_) | HubAct::ResearchPart(_) | HubAct::BuyPart(_) => 0,
             HubAct::City(_) => 1,
             HubAct::Go => 2,
         }
@@ -82,6 +93,8 @@ enum Screen {
     Play,
     /// the campaign between cities: unlocks, recruits and the next city
     Hub,
+    /// the turret workshop (free builder from the menu, or the campaign's garage)
+    Garage,
 }
 
 /// Pixel `k` of faction `i`'s little swarm on its menu card: chaos mixes all three colours.
@@ -107,6 +120,10 @@ pub(crate) const DIFFS: [(&str, f32); 4] = [
 
 pub struct App {
     screen: Screen,
+    /// the garage while it's open
+    workshop: Option<Box<workshop::Workshop>>,
+    /// saved turret builds (data/turrets.txt)
+    library: crate::garage::Library,
     fonts: Fonts,
     dark: bool,
     music: music::Music,
@@ -354,6 +371,8 @@ impl App {
         ui::set_user_scale(st.ui_scale);
         ui::set_wide(st.hud_wide);
         App {
+            workshop: None,
+            library: crate::garage::Library::load(),
             screen: Screen::Menu,
             fonts: render::load_fonts(),
             // the light map was removed: always dark
@@ -482,6 +501,7 @@ impl App {
                 Screen::Menu => self.menu(),
                 Screen::Loading => self.loading(),
                 Screen::Hub => self.hub(),
+                Screen::Garage => self.workshop(),
                 Screen::Play => {}
             }
             self.overlays();
@@ -724,6 +744,30 @@ impl App {
     }
     /// Carries out a player command: straight away when playing alone, through the host in co-op.
     /// Returns the message shown for it (alone only).
+    /// The garage designs on the build bar: the deployed ones whose parts are all on this player's
+    /// shelf, once the campaign has the Turret workshop (always outside it).
+    fn custom_tools(&self, g: &Game) -> Vec<(u8, crate::garage::Build)> {
+        if !g.build_ok(self.me(), S::Custom) {
+            return Vec::new();
+        }
+        self.library
+            .deployed()
+            .enumerate()
+            .filter(|(_, b)| b.ok() && g.parts_ok(self.me(), b))
+            .map(|(k, b)| (k as u8, b.clone()))
+            .collect()
+    }
+    /// Picks a build bar tool; a garage design is sent to the game first, so its cost and range
+    /// show while placing.
+    fn pick_tool(&mut self, g: &mut Game, t: Tool) {
+        if let Tool::Custom(k) = t {
+            if let Some((_, b)) = self.custom_tools(g).into_iter().find(|c| c.0 == k) {
+                self.act(g, Cmd::design(&b));
+            }
+        }
+        self.tool = t;
+    }
+
     fn act(&mut self, g: &mut Game, c: Cmd) -> Option<&'static str> {
         if let Some(s) = self.sess.as_mut() {
             s.issue(c);
@@ -980,6 +1024,12 @@ impl App {
             HubAct::Hunt(a) => {
                 c.fbuy(a);
             }
+            HubAct::ResearchPart(i) => {
+                c.research_part(p, i);
+            }
+            HubAct::BuyPart(i) => {
+                c.buy_part(p, i);
+            }
         }
         false
     }
@@ -1071,6 +1121,20 @@ impl App {
             }
             let pan = (off.dot(self.cam.right()) / r).clamp(-1.0, 1.0);
             let jitter = rand::gen_range(0.93, 1.07);
+            if let Sfx::Custom(v) = s {
+                // garage turrets: the game's own guns, pitched and filtered per barrel
+                let snd = match v.base {
+                    1 => music::Snd::Cannon,
+                    2 => music::Snd::Railgun,
+                    3 => music::Snd::ArtilleryShot,
+                    4 => music::Snd::Flame,
+                    5 => music::Snd::HeliGun,
+                    _ => music::Snd::Gun,
+                };
+                let gain = if v.base == 4 { 0.3 } else { 0.45 } * near * near * zoom;
+                self.music.play_toned(music::Play { snd, gain, pan, speed: v.pitch * jitter, key: if v.base == 4 { key } else { 0 } }, v.tone);
+                continue;
+            }
             let (snd, gain, speed) = match s {
                 Sfx::Cannon => (music::Snd::Cannon, 0.55, jitter),
                 Sfx::Flame => (music::Snd::Flame, 0.3, jitter),
@@ -1083,7 +1147,7 @@ impl App {
                 Sfx::HeliGun => (music::Snd::HeliGun, 0.6, jitter),
                 Sfx::Rocket => (music::Snd::Cannon, 0.3, 1.45 * jitter),
                 Sfx::BaseAttacked => (music::Snd::BaseAttacked, 0.8, 1.0),
-                Sfx::FlameStop => continue,
+                Sfx::FlameStop | Sfx::Custom(_) => continue,
             };
             // a nuke is heard anywhere on the map, and the alarm wherever you're looking
             let gain = match s {
@@ -1379,11 +1443,18 @@ impl App {
         if let Some(pr) = pr {
             self.players_panel(pr);
         }
-        let fc = foot.cols(2, 10.0);
+        let fc = foot.cols(3, 10.0);
         if self.button(fc[0], "Settings", true, false) {
             self.open_settings();
         }
-        if self.button(fc[1], "Quit game", true, false) {
+        if self.button(fc[1], "Turret garage", true, false) {
+            self.open_workshop(false);
+            return;
+        }
+        if self.hot(fc[1]) {
+            self.tip = Some("The free builder: every part on the shelf. Builds saved here can be imported in a campaign once its parts are researched.".into());
+        }
+        if self.button(fc[2], "Quit game", true, false) {
             self.quit();
         }
         // updater line, under the panel
@@ -2645,7 +2716,8 @@ impl App {
             };
             return Some((s.to_string(), if ok { WHITE } else { rgb(255, 140, 140) }));
         }
-        match self.tool {
+        let tool = if let Tool::Custom(_) = self.tool { Tool::Build(S::Custom) } else { self.tool };
+        match tool {
             Tool::Build(t) => {
                 let d = def(t);
                 // a turret on top of a bunker (with Turret mounts)
@@ -2653,7 +2725,7 @@ impl App {
                     if let Some(bi) = g.bunker_at(mw) {
                         let c = g.structs[bi].center();
                         let can = g.can_mount(t, bi);
-                        let cost = g.cost_at(t, c);
+                        let cost = g.cost_for(self.me(), t, c);
                         let afford = g.scrap >= cost;
                         ghost(c.x - d.w as f32 / 2.0, c.y - d.h as f32 / 2.0, d.w as f32, d.h as f32, def(S::Bunker).ht, can && afford);
                         let s = if !g.res(self.me()).mounts {
@@ -2672,7 +2744,7 @@ impl App {
                     if let Some((b, p)) = g.roof_at(mw) {
                         let q = p;
                         let can = g.can_place_roof(t, b, p);
-                        let cost = g.cost_at(t, p);
+                        let cost = g.cost_for(self.me(), t, p);
                         let afford = g.scrap >= cost;
                         ghost(q.x - d.w as f32 / 2.0, q.y - d.h as f32 / 2.0, d.w as f32, d.h as f32, g.world.buildings[b].h, can && afford);
                         draw_circle_lines(q.x, q.y, g.turret_range(t, true, self.me()), 0.4, rgba(255, 212, 59, 0.6));
@@ -2712,7 +2784,7 @@ impl App {
                 for (x, y) in &spots {
                     let c = vec2(*x as f32 + d.w as f32 / 2.0, *y as f32 + d.h as f32 / 2.0);
                     let can = g.can_place(t, *x, *y);
-                    let cost = g.cost_at(t, c);
+                    let cost = g.cost_for(self.me(), t, c);
                     if can {
                         total += cost;
                         extra += cost - d.cost;
@@ -2831,7 +2903,7 @@ impl App {
                 };
                 Some((hint.to_string(), WHITE))
             }
-            Tool::None => {
+            Tool::None | Tool::Custom(_) => {
                 let i = self.sel_struct?;
                 let s = &g.structs[i];
                 match s.t {
@@ -2941,7 +3013,9 @@ impl App {
             .filter(|s| !(g.campaign && **s == S::Lab) && g.build_ok(self.me(), **s))
             .map(|s| Tool::Build(*s))
             .chain([U::Rifle, U::Tank].into_iter().filter(|u| g.unit_ok(self.me(), *u)).map(Tool::Unit))
+            .chain(self.custom_tools(g).into_iter().map(|c| Tool::Custom(c.0)))
             .collect();
+        let customs = self.custom_tools(g);
         let (gap, ch) = (6.0, 60.0);
         let room = area.w - 24.0 - 16.0;
         let mut bw = 100.0f32;
@@ -2973,6 +3047,12 @@ impl App {
                     let d = udef(*u);
                     (d.key, d.name, d.cost, d.col, d.tip, g.scrap >= d.cost)
                 }
+                Tool::Custom(k) => {
+                    let b = &customs.iter().find(|c| c.0 == *k).unwrap().1;
+                    let cost = crate::garage::spec(b).map_or(0.0, |sp| sp.cost);
+                    let [r0, g0, b0] = b.paint[0];
+                    (' ', "Custom turret", cost, Color::from_rgba(r0, g0, b0, 255), "", g.scrap >= cost)
+                }
                 _ => unreachable!(),
             };
             let active = self.tool == *it;
@@ -2982,8 +3062,22 @@ impl App {
                 rrect_lines(r, R_CTRL, 2.0, p.accent);
             }
             rrect(Rect::new(r.x + 7.0, r.y + 9.0, 4.0, r.h - 18.0), 2.0, col);
-            self.keycap(r.right() - 21.0, r.y + 5.0, key);
+            if let Tool::Custom(k) = it {
+                let fk = format!("F{}", k + 1);
+                let kr = Rect::new(r.right() - 25.0, r.y + 5.0, 20.0, 16.0);
+                rrect(kr, 4.0, alpha(p.text, 0.1));
+                let tw = text_w(&self.fonts.mono, &fk, 10.5);
+                text(&self.fonts.mono, &fk, kr.x + (kr.w - tw) / 2.0, kr.y + 12.0, 10.5, p.dim);
+            } else {
+                self.keycap(r.right() - 21.0, r.y + 5.0, key);
+            }
+            let cname;
             let nm = match it {
+                Tool::Custom(k) => {
+                    let b = &customs.iter().find(|c| c.0 == *k).unwrap().1;
+                    cname = if b.name.is_empty() { "Custom".to_string() } else { b.name.clone() };
+                    cname.as_str()
+                }
                 Tool::Build(S::Gun) => "Gun turret",
                 Tool::Build(S::Extractor) => "Extractor",
                 Tool::Build(S::Plant) => "Ammo plant",
@@ -3003,9 +3097,24 @@ impl App {
             text(&self.fonts.mono, &format!("${:.0}", cost), r.x + 17.0, r.y + 51.0, 12.5, if ok { p.accent } else { p.bad });
             self.ui_rects.push(r);
             if hot {
-                self.tip = Some(format!("{} [{}]: {}", name, key.to_ascii_uppercase(), tip));
+                self.tip = Some(match it {
+                    Tool::Custom(k) => {
+                        let b = &customs.iter().find(|c| c.0 == *k).unwrap().1;
+                        let parts: Vec<&str> = b.part_ids().map(|i| crate::garage::part(i).name).collect();
+                        let sp = crate::garage::spec(b);
+                        format!(
+                            "{} [F{}]: your garage design. {}. {:.0} damage a second, range {:.0}.",
+                            nm,
+                            k + 1,
+                            parts.join(", "),
+                            sp.as_ref().map_or(0.0, |s| s.dps()),
+                            sp.as_ref().map_or(0.0, |s| s.range)
+                        )
+                    }
+                    _ => format!("{} [{}]: {}", name, key.to_ascii_uppercase(), tip),
+                });
                 if self.pressed(true) {
-                    self.tool = if active { Tool::None } else { *it };
+                    self.pick_tool(g, if active { Tool::None } else { *it });
                 }
             }
         }
@@ -3390,6 +3499,14 @@ impl App {
             self.sel_struct = None;
             self.press = None;
         }
+        let fkeys = [KeyCode::F1, KeyCode::F2, KeyCode::F3, KeyCode::F4, KeyCode::F5, KeyCode::F6];
+        for (k, key) in fkeys.into_iter().enumerate() {
+            let alt = is_key_down(KeyCode::LeftAlt) || is_key_down(KeyCode::RightAlt);
+            if !alt && is_key_pressed(key) && self.placing.is_none() && self.custom_tools(g).iter().any(|c| c.0 as usize == k) {
+                let t = Tool::Custom(k as u8);
+                self.pick_tool(g, if self.tool == t { Tool::None } else { t });
+            }
+        }
         if is_key_pressed(KeyCode::F9) && self.placing.is_none() {
             self.act(g, Cmd::Stress(STRESS_N));
         }
@@ -3501,7 +3618,21 @@ impl App {
                 }
                 return;
             }
-            match self.tool {
+            if let Tool::Custom(k) = self.tool {
+                // the design goes ahead of the order, in case it changed since it was picked
+                match self.custom_tools(g).into_iter().find(|c| c.0 == k) {
+                    Some((_, b)) => {
+                        self.act(g, Cmd::design(&b));
+                    }
+                    None => {
+                        self.tool = Tool::None;
+                        return;
+                    }
+                }
+            }
+            let tool = if let Tool::Custom(_) = self.tool { Tool::Build(S::Custom) } else { self.tool };
+            match tool {
+                Tool::Custom(_) => {}
                 Tool::None => {
                     self.selected = g.group_at(mw);
                     self.sel_struct = None;

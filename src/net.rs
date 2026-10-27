@@ -53,9 +53,17 @@ pub enum Cmd {
     Mount { t: S, b: u32 },
     /// the player's HQ goes up a level
     UpgradeHq,
+    /// the garage design this player builds next (part indices, 0xffff: empty slot; paint)
+    Design { parts: [u16; 7], paint: [[u8; 3]; 3] },
 }
 
-const ALL_S: [S; 19] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue, S::ScrapDepot, S::AmmoDepot, S::Bunker];
+impl Cmd {
+    pub fn design(b: &crate::garage::Build) -> Cmd {
+        Cmd::Design { parts: b.parts.map(|p| p.unwrap_or(0xffff)), paint: b.paint }
+    }
+}
+
+const ALL_S: [S; 20] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue, S::ScrapDepot, S::AmmoDepot, S::Bunker, S::Custom];
 const ALL_U: [U; 2] = [U::Rifle, U::Tank];
 
 fn s_id(t: S) -> u32 {
@@ -134,6 +142,15 @@ impl Wr {
                 self.u32(b);
             }
             Cmd::UpgradeHq => self.u32(23),
+            Cmd::Design { parts, paint } => {
+                self.u32(24);
+                for p in parts {
+                    self.u32(p as u32);
+                }
+                for c in paint {
+                    self.u32((c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32);
+                }
+            }
         }
     }
 }
@@ -164,6 +181,18 @@ impl Rd<'_> {
             21 => Cmd::Cease(self.u32()?),
             22 => Cmd::Mount { t: self.s()?, b: self.u32()? },
             23 => Cmd::UpgradeHq,
+            24 => {
+                let mut parts = [0xffff; 7];
+                for p in &mut parts {
+                    *p = self.u32()?.min(0xffff) as u16;
+                }
+                let mut paint = [[0; 3]; 3];
+                for c in &mut paint {
+                    let v = self.u32()?;
+                    *c = [(v >> 16) as u8, (v >> 8) as u8, v as u8];
+                }
+                Cmd::Design { parts, paint }
+            }
             _ => return None,
         })
     }
@@ -262,6 +291,10 @@ fn apply_as(g: &mut Game, c: Cmd) -> Option<&'static str> {
         Cmd::Cease(i) => {
             g.cease(i as usize);
             None
+        }
+        Cmd::Design { parts, paint } => {
+            let b = crate::garage::Build { name: String::new(), parts: parts.map(|p| ((p as usize) < crate::garage::PARTS.len()).then_some(p)), paint };
+            (!g.pick_design(&b)).then_some("That turret uses parts you haven't got")
         }
     }
 }

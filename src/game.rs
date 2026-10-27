@@ -9,6 +9,10 @@ use macroquad::prelude::{vec2, Vec2};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::Arc;
 
+#[path = "turret.rs"]
+mod turret;
+pub use turret::{CShot, Chill, Custom, Design, Mine};
+
 pub const DT: f32 = 0.05;
 /// Civilians one extraction flight carries, and how long a pad needs before the next flight.
 pub const PAD_SEATS: u32 = 16;
@@ -46,6 +50,8 @@ pub struct Structure {
     pub build: f32,
     /// game time the build finished (the scaffolding sinks away after it)
     pub done_at: f32,
+    /// custom turrets: their design and what they're doing
+    pub cu: Option<Box<Custom>>,
 }
 impl Structure {
     /// Up on a roof or a bunker: no footprint on the ground, and the rooftop range bonus.
@@ -281,6 +287,8 @@ pub enum Sfx {
     Gun,
     /// a gunship's chain gun (raised as each burst sound runs out)
     HeliGun,
+    /// a custom turret's shot: a base effect, pitched and filtered
+    Custom(crate::garage::Voice),
     /// the horde is hitting the HQ; raised at most every ALARM_GAP
     BaseAttacked,
     /// a rocket rifleman fired
@@ -364,6 +372,10 @@ pub struct Perks {
     pub flown: u32,
     /// their HQ's level, 1..=HQ_MAX (0 reads as 1)
     pub hq_lvl: u8,
+    /// the custom turret design they place next (index into `Game::designs`)
+    pub design: Option<u16>,
+    /// campaign: the garage parts they own (None: every part, outside a campaign)
+    pub parts: Option<Vec<u16>>,
 }
 
 /// What a campaign's tech tree has unlocked so far.
@@ -455,6 +467,11 @@ pub struct Game {
     pub gunships: Vec<Gunship>,
     pub shells: Vec<Shell>,
     pub napalm: Vec<Napalm>,
+    /// custom turrets: the designs in play, their shots in the air, mines and frost patches
+    pub designs: Vec<Design>,
+    pub cshots: Vec<CShot>,
+    pub mines: Vec<Mine>,
+    pub chills: Vec<Chill>,
     /// storage limits, from the depots (recomputed every tick)
     pub scrap_cap: f32,
     pub ammo_cap: f32,
@@ -581,6 +598,10 @@ impl Game {
             gunships: Vec::new(),
             shells: Vec::new(),
             napalm: Vec::new(),
+            designs: Vec::new(),
+            cshots: Vec::new(),
+            mines: Vec::new(),
+            chills: Vec::new(),
             scrap_cap: SCRAP_CAP,
             ammo_cap: AMMO_CAP,
             slow: vec![0; CW * CH],
@@ -1086,8 +1107,12 @@ impl Game {
     /// Price of a structure at a spot: outside the base zone, turrets get dearer the further
     /// they are from the HQ. Inside the zone everything costs its base price.
     pub fn cost_at(&self, t: S, at: Vec2) -> f32 {
+        self.cost_for(self.actor, t, at)
+    }
+    /// What player `o` pays for `t` at a spot (a custom turret: their current design).
+    pub fn cost_for(&self, o: usize, t: S, at: Vec2) -> f32 {
         let d = def(t);
-        let mut c = d.cost;
+        let mut c = if t == S::Custom { self.cur_design(o).map_or(f32::INFINITY, |d| d.spec.cost) } else { d.cost };
         if d.turret && !self.world.in_zone(at) {
             let dist = at.distance(self.hq_near(at));
             c *= 1.0 + (dist - 100.0).max(0.0) / 350.0;
@@ -1131,7 +1156,7 @@ impl Game {
     }
     pub fn can_place_roof(&self, t: S, b: usize, p: Vec2) -> bool {
         let bb = &self.world.buildings[b];
-        if !bb.alive || self.world.irradiated_at(p) || self.hive_blocks(p) {
+        if !bb.alive || self.world.irradiated_at(p) || self.hive_blocks(p) || self.ground_only(t) {
             return false;
         }
         // the whole base has to stand on this roof
@@ -1185,8 +1210,11 @@ impl Game {
             charge: 0.0,
             snd: -100.0,
             owner: self.actor as u8,
+            cu: None,
         };
-        if !s.up() {
+        // walkers stand on their own legs: they never block the street
+        let walker = t == S::Custom && self.cur_design(self.actor).is_some_and(|d| d.spec.leash > 0.0);
+        if !s.up() && !walker {
             for yy in y..y + d.h {
                 for xx in x..x + d.w {
                     self.occ[yy as usize * W + xx as usize] = idx as i32;
@@ -1220,6 +1248,9 @@ impl Game {
         self.structs.push(s);
         self.sd.push(AtomicU32::new(0));
         self.low.push(t == S::Wall);
+        if t == S::Custom {
+            self.init_custom(idx);
+        }
         idx
     }
 
@@ -1238,6 +1269,9 @@ impl Game {
     }
     /// A turret's reach, with rooftop and its owner's Long barrels bonuses.
     pub fn turret_range(&self, t: S, roof: bool, o: usize) -> f32 {
+        if t == S::Custom {
+            return self.cur_design(o).map_or(0.0, |d| self.custom_range(&d.spec, roof, o));
+        }
         let up = match t {
             S::Flame if self.has_up(o, Up::FlameReach) => 1.3,
             S::Helium if self.has_up(o, Up::HeliumReach) => 1.35,
@@ -1269,6 +1303,7 @@ impl Game {
         self.res(self.actor).mounts
             && d.turret
             && !d.ground
+            && !self.ground_only(t)
             && d.w <= bs.w
             && self.build_ok(self.actor, t)
             && !bs.dead
@@ -1294,6 +1329,10 @@ impl Game {
         let i = self.add_struct_on(t, (c.x - d.w as f32 / 2.0) as i32, (c.y - d.h as f32 / 2.0) as i32, -1, b as i32);
         self.construct(i);
         true
+    }
+    /// Custom turrets whose mount has to stand on the ground (casemates, masts, walkers...).
+    pub fn ground_only(&self, t: S) -> bool {
+        t == S::Custom && self.cur_design(self.actor).is_none_or(|d| d.spec.ground)
     }
     pub fn has_up(&self, o: usize, u: Up) -> bool {
         self.pk(o).ups.contains(&u)
@@ -1500,7 +1539,7 @@ impl Game {
             q.x >= s.x as f32 && q.y >= s.y as f32 && q.x < (s.x + s.w) as f32 && q.y < (s.y + s.h) as f32
         });
         let Some((i, s)) = hit else { return false };
-        let refund = def(s.t).cost * 0.5;
+        let refund = self.design_of(i).map_or(def(s.t).cost, |d| d.spec.cost) * 0.5;
         self.gain_scrap(refund);
         self.kill_struct(i);
         true
@@ -1925,6 +1964,10 @@ impl Game {
         mix(self.scrap.to_bits());
         mix(self.ammo.to_bits());
         mix(self.score.to_bits());
+        for c in &self.cshots {
+            mix(c.to.x.to_bits() ^ c.to.y.to_bits().rotate_left(16));
+        }
+        mix(self.mines.len() as u32);
         mix(self.ticks as u32);
         h
     }
@@ -2034,7 +2077,8 @@ impl Game {
         for i in 0..self.sd.len() {
             let v = self.sd[i].load(Relaxed);
             if v > 0 && !self.structs[i].dead {
-                self.structs[i].hp -= v as f32 / DMG_SCALE;
+                let dmg = if self.structs[i].cu.is_some() { self.absorb(i, v as f32 / DMG_SCALE) } else { v as f32 / DMG_SCALE };
+                self.structs[i].hp -= dmg;
                 // only the HQ itself sounds the alarm (Devin: not every turret and wall)
                 if self.structs[i].t == S::Hq {
                     self.hq_hit = (self.time, self.structs[i].owner);
@@ -2067,6 +2111,7 @@ impl Game {
         lap(&mut self.prof[7]);
         self.turrets();
         self.towers();
+        self.custom_turrets();
         lap(&mut self.prof[8]);
         self.abilities();
         lap(&mut self.prof[9]);

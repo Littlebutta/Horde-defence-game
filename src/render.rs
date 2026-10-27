@@ -21,6 +21,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 mod air;
 mod art;
+pub mod custom;
 
 pub struct Fonts {
     pub head: Font,
@@ -1328,6 +1329,7 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
                 mb.disc(b.p, b.r * 0.25, Color::new(1.0, 0.95, 0.7, 0.9 * (1.0 - f)));
             }
             4 => ring(&mut mb, b.p, b.r * (0.4 + f * 1.4), 0.6, Color::new(0.75, 0.95, 1.0, 1.0 - f)),
+            5 => ring(&mut mb, b.p, b.r * (0.6 + f * 0.4), 0.5, Color::new(0.6, 0.9, 1.0, 0.8 * (1.0 - f))),
             _ => mb.disc(b.p, b.r * (0.6 + 0.6 * f), Color::new(1.0, 0.65, 0.25, 0.6 * (1.0 - f))),
         }
     }
@@ -1424,6 +1426,19 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
     for sh in &g.shells {
         let (p, _) = arc(sh.from, sh.to, sh.t / sh.dur);
         mb.disc(p, 0.9, Color::new(0.0, 0.0, 0.0, 0.25));
+    }
+    // custom turrets: frost patches and mines
+    for ch in &g.chills {
+        if inview(ch.p, ch.r) {
+            mb.disc(ch.p, ch.r, Color::new(0.55, 0.85, 1.0, 0.16 * ch.t.min(1.0)));
+        }
+    }
+    for m in &g.mines {
+        if inview(m.p, 4.0) {
+            mb.disc(m.p, 0.9, rgb(50, 54, 46));
+            let blink = ((t * 3.0 + m.p.x).sin() > 0.6) as u8 as f32;
+            mb.disc(m.p, 0.35, Color::new(1.0, 0.3, 0.25, 0.4 + 0.6 * blink));
+        }
     }
     mb
 }
@@ -1602,6 +1617,9 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
             4 => rgb(200, 220, 255),
             6 => rgb(230, 248, 255),
             7 => rgb(255, 150, 70),
+            10 => rgb(255, 90, 80),
+            11 => rgb(180, 160, 255),
+            12 => rgb(235, 240, 245),
             _ => rgb(220, 235, 255),
         };
         if tr.kind == 7 {
@@ -1668,6 +1686,21 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
         at_height(hgt, || {
             draw_circle(p.x, p.y, 0.9 * mk, rgb(255, 200, 120));
             draw_circle(p.x, p.y, 0.55 * mk, rgb(60, 50, 40));
+        });
+    }
+    // custom turrets' shells, mortar bombs and rockets
+    for sh in &g.cshots {
+        let f = sh.t / sh.dur;
+        let p = sh.from.lerp(sh.to, f);
+        let hgt = 4.0 * sh.lob * sh.from.distance(sh.to) * f * (1.0 - f) + 1.5 * (1.0 - f);
+        let (outer, inner) = match sh.kind {
+            2 => (rgb(255, 230, 160), rgb(255, 120, 40)),
+            3 => (rgb(220, 220, 220), rgb(90, 90, 90)),
+            _ => (rgb(255, 200, 120), rgb(60, 50, 40)),
+        };
+        at_height(hgt, || {
+            draw_circle(p.x, p.y, 0.7 * mk, outer);
+            draw_circle(p.x, p.y, 0.4 * mk, inner);
         });
     }
     // gunships parked on their heli pads

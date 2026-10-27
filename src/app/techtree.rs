@@ -64,7 +64,18 @@ impl App {
         if self.button(br, &format!("Open the tech tree (T) · {} of {} unlocked", owned, campaign::TECH.len()), !c.finished(), true) {
             self.tree_open = true;
         }
-        y += 66.0;
+        y += 50.0;
+        let gr = Rect::new(right.x + 10.0, y, right.w - 20.0, 32.0);
+        let money = c.crew(me).money;
+        if self.button(gr, &format!("Turret garage (G) · ${}", money), !c.finished(), false)
+            || (!self.blocked && !self.tree_open && !c.finished() && is_key_pressed(KeyCode::G))
+        {
+            self.open_workshop(true);
+        }
+        if self.hot(gr) {
+            self.tip = Some("Design your own turrets: research parts with RP, buy them with the money your cities pay.".into());
+        }
+        y += 54.0;
 
         // research into the enemy armies, between the tree and the army
         let army_h = 150.0;

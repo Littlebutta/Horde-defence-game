@@ -129,6 +129,8 @@ pub struct Play {
 
 enum Cmd {
     Play(Play),
+    /// an effect through a filter: 1 muffled (low-pass), 2 thin (high-pass)
+    Toned(Play, u8),
     Stop(u64),
     /// a news broadcast about army 0..3 (see `REPORTS`)
     News(usize),
@@ -190,6 +192,13 @@ impl Music {
     pub fn play(&self, p: Play) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Cmd::Play(p));
+        }
+    }
+    /// An effect through a filter, so one recording can stand in for many guns: tone 1 muffles
+    /// it (low-pass), 2 thins it out (high-pass), 0 leaves it as it is.
+    pub fn play_toned(&self, p: Play, tone: u8) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(if tone == 0 { Cmd::Play(p) } else { Cmd::Toned(p, tone) });
         }
     }
     /// Starts a news broadcast about `army` (0 zombies, 1 aliens, 2 orcs). It is cut short
@@ -509,8 +518,9 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>
         // effects queued since the last step; wait for the next one for up to 50 ms
         let deadline = t + Duration::from_millis(50);
         while let Ok(cmd) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            let p = match cmd {
-                Cmd::Play(p) => p,
+            let (p, tone) = match cmd {
+                Cmd::Play(p) => (p, 0),
+                Cmd::Toned(p, t) => (p, t),
                 Cmd::Stop(key) => {
                     for (k, s) in &keyed {
                         if *k == key {
@@ -558,7 +568,12 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>
                 gr: g * (1.0 + pan.min(0.0) * 0.7),
                 playing: c.playing.clone(),
             };
-            let _ = handle.play_raw(v.speed(p.speed.clamp(0.3, 3.0)));
+            let v = v.speed(p.speed.clamp(0.3, 3.0));
+            let _ = match tone {
+                1 => handle.play_raw(v.low_pass(900)),
+                2 => handle.play_raw(v.high_pass(1400)),
+                _ => handle.play_raw(v),
+            };
         }
     }
 }
