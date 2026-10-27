@@ -4884,6 +4884,29 @@ mod tests {
         }
     }
 
+    /// A big horde forms core blocks, keeps every member, and stays in lockstep whatever the thread count.
+    #[test]
+    fn core_deterministic() {
+        for fac in 0..FACTIONS.len() {
+            let run = || {
+                let mut g = Game::new(crate::citygen::generate(5), fac, 1.0, 21);
+                g.stress_n(400_000.0);
+                g.rush = true;
+                g.rush_forever = true;
+                for _ in 0..260 {
+                    g.tick();
+                }
+                let blocks = g.swarm.units().filter(|u| u.fl & crate::swarm::F_BLOCK != 0).map(|u| u.n as usize).sum::<usize>();
+                (g.checksum(), g.hostiles(), g.kills, blocks)
+            };
+            let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(run);
+            let many = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(run);
+            assert_eq!(one, many, "faction {}", fac);
+            assert!(one.3 > 100_000, "faction {}: only {} in core blocks", fac, one.3);
+            assert!(one.1 + one.2 as usize >= 399_000, "faction {}: {} left + {} killed", fac, one.1, one.2);
+        }
+    }
+
     /// Chaos: all three armies spawn, each keeps its own kind, and the game stays deterministic.
     #[test]
     fn chaos_has_every_army() {

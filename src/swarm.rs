@@ -26,6 +26,10 @@
 //! steps, and when it takes damage, which kills its members unevenly (their health is spread like
 //! single units' is).
 //!
+//! Core blocks: deeper still inside a packed crowd, each cell's units become one block that moves
+//! as a few sample parcels per tick (`core_units`), so a swarm costs about its edges plus one block
+//! per cell of its inside, however many millions it holds. PH_NOCORE=1 turns this off to compare.
+//!
 //! Nothing depends on how many threads there are: random seeds come from (tick, tile, chunk), chunk
 //! sizes are fixed, and results are gathered in tile order, so co-op lockstep stays in sync.
 //!
@@ -105,6 +109,9 @@ pub const F_DOWN: u8 = 4;
 const F_GONE: u8 = 8;
 /// Bits 4 and 5: which army a unit belongs to (an index into `FACTIONS`). Only read in chaos games.
 pub const KIND_SHIFT: u8 = 4;
+/// A core block: every unit of one kind standing in a cell deep inside a swarm, merged into one
+/// entity that never steps on its own (see `core_units`).
+pub const F_BLOCK: u8 = 64;
 pub const F_KIND: u8 = 3 << KIND_SHIFT;
 
 #[inline]
@@ -344,6 +351,8 @@ struct Ctx<'a> {
     jt: &'a Jitter,
     /// PH_NOCLUMP=1 turns clumping off (to compare the horde's looks and speed)
     merge: bool,
+    /// PH_NOCORE=1 turns core blocks off (to compare)
+    core: bool,
 }
 
 /// The cell grids one tile writes: its own cells only.
@@ -556,6 +565,26 @@ fn split_off(u: &Unit, n: u16, hp: f32, s: &mut u64, out: &mut Vec<Unit>) {
     }
 }
 
+/// Orcs: deaths around each coarse cell of tile `t` last tick (3x3 coarse cells), which build rage.
+fn rage_near(k: &Ctx, t: usize) -> [u32; TC * TC] {
+    let mut near = [0u32; TC * TC];
+    if k.inp.stats.mode == Behaviour::Orc || k.inp.mixed.is_some() {
+        let (gx0, gy0) = (((t % TW) * TC) as i32, ((t / TW) * TC) as i32);
+        for (i, v) in near.iter_mut().enumerate() {
+            let (gx, gy) = (gx0 + (i % TC) as i32, gy0 + (i / TC) as i32);
+            for oy in -1..=1 {
+                for ox in -1..=1 {
+                    let (qx, qy) = (gx + ox, gy + oy);
+                    if qx >= 0 && qy >= 0 && qx < CW as i32 && qy < CH as i32 {
+                        *v += k.dprev[qy as usize * CW + qx as usize].load(Relaxed);
+                    }
+                }
+            }
+        }
+    }
+    near
+}
+
 /// Moves a run of units one tick. Returns the members of clumps killed here (single units' deaths
 /// are counted when the run settles).
 fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>, out: &mut Vec<Unit>) -> u32 {
@@ -566,7 +595,7 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
     let use_hunt0 = inp.hunt.is_some() && !(zombie0 && inp.rush);
     let wander0 = zombie0 && !inp.rush;
     let (obj, nb, hq, hunt) = (inp.obj, inp.nb, inp.hq, inp.hunt.unwrap_or(&[]));
-    let (prev, dprev, deaths, dmg, dsrc, any_dmg) = (k.prev, k.dprev, k.deaths, k.dmg, k.dsrc, k.any_dmg);
+    let (prev, deaths, dmg, dsrc, any_dmg) = (k.prev, k.deaths, k.dmg, k.dsrc, k.any_dmg);
     let dk = DK;
     let dt = inp.dt;
     let mut s = seed;
@@ -580,25 +609,11 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
     }
     let tab = tab_buf.as_deref();
     let mut killed = 0u32;
-    // orcs: deaths around each coarse cell of this tile last tick (3x3 coarse cells), worked out once
-    let mut rage_near = [0u32; TC * TC];
-    if st0.mode == Behaviour::Orc || mixed.is_some() {
-        let (gx0, gy0) = (((t % TW) * TC) as i32, ((t / TW) * TC) as i32);
-        for (i, v) in rage_near.iter_mut().enumerate() {
-            let (gx, gy) = (gx0 + (i % TC) as i32, gy0 + (i / TC) as i32);
-            for oy in -1..=1 {
-                for ox in -1..=1 {
-                    let (qx, qy) = (gx + ox, gy + oy);
-                    if qx >= 0 && qy >= 0 && qx < CW as i32 && qy < CH as i32 {
-                        *v += dprev[qy as usize * CW + qx as usize].load(Relaxed);
-                    }
-                }
-            }
-        }
-    }
+    let rage_near = rage_near(k, t);
     let (x0, y0) = (((t % TW) * TS) as i32, ((t / TW) * TS) as i32);
     for u in us.iter_mut() {
-        if u.fl & F_GONE != 0 {
+        // (core blocks were moved by `core_units`)
+        if u.fl & (F_GONE | F_BLOCK) != 0 {
             continue;
         }
         let (st, use_hunt, wander) = match &mixed {
@@ -905,7 +920,7 @@ fn merge_units(t: usize, us: &mut Vec<Unit>, prev: &[AtomicU16], seed: u64) -> u
     let mut cnt = [0u32; TS * TS];
     let mut clumps = false;
     for u in us.iter() {
-        if u.fl & (F_GONE | F_DOWN) == 0 {
+        if u.fl & (F_GONE | F_DOWN | F_BLOCK) == 0 {
             cnt[(cl(u.y) - y0) * TS + cl(u.x) - x0] += u.n as u32;
             clumps |= u.n > 1;
         }
@@ -948,7 +963,7 @@ fn merge_units(t: usize, us: &mut Vec<Unit>, prev: &[AtomicU16], seed: u64) -> u
     let mut gone = 0;
     for i in 0..us.len() {
         let u = us[i];
-        if u.fl & (F_GONE | F_DOWN) != 0 {
+        if u.fl & (F_GONE | F_DOWN | F_BLOCK) != 0 {
             continue;
         }
         let ci = (cl(u.y) - y0) * TS + cl(u.x) - x0;
@@ -992,6 +1007,370 @@ fn merge_units(t: usize, us: &mut Vec<Unit>, prev: &[AtomicU16], seed: u64) -> u
         }
     }
     gone
+}
+
+/// Units per open cell, over the 3x3 cells around a cell, for it to count as the core of a swarm ...
+const CORE_AT: u32 = 24;
+/// ... and to keep a core block it already holds (so cells on the fence don't flicker).
+const CORE_KEEP: u32 = 12;
+/// Most members one core block carries.
+const BLOCK_MAX: u32 = 60000;
+/// Parcels a core block's members split into each tick (each moves like one unit would).
+const PARCELS: u32 = 8;
+/// A parcel's step, against a unit's: a parcel starts from a random spot in its cell, where a unit
+/// that just walked in is still near the side it came in by, so without this the core would flow
+/// faster than units walk (tuned so swarms reach the HQ when they did before).
+const CORE_STEP: f32 = 0.85;
+/// Kinds of core block: revived or not, times the army.
+const BK: usize = 8;
+
+/// (the army only counts in chaos, where several share the map)
+#[inline]
+fn block_kind(fl: u8, mixed: bool) -> usize {
+    ((fl & F_REVIVED != 0) as usize) | if mixed { kind_of(fl) << 1 } else { 0 }
+}
+
+/// Clumps of up to `MAX_CLUMP` carrying `n` members of block `b`, at a random spot in cell `nc`.
+fn emit(b: &Unit, nc: usize, mut n: u32, s: &mut u64, out: &mut Vec<Unit>) {
+    let (cx, cy) = ((nc % W) as f32, (nc / W) as f32);
+    while n > 0 {
+        let k = n.min(MAX_CLUMP as u32);
+        n -= k;
+        let r = xr(s);
+        let fr = |b: u32| ((r >> b) & 0xffff) as f32 * (1.0 / 65536.0);
+        out.push(Unit {
+            x: (cx + fr(0)).min(cx + 0.999),
+            y: (cy + fr(16)).min(cy + 0.999),
+            n: k as u16,
+            tg: 0,
+            hd: (r >> 48) as u8 & 7,
+            fl: b.fl & !F_BLOCK,
+            ..*b
+        });
+    }
+}
+
+/// The swarm's core, moved cell by cell instead of unit by unit (Devin's idea: only the edges of a
+/// swarm need working out one by one).
+///
+/// Deep inside a swarm, where the cells around are packed, the units of one kind in a cell are
+/// merged into a single core block. Blocks never step. Each tick a block's members split into a
+/// few parcels, and each parcel moves the way one of its units would (same costs, jitter and step
+/// length): it attacks whatever stands in the way, stays put, or lands in a neighbouring cell. A
+/// parcel landing in another core cell of this tile just moves members from block to block; one
+/// crossing into the core of the next tile goes over as a little block that joins the one there;
+/// one landing outside the core comes out as ordinary clumps, which step and split up like any
+/// others. Units walking into the core are taken into its blocks. So the rear is absorbed, the
+/// members flow through the core as numbers, and come out again at the front and sides where they
+/// are visible. A packed cell is drawn the same whether it holds 20 units or 2000, and the parcels
+/// leave the same speckled gaps moving units do, so none of this shows.
+///
+/// A block's cell stops being core where the crowd thins out, takes damage, sees a zombie die
+/// (revenge) or holds an orc regroup; the block then breaks back into clumps right away, which
+/// step this same tick.
+fn core_units(k: &Ctx, t: usize, seed: u64, us: &mut Vec<Unit>, out: &mut Vec<Unit>) {
+    let inp = k.inp;
+    let (x0, y0) = ((t % TW) * TS, (t / TW) * TS);
+    // the crowd over the open cells among the 3x3 around each cell of the tile (rows first, then
+    // columns). Only open ground counts: a crowd packed into a street is packed right up to the walls.
+    let mut row = [[(0u32, 0u32); TS]; TS + 2];
+    let mut busy = false;
+    for (ry, r) in row.iter_mut().enumerate() {
+        let y = (y0 + ry).wrapping_sub(1);
+        if y >= H {
+            continue;
+        }
+        for (lx, v) in r.iter_mut().enumerate() {
+            let x = x0 + lx;
+            if x == 0 || x + 1 >= W {
+                continue;
+            }
+            let c = y * W + x;
+            for i in c - 1..=c + 1 {
+                if inp.obj[i] == FREE {
+                    *v = (v.0 + k.prev[i].load(Relaxed) as u32, v.1 + 1);
+                }
+            }
+            busy |= v.0 >= CORE_KEEP * v.1.max(1);
+        }
+    }
+    let mut keep = [false; TS * TS];
+    let mut new = [false; TS * TS];
+    if busy {
+        for ly in 0..TS {
+            for lx in 0..TS {
+                let (a, b, d) = (row[ly][lx], row[ly + 1][lx], row[ly + 2][lx]);
+                let (sum, open) = (a.0 + b.0 + d.0, a.1 + b.1 + d.1);
+                let c = (y0 + ly) * W + x0 + lx;
+                if sum < CORE_KEEP * open || open < 4 || inp.obj[c] != FREE {
+                    continue;
+                }
+                let gi = ((y0 + ly) / CG) * CW + (x0 + lx) / CG;
+                if (k.any_dmg && k.dmg[c] > 0.0) || inp.lock[gi] != 0 || (!inp.rally.is_empty() && inp.rally[gi] != 0) {
+                    continue;
+                }
+                keep[ly * TS + lx] = true;
+                new[ly * TS + lx] = sum >= CORE_AT * open;
+            }
+        }
+    }
+    // take units standing in core cells into their cell's block, and break up blocks whose cell
+    // is no longer core
+    let mixed = inp.mixed.is_some();
+    let nk = if mixed { BK } else { 2 };
+    let mut blk = vec![[u32::MAX; TS * TS]; nk];
+    let mut any = false;
+    let mut s = seed;
+    let len0 = us.len();
+    // blocks first, so units anywhere in the list can join them
+    for i in 0..len0 {
+        let u = us[i];
+        if u.fl & (F_GONE | F_BLOCK) != F_BLOCK {
+            continue;
+        }
+        let ci = (cl(u.y) - y0) * TS + cl(u.x) - x0;
+        let kind = block_kind(u.fl, mixed);
+        if !keep[ci] {
+            // back into clumps of the cell's clump size
+            let cap = (u.n as u32 / CLUMPS_PER_CELL).clamp(1, MAX_CLUMP as u32);
+            us[i].fl &= !F_BLOCK;
+            us[i].n = cap as u16;
+            let b = us[i];
+            emit_into(&b, ci, x0, y0, u.n as u32 - cap, cap, &mut s, us);
+        } else if blk[kind][ci] == u32::MAX {
+            blk[kind][ci] = i as u32;
+            any = true;
+        } else {
+            absorb(us, blk[kind][ci] as usize, i);
+        }
+    }
+    for i in 0..len0 {
+        let u = us[i];
+        if u.fl & (F_GONE | F_DOWN | F_FLY | F_BLOCK) != 0 || u.tg != 0 {
+            continue;
+        }
+        let ci = (cl(u.y) - y0) * TS + cl(u.x) - x0;
+        if !keep[ci] {
+            continue;
+        }
+        let kind = block_kind(u.fl, mixed);
+        let b = blk[kind][ci];
+        if b != u32::MAX {
+            absorb(us, b as usize, i);
+        } else if new[ci] {
+            us[i].fl |= F_BLOCK;
+            blk[kind][ci] = i as u32;
+            any = true;
+        }
+    }
+    if !any {
+        return;
+    }
+    // flow: each block sends on the members that would have crossed into a neighbour this tick
+    let hunt = inp.hunt.unwrap_or(&[]);
+    let rage = rage_near(k, t);
+    // whether the cells just outside the tile can hold core blocks (0 = not worked out yet)
+    let mut ring = [0u8; (TS + 2) * (TS + 2)];
+    // members, health and rage (both summed over members) arriving at each block's cell, and the
+    // flags of one of them
+    let mut inn = vec![(0u32, 0f32, 0f32, 0u8); nk * TS * TS];
+    for kind in 0..nk {
+        for ci in 0..TS * TS {
+            let b = blk[kind][ci];
+            if b == u32::MAX {
+                continue;
+            }
+            let (lx, ly) = (ci % TS, ci / TS);
+            let (cx, cy) = (x0 + lx, y0 + ly);
+            let c = cy * W + cx;
+            let gi = (cy / CG) * CW + cx / CG;
+            let u = &mut us[b as usize];
+            let st = match &inp.mixed {
+                Some(m) => m[kind_of(u.fl).min(2)],
+                None => inp.stats,
+            };
+            let zombie = st.mode == Behaviour::Zombie;
+            let mut spd = st.spd;
+            if st.mode == Behaviour::Orc {
+                u.aux = ((u.aux - inp.dt * 0.015) + rage[(ly / CG) * TC + lx / CG].min(200) as f32 * 0.004).clamp(0.0, 1.0);
+                spd *= 1.0 + u.aux * 1.2;
+            }
+            if inp.slow[gi] != 0 {
+                spd *= 0.4;
+            }
+            let m = inp.nb[c];
+            let use_hunt = inp.hunt.is_some() && !(zombie && inp.rush) && hunt[c] < U16;
+            let wander = zombie && !inp.rush && !use_hunt;
+            let mut cs = [f32::INFINITY; 8];
+            if use_hunt {
+                costs(&mut cs, m, c, |i| hunt[i] as u32, U16 as u32, k.prev, DK);
+            } else if !wander {
+                costs(&mut cs, m, c, |i| inp.hq[i], INF, k.prev, DK);
+            }
+            // the members split into a few parcels, each moving the way one of them would: it picks
+            // a neighbour, then attacks what stands there or takes one step (from a random spot in
+            // the cell to a random spot in the neighbour), and the parcel goes wherever that lands
+            let all = u.n as u32;
+            let parcels = all.min(PARCELS);
+            let mut sent = 0;
+            for j in 0..parcels {
+                let n = all / parcels + (j < all % parcels) as u32;
+                let r = xr(&mut s);
+                // (one draw feeds it all: neighbour, start and end spots, step length)
+                let d = if wander { (r >> 61) as i32 } else { pick(&cs, &k.jt[(r >> 56) as usize]) };
+                if d < 0 || m & (1 << d) == 0 {
+                    continue;
+                }
+                let nc = (c as isize + OFF[d as usize]) as usize;
+                let o = inp.obj[nc];
+                if o != FREE {
+                    if wander {
+                    } else if o >= 0 {
+                        if let Some(a) = inp.sd.get(o as usize) {
+                            a.fetch_add((st.atk * inp.dt * DMG_SCALE * n as f32) as u32, Relaxed);
+                        }
+                    } else if o <= -2 && o != SOLID {
+                        if let Some(a) = inp.bd.get((-o - 2) as usize) {
+                            a.fetch_add((st.atk * inp.dt * DMG_SCALE * n as f32) as u32, Relaxed);
+                        }
+                    }
+                    continue;
+                }
+                let fr = |b: u32| ((r >> b) & 0x3ff) as f32 * (1.0 / 1024.0);
+                let (sx, sy) = (fr(0), fr(10));
+                let (ex, ey) = (DX[d as usize] as f32 + fr(20) - sx, DY[d as usize] as f32 + fr(30) - sy);
+                let len = (ex * ex + ey * ey).sqrt();
+                let stp = CORE_STEP * spd * inp.dt * (0.75 + 0.5 * fr(40));
+                let (px, py) = if len > stp { (sx + ex / len * stp, sy + ey / len * stp) } else { (sx + ex, sy + ey) };
+                // (px and py lie in -1..2, so this is their floor without a call to libm)
+                let (ox, oy) = ((px + 1.0) as i32 - 1, (py + 1.0) as i32 - 1);
+                if ox == 0 && oy == 0 {
+                    continue;
+                }
+                let (nx, ny) = (cx as i32 + ox, cy as i32 + oy);
+                let nc = ny as usize * W + nx as usize;
+                if inp.obj[nc] != FREE {
+                    continue;
+                }
+                let (nlx, nly) = (nx - x0 as i32, ny - y0 as i32);
+                sent += n;
+                if nlx >= 0 && nly >= 0 && nlx < TS as i32 && nly < TS as i32 {
+                    let ni = nly as usize * TS + nlx as usize;
+                    if keep[ni] {
+                        let e = &mut inn[kind * TS * TS + ni];
+                        e.0 += n;
+                        e.1 += u.hp * n as f32;
+                        e.2 += u.aux * n as f32;
+                        e.3 = u.fl;
+                        continue;
+                    }
+                }
+                let inside = nlx >= 0 && nly >= 0 && nlx < TS as i32 && nly < TS as i32;
+                let ring = &mut ring[(nly + 1) as usize * (TS + 2) + (nlx + 1) as usize];
+                if !inside && *ring == 0 {
+                    *ring = 1 + core_cell(k, nc) as u8;
+                }
+                if !inside && *ring == 2 {
+                    // into the core across the tile's edge: the members go over as a block of their
+                    // own, which joins the block there next tick
+                    let r = xr(&mut s);
+                    let fr = |b: u32| ((r >> b) & 0xffff) as f32 * (1.0 / 65536.0);
+                    out.push(Unit { x: (nx as f32 + fr(0)).min(nx as f32 + 0.999), y: (ny as f32 + fr(16)).min(ny as f32 + 0.999), n: n as u16, ..*u });
+                    continue;
+                }
+                // the edge of the core: out come ordinary clumps
+                emit(u, nc, n, &mut s, out);
+            }
+            u.n -= sent as u16;
+        }
+    }
+    // arrivals join their cell's block (or start one)
+    for kind in 0..nk {
+        for ci in 0..TS * TS {
+            let (n, hp, aux, fl) = inn[kind * TS * TS + ci];
+            if n == 0 {
+                continue;
+            }
+            let b = blk[kind][ci];
+            if b == u32::MAX {
+                let (cx, cy) = ((x0 + ci % TS) as f32, (y0 + ci / TS) as f32);
+                let r = xr(&mut s);
+                let fr = |b: u32| ((r >> b) & 0xffff) as f32 * (1.0 / 65536.0);
+                let mut nu = Unit { x: (cx + fr(0)).min(cx + 0.999), y: (cy + fr(16)).min(cy + 0.999), hp: hp / n as f32, aux: aux / n as f32, tg: 0, hd: 0, fl, n: 0 };
+                let fit = n.min(BLOCK_MAX);
+                nu.n = fit as u16;
+                if n > fit {
+                    emit(&nu, (y0 + ci / TS) * W + x0 + ci % TS, n - fit, &mut s, out);
+                }
+                blk[kind][ci] = us.len() as u32;
+                us.push(nu);
+                continue;
+            }
+            let a = &mut us[b as usize];
+            let fit = n.min(BLOCK_MAX - a.n as u32);
+            let tot = a.n as f32 + n as f32;
+            a.hp = (a.hp * a.n as f32 + hp) / tot;
+            a.aux = (a.aux * a.n as f32 + aux) / tot;
+            a.n += fit as u16;
+            if n > fit {
+                let a = *a;
+                emit(&a, (y0 + ci / TS) * W + x0 + ci % TS, n - fit, &mut s, out);
+            }
+        }
+    }
+    // blocks that sent everyone on and got nobody back
+    for kind in 0..nk {
+        for &b in blk[kind].iter() {
+            if b != u32::MAX && us[b as usize].n == 0 {
+                us[b as usize].fl |= F_GONE;
+            }
+        }
+    }
+}
+
+/// Whether cell `c` can hold a core block: the test `core_units` makes for each of its own cells.
+fn core_cell(k: &Ctx, c: usize) -> bool {
+    let inp = k.inp;
+    let (x, y) = (c % W, c / W);
+    if x == 0 || y == 0 || x + 1 >= W || y + 1 >= H || inp.obj[c] != FREE {
+        return false;
+    }
+    let (mut sum, mut open) = (0, 0);
+    for i in [c - W - 1, c - W, c - W + 1, c - 1, c, c + 1, c + W - 1, c + W, c + W + 1] {
+        if inp.obj[i] == FREE {
+            sum += k.prev[i].load(Relaxed) as u32;
+            open += 1;
+        }
+    }
+    let gi = (y / CG) * CW + x / CG;
+    sum >= CORE_KEEP * open && open >= 4 && !(k.any_dmg && k.dmg[c] > 0.0) && inp.lock[gi] == 0 && (inp.rally.is_empty() || inp.rally[gi] == 0)
+}
+
+/// Unit `i` joins block `b` (unless the block is full).
+fn absorb(us: &mut [Unit], b: usize, i: usize) {
+    let u = us[i];
+    let a = &mut us[b];
+    if a.n as u32 + u.n as u32 > BLOCK_MAX {
+        return;
+    }
+    let (na, nb) = (a.n as f32, u.n as f32);
+    a.hp = (a.hp * na + u.hp * nb) / (na + nb);
+    a.aux = (a.aux * na + u.aux * nb) / (na + nb);
+    a.n += u.n;
+    us[i].fl |= F_GONE;
+}
+
+/// Like `emit`, but straight into the tile's own list (so the clumps step this tick), in pieces of `cap`.
+#[allow(clippy::too_many_arguments)]
+fn emit_into(b: &Unit, ci: usize, x0: usize, y0: usize, mut n: u32, cap: u32, s: &mut u64, us: &mut Vec<Unit>) {
+    let (cx, cy) = ((x0 + ci % TS) as f32, (y0 + ci / TS) as f32);
+    while n > 0 {
+        let k = n.min(cap);
+        n -= k;
+        let r = xr(s);
+        let fr = |b: u32| ((r >> b) & 0xffff) as f32 * (1.0 / 65536.0);
+        us.push(Unit { x: (cx + fr(0)).min(cx + 0.999), y: (cy + fr(16)).min(cy + 0.999), n: k as u16, hd: (r >> 48) as u8 & 7, ..*b });
+    }
 }
 
 impl Swarm {
@@ -1120,6 +1499,7 @@ impl Swarm {
             any_dmg: !self.touched.is_empty(),
             tick: self.tick,
             merge: std::env::var("PH_NOCLUMP").is_err(),
+            core: std::env::var("PH_NOCLUMP").is_err() && std::env::var("PH_NOCORE").is_err(),
         };
         let gr = Grids {
             dens: &self.dens,
@@ -1162,6 +1542,11 @@ impl Swarm {
                 // sweep out the holes once they take up a quarter of the list
                 if *holes as usize * 4 > us.len() {
                     us.retain(|u| u.fl & F_GONE == 0);
+                    *holes = 0;
+                }
+                // the swarm's core moves cell by cell; only its edges step unit by unit below
+                if k.core {
+                    core_units(&k, t, seed(usize::MAX - 1), us, out);
                 }
                 let mut ev = Vec::new();
                 let mut acc = Acc::new();

@@ -128,9 +128,31 @@ async fn run(steam: Option<net::Steam>) {
                 if let Ok(v) = std::env::var("PH_STRESS") {
                     if v == "1" {
                         g.stress();
+                        // PH_RUSH=1: zombies rush the HQ the whole time
+                        if std::env::var("PH_RUSH").is_ok() {
+                            g.rush = true;
+                            g.rush_forever = true;
+                        }
                         let n: u32 = std::env::var("PH_STRESS_TICKS").ok().and_then(|s| s.parse().ok()).unwrap_or(140);
-                        for _ in 0..n {
+                        // PH_TRACE=1: every 20 ticks, how far the horde is from the HQ on average (to compare movement)
+                        let trace = std::env::var("PH_TRACE").is_ok();
+                        for i in 0..n + if trace { 400 } else { 0 } {
                             g.tick();
+                            if trace && i % 20 == 19 {
+                                let (mut sum, mut cnt, mut near) = (0f64, 0f64, 0f64);
+                                for c in 0..world::N {
+                                    let d = g.swarm.at(c) as f64;
+                                    let h = g.hq_dist[c];
+                                    if d > 0.0 && h != fields::INF {
+                                        sum += d * h as f64;
+                                        cnt += d;
+                                        if h < 3000 {
+                                            near += d;
+                                        }
+                                    }
+                                }
+                                eprintln!("trace tick {}: {} hostiles, {} entities, mean HQ distance {:.0}, {:.0} near the HQ", i + 1, g.hostiles(), g.swarm.entities(), sum / cnt.max(1.0), near);
+                            }
                         }
                         let t1 = std::time::Instant::now();
                         for _ in 0..100 {
@@ -155,6 +177,35 @@ async fn run(steam: Option<net::Steam>) {
                                 }
                             }
                             eprintln!("occupied cells {cells}; units by cell density (1,2-3,4-7,8-15,...): {:?}", &h[1..]);
+                            let (mut e, mut m) = ([0usize; 3], [0usize; 3]);
+                            for u in g.swarm.units() {
+                                let k = if u.fl & swarm::F_BLOCK != 0 { 2 } else if u.n > 1 { 1 } else { 0 };
+                                e[k] += 1;
+                                m[k] += u.n as usize;
+                            }
+                            eprintln!("singles/clumps/blocks: entities {:?}, members {:?}", e, m);
+                            let mut sh = [0usize; 12];
+                            for u in g.swarm.units() {
+                                if u.n == 1 && u.fl & swarm::F_BLOCK == 0 {
+                                    let d = g.swarm.at(u.y as usize * world::W + u.x as usize) as usize;
+                                    sh[((usize::BITS - d.leading_zeros()) as usize).min(11)] += 1;
+                                }
+                            }
+                            let mut ih = [0usize; 12];
+                            for y in 1..world::H - 1 {
+                                for x in 1..world::W - 1 {
+                                    let mut sum = 0;
+                                    for c in [(y - 1) * world::W + x - 1, (y - 1) * world::W + x, (y - 1) * world::W + x + 1, y * world::W + x - 1, y * world::W + x, y * world::W + x + 1, (y + 1) * world::W + x - 1, (y + 1) * world::W + x, (y + 1) * world::W + x + 1] {
+                                        sum += g.swarm.at(c);
+                                    }
+                                    if sum >= 24 * 9 {
+                                        let d = g.swarm.at(y * world::W + x) as usize;
+                                        ih[if d == 0 { 0 } else { ((usize::BITS - d.leading_zeros()) as usize).min(11) }] += 1;
+                                    }
+                                }
+                            }
+                            eprintln!("cells inside crowds by their own crowd (0,1,2-3,4-7,...): {:?}", ih);
+                            eprintln!("singles by their cell's crowd (0,1,2-3,4-7,...): {:?}", sh);
                         }
                     }
                 }
