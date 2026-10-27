@@ -445,3 +445,82 @@ pub fn customs(g: &mut Game) {
         g.cshots.len()
     );
 }
+
+/// A fresh campaign's first city played by a simple bot that spends the starting research on the
+/// gun turret (extractors, rifles, a rescue station, evac points, then gun turrets), to check a new
+/// player can hold it. Prints the HQ's health every minute.
+#[cfg(test)]
+pub fn first_city(seed: u64, diff: usize, bot: bool) -> (bool, f32, u32) {
+    let mut c = crate::campaign::Campaign::with_seed(diff, seed);
+    let gun = c.buy(0, crate::campaign::Tech::Build(S::Gun));
+    let d = crate::citygen::generate(seed);
+    let mut g = Game::new(d, c.army(), crate::app::DIFFS[c.diff].1 * c.horde_mult(), seed);
+    g.add_player_hqs_at(1, &[]);
+    c.apply(&mut g);
+    let h = g.world.hq;
+    let mut k = 0i32;
+    let mut t = 0u32;
+    while !g.over && t < 20 * 60 * 15 {
+        g.tick();
+        t += 1;
+        if bot && t % 40 == 0 {
+            let ext = g.structs.iter().filter(|s| !s.dead && s.t == S::Extractor).count();
+            k += 1;
+            let ang = k as f32 * 2.399_963;
+            let at = |r: f32| h + vec2(libm::cosf(ang), libm::sinf(ang)) * r;
+            let has = |t: S| g.structs.iter().filter(|s| !s.dead && s.t == t).count();
+            if ext < 3 {
+                let p = at(25.0 + (k % 5) as f32 * 4.0);
+                g.place(S::Extractor, p.x as i32, p.y as i32);
+            } else if g.groups.iter().filter(|q| !q.dead).count() < 5 {
+                g.deploy(U::Rifle, at(18.0));
+            } else if has(S::Rescue) < 1 {
+                let p = at(22.0 + (k % 5) as f32 * 4.0);
+                g.place(S::Rescue, p.x as i32, p.y as i32);
+            } else if has(S::Pad) < 3 {
+                let p = at(20.0 + (k % 5) as f32 * 4.0);
+                g.place(S::Pad, p.x as i32, p.y as i32);
+            } else if g.groups.iter().filter(|q| !q.dead).count() < 8 {
+                g.deploy(U::Rifle, at(18.0));
+            } else if g.hq_level(0) < 2 && g.scrap > 1100.0 {
+                g.upgrade_hq();
+            } else {
+                let p = at(14.0 + (k % 4) as f32 * 3.0);
+                if gun {
+                    if g.structs.iter().filter(|s| !s.dead && s.t == S::Plant).count() < 1 {
+                        g.place(S::Plant, p.x as i32 + 8, p.y as i32);
+                    } else {
+                        g.place(S::Gun, p.x as i32, p.y as i32);
+                    }
+                } else if g.place(S::Bunker, p.x as i32, p.y as i32) {
+                    // man it
+                    if let Some(gi) = g.groups.iter().position(|q| !q.dead && q.state != crate::game::GState::Garrison) {
+                        g.order(gi, p + vec2(1.0, 1.0));
+                    }
+                }
+            }
+        }
+        if t % 1200 == 0 {
+            let hq = &g.structs[g.hq_idx];
+            eprintln!("  {} min: hq {:.0}/{:.0} hostiles {} scrap {:.0} squads {} flown {}", t / 1200, hq.hp, hq.max, g.hostiles(), g.scrap, g.groups.iter().filter(|q| !q.dead).count(), g.extracted);
+        }
+    }
+    (g.won, g.time, g.extracted)
+}
+
+#[cfg(test)]
+mod tests {
+    /// cargo test --release first_city -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn first_city() {
+        for diff in [0usize, 1, 2] {
+            for seed in [3u64, 8] {
+                for bot in [true] {
+                    let r = super::first_city(seed, diff, bot);
+                    eprintln!("diff {diff} seed {seed} bot {bot}: won {} at {:.0}s, {} flown out", r.0, r.1, r.2);
+                }
+            }
+        }
+    }
+}

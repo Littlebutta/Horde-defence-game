@@ -507,9 +507,12 @@ pub struct Crew {
 static NO_CREW: Crew = Crew { points: 0, tech: Vec::new(), money: 0, parts: Vec::new(), owned: Vec::new() };
 /// Money a new crew starts with in the garage.
 pub const START_MONEY: u32 = 600;
+/// Research points a new crew starts with: enough for one first unlock (the gun turret or the
+/// rescue squad) before New York, so the first city isn't fought with rifles alone.
+pub const START_POINTS: u32 = 180;
 impl Default for Crew {
     fn default() -> Self {
-        Crew { points: 0, tech: Vec::new(), money: START_MONEY, parts: Vec::new(), owned: Vec::new() }
+        Crew { points: START_POINTS, tech: Vec::new(), money: START_MONEY, parts: Vec::new(), owned: Vec::new() }
     }
 }
 
@@ -915,6 +918,24 @@ impl Campaign {
         true
     }
     /// (squads, soldiers) of one kind of troops.
+    /// The squads that roll out of an HQ at `level` (taking at most half its logistics, in the
+    /// order they were raised) and the ones left in reserve.
+    pub fn deployable(&self, level: u8) -> (Vec<(U, u32)>, Vec<(U, u32)>) {
+        let room = if level >= HQ_MAX { u32::MAX } else { logi_cap(level) / 2 };
+        let mut used = 0;
+        self.units.iter().partition(|(u, n)| {
+            let cost = match u {
+                U::Rifle => n.div_ceil(6),
+                U::Tank => *n,
+            };
+            used += cost;
+            used <= room
+        })
+    }
+    /// The HQ level player `p` starts a city with (Prefab HQ research).
+    pub fn start_hq(&self, p: usize) -> u8 {
+        self.crew(p).tech.iter().filter_map(|t| if let Tech::Hq(l) = t { Some(*l) } else { None }).max().unwrap_or(1)
+    }
     pub fn army_size(&self, u: U) -> (usize, u32) {
         let v: Vec<u32> = self.units.iter().filter(|x| x.0 == u).map(|x| x.1).collect();
         (v.len(), v.iter().sum())
@@ -922,24 +943,28 @@ impl Campaign {
 
     /// Sets a fresh game up as the chosen city: its people, research, the hold timer and the army.
     /// Everything read here is saved by `to_text`, so co-op guests set up the same game.
-    pub fn apply(&self, g: &mut Game) {
-        g.campaign = true;
-        g.goal = self.hold_secs();
-        g.potency = self.potency(g.fac.min(2));
-        g.set_civilians(self.civilians_at(self.current));
-        // every player gets their own unlocks and upgrades
+    /// Every player's unlocks and upgrades into a game: at the start of a city, and again when a
+    /// battle left paused behind the campaign screen resumes (anything bought meanwhile counts).
+    pub fn refresh(&self, g: &mut Game) {
         for o in 0..g.perks.len() {
             g.perks[o].allowed = Some(self.allowed(o));
             g.perks[o].parts = Some(self.owned_parts(o));
             for t in &self.crew(o).tech {
                 match *t {
-                    Tech::Research(r) => g.complete_research(o, r),
-                    Tech::Up(u) => g.perks[o].ups.push(u),
+                    Tech::Research(r) if !g.perks[o].research.has(r) => g.complete_research(o, r),
+                    Tech::Up(u) if !g.perks[o].ups.contains(&u) => g.perks[o].ups.push(u),
                     Tech::Hq(l) if l > g.hq_level(o) => g.set_hq_level(o, l),
                     _ => {}
                 }
             }
         }
+    }
+    pub fn apply(&self, g: &mut Game) {
+        g.campaign = true;
+        g.goal = self.hold_secs();
+        g.potency = self.potency(g.fac.min(2));
+        g.set_civilians(self.civilians_at(self.current));
+        self.refresh(g);
         // the starter bases keep only what their players have unlocked
         for i in 0..g.structs.len() {
             if !g.structs[i].dead && !g.build_ok(g.structs[i].owner as usize, g.structs[i].t) {
@@ -947,7 +972,11 @@ impl Campaign {
             }
         }
         let hq = g.world.hq;
-        for (i, (u, n)) in self.units.iter().enumerate() {
+        // the army takes at most half the HQ's logistics, so there's room to build; the rest waits
+        // in reserve and marches on to the next city
+        let (fit, reserve) = self.deployable(g.hq_level(0));
+        g.reserve = reserve;
+        for (i, (u, n)) in fit.iter().enumerate() {
             // fan the squads out around the HQ
             let ang = i as f32 * 2.399_963;
             let mut placed = false;
@@ -995,6 +1024,7 @@ impl Campaign {
             .filter(|gr| !gr.dead)
             .map(|gr| (gr.kind, gr.m.iter().filter(|m| m.alive).count() as u32))
             .filter(|x| x.1 > 0)
+            .chain(g.reserve.iter().copied())
             .collect();
         self.fought += 1;
         self.advance(cur, g.won);
@@ -1518,6 +1548,34 @@ mod tests {
         c
     }
 
+    /// An army bigger than half the HQ's logistics leaves the rest in reserve, and the reserve
+    /// marches on to the next city; buying research while a city is paused counts once.
+    #[test]
+    fn army_reserve_and_refresh() {
+        let mut c = veteran();
+        c.units = vec![(U::Rifle, 6); 10];
+        let mut g = Game::new(crate::citygen::generate(3), c.fac, c.horde_mult(), 1003);
+        g.add_player_hqs_at(1, &[]);
+        c.apply(&mut g);
+        assert_eq!(g.groups.len(), 7);
+        assert_eq!(g.reserve.len(), 3);
+        assert!(g.logi_room(0, 4), "room left to build: {} of {}", g.logi_used(0), g.logi_cap(0));
+        let mut next = c.clone();
+        next.harvest(&g);
+        assert_eq!(next.units.len(), 10);
+        // Prefab HQ V: no limit, everybody rolls out
+        c.crew_mut(0).tech.push(Tech::Hq(5));
+        assert!(c.deployable(c.start_hq(0)).1.is_empty());
+        // armour bought mid-city applies once
+        let hp = g.structs[g.hq_idx].max;
+        let wall = g.structs.iter().position(|s| s.t == S::Wall && !s.dead);
+        let before = wall.map(|i| g.structs[i].max);
+        c.refresh(&mut g);
+        c.refresh(&mut g);
+        assert_eq!(wall.map(|i| g.structs[i].max), before);
+        assert!(g.structs[g.hq_idx].max > hp && g.hq_level(0) == 5);
+    }
+
     /// Carried troops arrive, survivors carry on, and a campaign game stays deterministic.
     #[test]
     fn carry_over() {
@@ -1548,7 +1606,7 @@ mod tests {
         a.won = true;
         next.harvest(&a);
         assert_eq!(next.fought, 4);
-        assert_eq!(next.points(0), 77);
+        assert_eq!(next.points(0), START_POINTS + 77);
         assert_eq!(next.cities[4].fate, Fate::Held);
         assert_ne!(next.current, 4);
         let alive: usize = a.groups.iter().filter(|g| !g.dead).count();
@@ -1567,7 +1625,7 @@ mod tests {
             c.harvest(&g);
             assert_eq!(c.lost, k + 1);
         }
-        assert_eq!(c.points(0), 0);
+        assert_eq!(c.points(0), START_POINTS);
         assert!(c.fired() && c.finished());
     }
 
@@ -1823,7 +1881,7 @@ mod tests {
         g.extracted = 42;
         g.won = true;
         c.harvest(&g);
-        assert_eq!((c.points(0), c.points(1), c.flown), (30, 12, 42));
+        assert_eq!((c.points(0), c.points(1), c.flown), (START_POINTS + 30, START_POINTS + 12, 42));
     }
 
     /// The drawn tree: every tech once, each to the right of the one it needs, nothing overlapping.

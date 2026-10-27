@@ -135,6 +135,8 @@ pub struct App {
     news_vol: u32,
     /// a match left running behind the menu (alone only): Resume or Abandon picks it up again
     suspended: bool,
+    /// Esc this frame is free to open the menu (nothing modal took it)
+    esc_free: bool,
     /// the volume to go back to when M unmutes
     music_prev: u32,
     fac: usize,
@@ -390,6 +392,7 @@ impl App {
             sfx_vol: st.sfx,
             news_vol: st.news,
             suspended: false,
+            esc_free: false,
             music_vol: st.music,
             music_prev: if st.music > 0 { st.music } else { 70 },
             camp: None,
@@ -682,6 +685,10 @@ impl App {
     }
     /// Back into the match left behind the menu.
     fn resume_game(&mut self) {
+        // research and parts bought on the campaign screen meanwhile are ready to use
+        if let (true, Some(c), Some(g)) = (self.in_camp, self.camp.as_ref(), self.game.as_mut()) {
+            c.refresh(g);
+        }
         self.suspended = false;
         self.paused = false;
         self.status.clear();
@@ -2540,8 +2547,11 @@ impl App {
             rrect(r, 6.0, Color::new(0.04, 0.05, 0.07, 0.82));
             text(&self.fonts.mono, &s, r.x + 10.0, r.y + 18.0, 14.0, c);
         }
+        // (Esc that just closed the settings doesn't also open the menu)
+        let modal = self.settings_open;
         self.overlays();
         ui::end();
+        self.esc_free = !modal;
         self.input(&mut g, &mut sc, mw, dt);
         if self.screen == Screen::Play {
             let due = std::mem::take(&mut self.due);
@@ -2935,11 +2945,12 @@ impl App {
         let mut row = top.pad(16.0, 0.0);
         let bs = row.cut_right(5.0 * 90.0 + 4.0 * 6.0, 16.0);
         let b = Rect::new(bs.x, top.y + 10.0, bs.w, 32.0).cols(5, 6.0);
-        // stress test: drops five million more hostiles each press (F9 does the same)
-        if !g.over && self.button(b[0], "Spawn 5M", true, false) {
+        // stress test: drops five million more hostiles each press (F9 does the same); never in
+        // a campaign city, where it would wreck the run
+        if !g.over && !g.campaign && self.button(b[0], "Spawn 5M", true, false) {
             self.act(g, Cmd::Stress(STRESS_N));
         }
-        if self.hot(b[0]) {
+        if !g.campaign && self.hot(b[0]) {
             self.tip = Some("Testing: five million more hostiles pour in from eight spots on the map [F9]".into());
         }
         if self.button(b[1], "Settings", true, false) {
@@ -3494,6 +3505,12 @@ impl App {
             }
         }
         if is_key_pressed(KeyCode::Escape) {
+            // with nothing to drop, Esc opens the menu (alone only: in co-op the menu ends the match)
+            let idle = self.tool == Tool::None && self.selected.is_none() && self.sel_struct.is_none();
+            if idle && self.esc_free && self.sess.is_none() && self.placing.is_none() && !g.over {
+                self.open_menu();
+                return;
+            }
             self.tool = Tool::None;
             self.selected = None;
             self.sel_struct = None;
@@ -3507,7 +3524,7 @@ impl App {
                 self.pick_tool(g, if self.tool == t { Tool::None } else { t });
             }
         }
-        if is_key_pressed(KeyCode::F9) && self.placing.is_none() {
+        if is_key_pressed(KeyCode::F9) && self.placing.is_none() && !g.campaign {
             self.act(g, Cmd::Stress(STRESS_N));
         }
         // camera: WASD pans along the view, Z/C turn, PageUp/PageDown tilt

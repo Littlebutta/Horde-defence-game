@@ -529,6 +529,8 @@ pub struct Game {
     pub won: bool,
     /// campaign game: research is unlocked between cities, not at the lab
     pub campaign: bool,
+    /// campaign: squads of the army that didn't fit the HQ's logistics this city; they march on
+    pub reserve: Vec<(U, u32)>,
     /// the horde's health and attack, ×: campaign research into its army weakens it
     pub potency: f32,
     pub banner: (String, f32),
@@ -646,6 +648,7 @@ impl Game {
             goal: 0.0,
             won: false,
             campaign: false,
+            reserve: Vec::new(),
             potency: 1.0,
             banner: (String::new(), 0.0),
             dirty_buildings: Vec::new(),

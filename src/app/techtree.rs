@@ -40,7 +40,13 @@ impl App {
         let pts = format!("{} RP", c.points(me));
         text(&self.fonts.head, &pts, x0 + w - text_w(&self.fonts.head, &pts, 22.0), y, 22.0, p.accent);
         y += 18.0;
-        let line = if coop { "Every civilian flown out from your evac points is one of your research points." } else { "Every civilian flown out is a research point." };
+        let line = if c.fought == 0 && c.crew(me).tech.is_empty() {
+            "A grant to start with: enough for a first unlock, like the gun turret. After that, every civilian flown out is a research point."
+        } else if coop {
+            "Every civilian flown out from your evac points is one of your research points."
+        } else {
+            "Every civilian flown out is a research point."
+        };
         for l in super::wrap_lines(&self.fonts.mono, line, w, 11.5).iter().take(2) {
             text(&self.fonts.mono, l, x0, y, 11.5, p.dim);
             y += 14.0;
@@ -89,8 +95,16 @@ impl App {
         let (ts, _) = c.army_size(U::Tank);
         let ar = Rect::new(right.x + 10.0, y, right.w - 20.0, 52.0);
         draw_rectangle(ar.x, ar.y, ar.w, ar.h, p.panel2);
-        text(&self.fonts.mono, &format!("{} rifle squads ({} soldiers) · {} tanks", rs, rn, ts), x0, ar.y + 22.0, 12.5, p.text);
-        text(&self.fonts.mono, "Survivors march on to the next city.", x0, ar.y + 40.0, 11.0, p.dim);
+        text(&self.fonts.mono, &format!("{} rifle squad{} ({} soldiers) · {} tank{}", rs, if rs == 1 { "" } else { "s" }, rn, ts, if ts == 1 { "" } else { "s" }), x0, ar.y + 22.0, 12.5, p.text);
+        // what doesn't fit half the HQ's logistics sits this city out
+        let res = c.deployable(c.start_hq(0)).1.len();
+        let note = if res == 0 {
+            "Survivors march on to the next city.".to_string()
+        } else {
+            format!("{} in reserve: the army gets half the HQ's logistics.", if res == 1 { "1 squad waits".to_string() } else { format!("{} squads wait", res) })
+        };
+        let note = fit(&self.fonts.mono, &note, ar.w - 20.0, 11.0);
+        text(&self.fonts.mono, &note, x0, ar.y + 40.0, 11.0, if res == 0 { p.dim } else { p.warn });
         y += ar.h + 8.0;
         let half = (right.w - 28.0) / 2.0;
         for (k, u) in [U::Rifle, U::Tank].into_iter().enumerate() {

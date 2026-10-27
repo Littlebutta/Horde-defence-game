@@ -30,10 +30,15 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 | Page Up / Page Down | Tilt the camera |
 | Scroll | Zoom towards the cursor |
 | T | Top-down or 3D view |
-| K | Dark or light map (dark is the default) |
 | H / F | Jump to HQ / fit the whole map |
-| Space | Pause |
+| Space or P | Pause |
+| M | Music on or off |
+| F1 to F6 | Your garage turrets on the build bar |
+| Esc | Drop the tool or selection; with nothing selected, open the menu (the match waits behind it: Resume or Abandon) |
+| F9 | Testing: five million more hostiles (not in campaign cities) |
 
+- **HQ levels and logistics:** the HQ card at the top right shows its level and logistics. Every turret, rifle squad (six soldiers) and tank you have out counts one, up to 15, 25, 40 and 60 at levels 1 to 4 and no limit at level 5. Upgrading costs $1000, $2000, $3500 and $6000 and gives the HQ a new model and more health.
+- Anything you buy goes up behind scaffolding for 2.5 to 3 seconds (walls 1 s) and does nothing until it's finished.
 - Every match starts by choosing where the HQ goes: the suggested spot is shown first, click anywhere on dry land to move it, then **Start here** (or Enter). An HQ next to the airport takes the whole airport into its base zone. In co-op the host picks.
 - Turrets cost more the further they are from the HQ; the extra is shown at the cursor. Outside the base zone they are flown in by helicopter.
 - Click a rooftop with a turret selected to mount it there for +60% range. If the building falls, so does the turret.
@@ -57,19 +62,24 @@ Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publis
 
 Pick **World campaign** on the menu. The outbreak is spreading through the world's biggest cities and you're the one the governments send in. It starts in **New York**; after that you pick each city on a globe. Every campaign draws ten more from a pool of forty well-known cities (London, Paris, Tokyo, Rio de Janeiro, Cairo, Sydney, Moscow, Mumbai, Lagos and the rest), at least 1,000 km apart, so no two campaigns visit the same places.
 
-- The globe between cities: drag to turn it, scroll to zoom, click a city (on the globe or in the list) to pick it. Every city shows its **days until it falls** and the **people still alive** there, from its real metro population.
-- Every city you fight in takes 10 days. Meanwhile the others count down, each at its own speed, and fewer people are left as a city nears its end. A city that reaches zero falls to the horde and can't be picked any more.
-- The closer a city is to falling, the bigger its horde: from ×0.8 for a quiet city to ×3.2 for one about to fall, plus 6% for every city fought before. Civilians on the map scale with the people still alive (about one per 1,700).
-- Hold each city until the evac timer runs out (7 minutes, 20 seconds longer for every city fought, at most 11).
-- A city's horde depends on how close it is to falling (x0.7 for a quiet city up to x2.3 for one about to go) and on how far the campaign has come: the first city is fought at a little over half strength, and every city held makes the next ones 14% harder.
-- The maps are the city centres. The suggested HQ spot is an airport only when one is close enough to share the map with downtown; otherwise it's the middle of the city. You can move it before the city starts.
-- Every civilian flown out of a held city is a **research point**. Between cities you spend them on the **tech tree** or on recruiting troops. The tech tree (button on the campaign screen, or T) is drawn as a tree: each tech opens up the ones to its right, e.g. gun turret, then cannon and flame bunker, then railgun and artillery, each with its upgrades. You start with only walls, the scrap extractor, the evac point, the rescue station and rifles; every turret, the tank, every ability and the lab's research must be unlocked. Unlocking your first turret brings the ammo plant with it, and every turret has two upgrades of its own (faster fire, armour piercing, napalm, wider rail beams and so on). There is no research lab inside campaign cities.
-- A lost city (the HQ overrun) pays nothing, but the campaign goes on. Lose **three** and the world's governments fire you: the campaign is over.
-- Troops that survive (rifle squads and tanks, with however many soldiers are left) march on to the next city and roll out of the HQ when it starts. Scrap, ammo and buildings stay behind.
+- **Turns:** you defend one city a turn while the others run down, so you can't save them all. Every city shows its **turns until it falls**, its people still alive (from its real metro population) and its **threat level**. A city that runs out falls: it stays on the globe as a dark grey pin, makes every other horde 8% stronger, and a new city joins the war.
+- **The horde:** a city's horde depends on its own heat, how far the campaign has come (the first city is fought at a little over half strength, every city held makes the next ones 10% harder), how many cities have fallen and your research into its army. Harder cities pay more money.
+- **Armies:** the campaign starts with zombies; aliens and orcs both turn up by turn 6, each announced by a bulletin and the newscaster. Alien swarms hop from city to city (purple reticle and trail), eat a city twice as fast and grow if left alone; orc portals spread (orange reticles).
+- Hold each city until the evac timer runs out (7 minutes, 20 seconds longer for every city fought, at most 11). Civilians on the map scale with the people still alive.
+- **Research:** every civilian flown out of a held city is a **research point**. A new campaign starts with enough for one first unlock (the gun turret, say) before New York. You start with walls, bunkers, the scrap extractor, the evac point, the rescue station and rifles; every turret, the tank, every ability, the turret upgrades and the **Prefab HQ** levels (cities start with the HQ that far up) are on the **tech tree** (button on the campaign screen, or T). Unlocking your first turret brings the ammo plant with it. There is no research lab inside campaign cities.
+- **Know your enemy:** kills of each army pay for research into it. Each step makes its hordes smaller and weaker; the last wipes it out everywhere.
+- **Turret garage** (G on the campaign screen): research garage parts with points and buy them with the money held cities pay. Placing your designs in a city needs the **Turret workshop** tech.
+- A lost city pays nothing, but the campaign goes on. Lose **three** and the world's governments fire you: the campaign is over. **Abandon city** on the menu counts as a loss.
+- **Your army:** troops that survive (rifle squads and tanks, with however many soldiers are left) march on to the next city and roll out of the HQ when it starts; you can also recruit squads with points. The army takes at most half the HQ's logistics, so there's always room to build: the rest waits in reserve for that city and marches on with the others. Scrap, ammo and buildings stay behind.
+- Menu during a city pauses it behind the campaign screen: research and parts you buy there are ready when you **Resume defense**.
 - Progress saves to `data/campaign.txt` after every city and every purchase; **Continue** picks it up.
 - The maps are downloaded from OpenStreetMap ahead of time by the **Download campaign cities** workflow and published as the `cities` release. The game fetches the current campaign's maps from GitHub in the background, three at once and the city you picked first (into `data/campaign`), so no campaign city waits on OpenStreetMap. A map that's missing anyway downloads live like any real city: four map tiles at a time from different OpenStreetMap servers.
 - The globe's coastlines are Natural Earth's 1:50m land (public domain), baked into `assets/land.bin` by `tools/bake_land.py`.
-- In co-op every player has their own research points and their own tech tree: you earn points from the civilians flown out of your own evac points (each player's starter base has one), and what you unlock and research only upgrades what you build and call in. Picking the next city and going in are votes.
+- In co-op every player has their own research points, tech tree and HQ: you earn points from the civilians flown out of your own evac points, and what you unlock and research only upgrades what you build and call in. Each guest picks their own HQ spot after the host. Picking the next city and going in are votes.
+
+## Turret garage
+
+**Turret garage** on the main menu opens the free builder with every part unlocked. A turret is built from 129 parts in seven slots (mount, head, barrel, two modifiers, two accessories), and its cost is the sum of its parts. Barrels fire twelve different ways (shotgun, mortar, rail, laser, flamer, tesla, homing missiles, flak and more), heads pick how it targets, mounts change how it sits and moves (walkers, pop-ups, cranes, fortresses), and modifiers and accessories add napalm, frost, cluster bombs, shields, mines and spotters. Paint and name each design; builds are saved to one library shared by free play and the campaign, and can be copied as a code. Up to six go on the build bar (F1 to F6).
 
 ## Co-op with Steam friends
 
@@ -106,6 +116,7 @@ For headless testing on Linux: `PH_SHOT=out.png PH_FAC=1 PH_TICKS=2000 xvfb-run 
 ## How it works
 
 - **Swarm:** the map is cut into 16x16-cell tiles that each own their units, and rayon steps the tiles across all cores each tick. Every unit reads shared grids (open streets, flow fields, last tick's crowd density, queued damage) and writes only itself, plus atomic counters for damage to whatever it's chewing on.
+- **Core blocks:** deep inside a packed swarm each cell's units merge into one block that moves as a few parcels, each stepping exactly like one of its units, so only a swarm's edges are stepped unit by unit. Blocks break back into clumps wherever the crowd thins, takes damage or regroups (`PH_NOCORE=1` turns them off to compare).
 - **Clumps (10-15 million units):** where the horde is packed, the units sharing a cell are merged into clumps of up to 64 that step as one unit with a member count. Each packed cell keeps about eight clumps so the crowd still flows out in every direction, and a clump splits back into single units at the thin edge of the crowd, wherever its members would have taken different steps, and when it takes damage (its members' health is spread like single units'). The screen only shows units per cell, so the horde looks the same while a tick costs several times less.
 - **Pathing:** flow fields built with bucketed Dijkstra on background threads: one to the HQ that passes through buildings at a high cost (so the horde chews through when there's no way around), and "hunt" fields toward whatever the faction can see. Diagonal steps between two blocked cells are refused, so a wall line with touching corners seals a street.
 - **Rendering:** fully 3D. Roads, water and parks are baked into flat meshes; buildings are 3D blocks baked per map tile, so a destroyed building only rebuilds its own tile. Clicks are ray-cast into the scene, so rooftops can be picked from any angle. The horde is a map-sized texture redrawn from the density grid (only the bands of the map where it has been), blended from the last tick's picture to the newest so it glides between the 20 Hz ticks, with a soft glow under it that grows with the crowd. Single-player ticks run on their own thread while the previous frame is on screen, so they don't land on top of a frame.
