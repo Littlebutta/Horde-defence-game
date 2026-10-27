@@ -69,6 +69,31 @@ pub const NAPALM_LIFE: f32 = 1.6;
 pub const NAPALM_DPS: f32 = 14.0;
 /// Seconds a railgun charges before it fires.
 pub const RAIL_CHARGE: f32 = 1.2;
+/// Scrap an ammo plant burns each second (for 6 ammo, or 10 with Shell presses).
+pub const PLANT_SCRAP: f32 = 5.0;
+
+/// HQ levels: what upgrading to each level costs, and how many turrets and squads (logistics) each
+/// level supports. Level 5 is as good as unlimited.
+pub const HQ_MAX: u8 = 5;
+pub const HQ_UP_COST: [f32; 6] = [0.0, 0.0, 1000.0, 2000.0, 3500.0, 6000.0];
+pub const LOGI_CAP: [u32; 6] = [0, 15, 25, 40, 60, 100_000];
+/// HQ health grows by this share of its base for every level above 1.
+pub const HQ_HP_PER_LEVEL: f32 = 0.3;
+pub fn logi_cap(level: u8) -> u32 {
+    LOGI_CAP[level.clamp(1, HQ_MAX) as usize]
+}
+
+/// Seconds a structure takes to build once placed (scaffolding goes up, then sinks away).
+pub fn build_time(t: S) -> f32 {
+    match t {
+        S::Hq => 0.0,
+        S::Wall => 1.0,
+        _ if def(t).w >= 9 => 3.0,
+        _ => 2.5,
+    }
+}
+/// How long the scaffolding takes to sink into the ground once a build is done.
+pub const SCAFFOLD_SINK: f32 = 0.7;
 
 pub struct Def {
     pub key: char,
@@ -140,7 +165,7 @@ pub fn def(s: S) -> &'static Def {
         top: rgb(198, 154, 116),
         side: rgb(134, 96, 63),
         zone: true,
-        tip: "Turns 3 scrap into 6 ammo every second. Base zone only.",
+        tip: "Turns 5 scrap into 6 ammo every second. Base zone only.",
         ..BASE
     };
     static SILO: Def = Def {
@@ -157,7 +182,7 @@ pub fn def(s: S) -> &'static Def {
         tip: "Unlocks the ICBM. Each silo has its own 75 s cooldown. Base zone only.",
         ..BASE
     };
-    static PAD: Def = Def { key: '7', name: "Evac point", w: 11, h: 11, hp: 500.0, cost: 200.0, ht: 0.5, top: rgb(248, 249, 250), side: rgb(173, 181, 189), zone: true, tip: "Rescued civilians walk to the nearest pad. A pad flies up to 16 out at a time (+100 score, +20 scrap, +10 ammo each), then needs 30 s before its next flight, so build several. A crowded base slows your income.", ..BASE };
+    static PAD: Def = Def { key: '7', name: "Evac point", w: 11, h: 11, hp: 500.0, cost: 200.0, ht: 0.5, top: rgb(248, 249, 250), side: rgb(173, 181, 189), zone: true, tip: "Rescued civilians walk to the nearest pad. A pad flies up to 16 out at a time (+100 score, +20 scrap, +10 ammo each), then needs 30 s before its next flight, so build several.", ..BASE };
     static OUTPOST: Def = Def {
         key: 'o',
         name: "Outpost",
@@ -345,11 +370,20 @@ pub enum Up {
     HeliumHull,
     ArtyRapid,
     ArtyHe,
+    RifleDrill,
+    RifleAp,
+    RifleGrenade,
+    RifleRocket,
 }
+/// The rifle squad upgrades, in the order they unlock (each needs the one before).
+pub const RIFLE_UPS: [Up; 4] = [Up::RifleDrill, Up::RifleAp, Up::RifleGrenade, Up::RifleRocket];
+/// Rocket riflemen: how hard a rocket hits and how wide it bursts (kept small on purpose).
+pub const ROCKET_DMG: f32 = 32.0;
+pub const ROCKET_RAD: f32 = 2.2;
 pub struct UpDef {
     pub name: &'static str,
     pub tip: &'static str,
-    /// the turret it upgrades
+    /// the turret it upgrades (rifle squad upgrades: the HQ, which trains them)
     pub on: S,
     /// research points
     pub cost: u32,
@@ -368,8 +402,18 @@ pub fn updef(u: Up) -> UpDef {
         Up::HeliumHull => ("Armoured tanks", "Helium towers have twice the health", S::Helium, 120),
         Up::ArtyRapid => ("Gun crews", "Artillery fires 30% faster", S::Artillery, 220),
         Up::ArtyHe => ("High explosive", "Artillery shells blast a 40% wider area and hit 30% harder", S::Artillery, 240),
+        Up::RifleDrill => ("Marksman drills", "Riflemen fire 30% faster", S::Hq, 90),
+        Up::RifleAp => ("Battle rifles", "Riflemen hit 60% harder and reach 15% further", S::Hq, 140),
+        Up::RifleGrenade => ("Rifle grenades", "Rifle shots burst in a small blast that also hits the units around the target", S::Hq, 200),
+        Up::RifleRocket => ("Shoulder rockets", "Riflemen fire rockets: much harder hits in a small blast that also damages buildings, at a slower rate", S::Hq, 300),
     };
     UpDef { name, tip, on, cost }
+}
+
+/// The upgrade that has to be bought before this one, for upgrades that come in a chain.
+pub fn up_after(u: Up) -> Option<Up> {
+    let k = RIFLE_UPS.iter().position(|x| *x == u)?;
+    (k > 0).then(|| RIFLE_UPS[k - 1])
 }
 
 /// The research that upgrades an ability, if any.

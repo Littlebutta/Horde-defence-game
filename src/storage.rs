@@ -234,7 +234,7 @@ pub fn decode(b: &[u8]) -> Option<Desc> {
     let runways = r.list(|r| Some(Line { pts: r.pts()?, w: r.f32()? }))?;
     let airport = if r.u32()? == 1 { Some(r.pts()?) } else { None };
     let islands = r.list(|r| r.pts()).unwrap_or_default();
-    Some(Desc { name, note, mpc, roads, buildings, water, islands, water_lines, parks, airport, aprons, runways, hq })
+    Some(Desc { name, note, mpc, roads, buildings, water, islands, water_lines, parks, airport, aprons, runways, hq, extra_hqs: Vec::new() })
 }
 
 pub fn save_map(query: &str, d: &Desc) {

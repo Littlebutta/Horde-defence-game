@@ -192,6 +192,11 @@ pub struct App {
     /// the match hasn't started: the player is choosing where the HQ goes (the map and seed to
     /// rebuild from)
     placing: Option<(Desc, u64)>,
+    /// co-op guest choosing: where they put their HQ, and whether they've sent it to the host
+    my_spot: Option<Vec2>,
+    spot_sent: bool,
+    /// co-op: the map and seed of the game being played, to rebuild it once every HQ is placed
+    coop_map: Option<(Desc, u64)>,
     /// set during a frame: move the HQ here / start the match
     place_at: Option<Vec2>,
     place_go: bool,
@@ -409,6 +414,9 @@ impl App {
             rt: None,
             depth: None,
             placing: None,
+            my_spot: None,
+            spot_sent: false,
+            coop_map: None,
             place_at: None,
             place_go: false,
             banner: None,
@@ -568,6 +576,7 @@ impl App {
                     self.camp = camp.map(|t| campaign::from_text(&t));
                     self.begin(*desc, seed);
                 }
+                net::Note::Spots => self.spots_settled(),
                 net::Note::Ended => {
                     if self.screen == Screen::Play {
                         self.screen = Screen::Menu;
@@ -1072,6 +1081,7 @@ impl App {
                 Sfx::Nuke => (music::Snd::Nuke, 1.0, 1.0),
                 Sfx::Gun => (music::Snd::Gun, 0.4, jitter),
                 Sfx::HeliGun => (music::Snd::HeliGun, 0.6, jitter),
+                Sfx::Rocket => (music::Snd::Cannon, 0.3, 1.45 * jitter),
                 Sfx::BaseAttacked => (music::Snd::BaseAttacked, 0.8, 1.0),
                 Sfx::FlameStop => continue,
             };
@@ -1895,15 +1905,42 @@ impl App {
     /// A map is ready: first the player picks where the HQ goes (a co-op guest gets the host's
     /// choice), then the match starts.
     fn begin(&mut self, d: Desc, seed: u64) {
-        let guest = self.sess.as_ref().is_some_and(|s| !s.is_host());
-        if guest || self.auto_place {
+        self.my_spot = None;
+        self.spot_sent = false;
+        // PH_NETSPOT=dx,dy: in the co-op test the guest picks its HQ spot (see `net_test`)
+        let pick_test = std::env::var("PH_NETSPOT").is_ok();
+        if self.auto_place && !(pick_test && self.client()) {
             self.launch(d, seed);
+            if let Some(s) = self.sess.as_mut().filter(|s| s.is_host() && !pick_test) {
+                s.finish_spots();
+            }
             return;
         }
         let g = self.make_game(d.clone(), seed);
         self.show(g, true);
         self.placing = Some((d, seed));
         self.msg = (String::new(), 0.0);
+    }
+
+    /// Co-op: every HQ spot is settled. A guest still choosing starts the match; anyone already in
+    /// it (the host, a guest that skipped choosing) rebuilds the game around the final spots, which
+    /// is safe because the clock only starts now.
+    fn spots_settled(&mut self) {
+        if self.screen != Screen::Play {
+            return;
+        }
+        if let Some((d, seed)) = self.placing.clone() {
+            if self.client() {
+                self.launch(d, seed);
+            }
+            return;
+        }
+        if self.sess.as_ref().is_some_and(|s| s.exec == 0) {
+            if let Some((d, seed)) = self.coop_map.clone() {
+                let g = self.make_game(d, seed);
+                self.show(g, false);
+            }
+        }
     }
 
     /// Where the local player's own HQ is (in co-op each player has one).
@@ -1919,8 +1956,19 @@ impl App {
         }
     }
 
-    fn make_game(&self, d: Desc, seed: u64) -> Game {
+    fn make_game(&self, mut d: Desc, seed: u64) -> Game {
         let camp = if self.in_camp { self.camp.as_ref() } else { None };
+        // co-op: the HQ spots the players picked (a guest still choosing sees their own pick)
+        let mut spots = self.sess.as_ref().filter(|s| s.in_game).map(|s| s.spots.clone()).unwrap_or_default();
+        if let (Some(s), Some(p)) = (&self.sess, self.my_spot) {
+            if !s.spots_ready && s.me > 0 {
+                if spots.len() <= s.me {
+                    spots.resize(s.me + 1, None);
+                }
+                spots[s.me] = Some(p);
+            }
+        }
+        d.extra_hqs = spots.iter().skip(1).flatten().copied().collect();
         let mut g = match camp {
             Some(c) => Game::new(d, c.army(), DIFFS[c.diff].1 * c.horde_mult(), seed),
             None => Game::new(d, self.fac, DIFFS[self.diff].1, seed),
@@ -1934,7 +1982,7 @@ impl App {
                 1
             }
         };
-        g.add_player_hqs(players);
+        g.add_player_hqs_at(players, &spots);
         if let Some(c) = camp {
             c.apply(&mut g);
         }
@@ -1975,6 +2023,7 @@ impl App {
         }
         let note = d.note.clone();
         let name = d.name.clone();
+        self.coop_map = self.sess.is_some().then(|| (d.clone(), seed));
         // alone, the game built for the chosen spot is the one to play; the host rebuilds from the
         // map as sent, exactly like the guests do
         if !chosen || self.sess.is_some() || self.game.is_none() {
@@ -2008,6 +2057,17 @@ impl App {
 
     /// Rebuilds the game around an HQ at `p` (the map itself stays the same).
     fn move_hq(&mut self, p: Vec2) {
+        if self.client() {
+            // a guest moves only their own HQ; the map stays the host's
+            if self.spot_sent {
+                return;
+            }
+            let Some((d, seed)) = self.placing.clone() else { return };
+            self.my_spot = Some(p);
+            let g = self.make_game(d, seed);
+            self.show(g, false);
+            return;
+        }
         let Some((d, seed)) = self.placing.as_mut() else { return };
         d.hq = p;
         d.note = if near_airport(d, p) { "HQ set up at the airport you picked.".into() } else { "HQ set up where you picked.".into() };
@@ -2024,25 +2084,54 @@ impl App {
         self.panel(r);
         let mut a = r.pad(24.0, 18.0);
         let mut b = a.cut_right(150.0, 20.0);
-        if self.button(b.cut_top(34.0, 8.0), "Back", true, false) {
+        let guest = self.client();
+        if guest {
+            b.cut_top(42.0, 0.0);
+        } else if self.button(b.cut_top(34.0, 8.0), "Back", true, false) {
             self.placing = None;
             self.screen = if self.in_camp { Screen::Hub } else { Screen::Menu };
             self.in_camp = false;
         }
-        if self.button_primary(b.cut_top(36.0, 0.0), "Start here", true) || (!self.blocked && is_key_pressed(KeyCode::Enter)) {
+        let label = if self.spot_sent { "Waiting…" } else { "Start here" };
+        if (self.button_primary(b.cut_top(36.0, 0.0), label, !self.spot_sent) || (!self.blocked && is_key_pressed(KeyCode::Enter))) && !self.spot_sent {
             self.place_go = true;
         }
         text(&self.fonts.head, "Choose your HQ location", a.x, a.y + 24.0, 24.0, p.text);
-        let line = match &self.sess {
-            Some(_) => "Click the map to move the HQ. Your co-op team starts there too.",
-            None => "Click the map to move the HQ. The horde comes once you start.",
+        let host = self.sess.as_ref().map(|s| s.host_name()).unwrap_or_default();
+        let line = match (&self.sess, guest, self.spot_sent) {
+            (_, true, true) => "Waiting for the other players to choose their HQ spots.".to_string(),
+            (_, true, false) => format!("Click the map to move your HQ. {} has set up theirs.", host),
+            (Some(_), false, _) => "Click the map to move your HQ. Each of your team picks their own spot next.".to_string(),
+            (None, ..) => "Click the map to move the HQ. The horde comes once you start.".to_string(),
         };
-        text(&self.fonts.mono, line, a.x, a.y + 50.0, 13.0, p.dim);
+        text(&self.fonts.mono, &line, a.x, a.y + 50.0, 13.0, p.dim);
         text(&self.fonts.mono, "Drag to look around, wheel to zoom, F for the whole map.", a.x, a.y + 70.0, 13.0, p.dim);
         self.msg.1 -= get_frame_time();
         if self.msg.1 > 0.0 && !self.msg.0.is_empty() {
             let m = self.msg.0.clone();
             self.toast(r.bottom() + 12.0, &m, p.bad, 1.0);
+        }
+    }
+
+    /// Co-op host: the guests are still picking their HQ spots, and the clock waits for them.
+    fn spots_wait(&mut self) {
+        let Some(s) = self.sess.as_ref().filter(|s| s.is_host() && s.in_game && !s.spots_ready) else { return };
+        let names: Vec<String> = s.spots_missing().into_iter().filter_map(|k| s.players.get(k).map(|p| p.name.clone())).collect();
+        let p = pal(self.dark);
+        let area = ui::hud();
+        let r = Rect::new(area.x + (area.w - 620.0) / 2.0, area.y + area.h * 0.3, 620.0, 96.0);
+        self.panel(r);
+        text(&self.fonts.head, "Waiting for your team to place their HQs", r.x + 22.0, r.y + 32.0, 20.0, p.text);
+        let who = if names.is_empty() { "Almost there…".to_string() } else { format!("Still choosing: {}", names.join(", ")) };
+        text(&self.fonts.mono, &fit(&self.fonts.mono, &who, r.w - 230.0, 13.0), r.x + 22.0, r.y + 60.0, 13.0, p.dim);
+        let b = Rect::new(r.right() - 190.0, r.y + 46.0, 170.0, 34.0);
+        if self.button(b, "Start without waiting", true, false) {
+            if let Some(s) = self.sess.as_mut() {
+                s.finish_spots();
+            }
+        }
+        if self.hot(b) {
+            self.tip = Some("Anyone who hasn't picked gets an HQ spot picked for them".into());
         }
     }
 
@@ -2188,6 +2277,9 @@ impl App {
             sc.retheme(&g, th);
         }
         self.play_sfx(&mut g);
+        // the war drum, louder the closer the view is to the nearest drummer
+        let near = g.drummers.iter().filter(|d| !d.dead).map(|d| d.p.distance(self.cam.t)).fold(f32::MAX, f32::min);
+        self.music.drum(if near < f32::MAX && !g.over { (1.0 - near / 700.0).clamp(0.3, 1.0) } else { 0.0 });
         if let (Some(n), None, false) = (self.news.as_mut(), &self.placing, g.over) {
             if let Some(army) = n.broadcast(g.time, dt) {
                 self.music.news(army);
@@ -2201,7 +2293,7 @@ impl App {
             let mut said = Vec::new();
             let mut n = 0;
             if s.is_host() {
-                if !s.paused && !g.over {
+                if !s.paused && !g.over && s.spots_ready {
                     self.acc += dt;
                     while self.acc >= DT && n < 3 {
                         let f = s.step().unwrap_or_default();
@@ -2368,6 +2460,7 @@ impl App {
         } else {
             self.hud(&mut g);
             self.city_banner();
+            self.spots_wait();
         }
         if let (Some((s, c)), false) = (cursor_label, self.settings_open || self.over_ui()) {
             let m = self.mouse();
@@ -2395,8 +2488,17 @@ impl App {
                 self.move_hq(p);
             }
             if std::mem::take(&mut self.place_go) {
-                let (d, seed) = self.placing.clone().unwrap();
-                self.launch(d, seed);
+                if self.client() {
+                    // a guest sends their spot; the match starts once everybody has
+                    let mine = self.my_spot.or_else(|| self.game.as_ref().map(|g| self.my_hq(g)));
+                    if let (Some(s), Some(p)) = (self.sess.as_mut(), mine) {
+                        s.send_spot(p);
+                        self.spot_sent = true;
+                    }
+                } else {
+                    let (d, seed) = self.placing.clone().unwrap();
+                    self.launch(d, seed);
+                }
             }
         }
         self.place_at = None;
@@ -2803,9 +2905,6 @@ impl App {
         if evac {
             stats.push(("EVAC IN", mmss((g.goal - g.time).max(0.0)), p.warn, Some("Hold out until the evac flies everyone out")));
         }
-        if g.income_mult < 0.999 {
-            stats.push(("INCOME", format!("×{:.2}", g.income_mult), p.bad, Some("Too many rescued civilians are waiting in the base. Build more evac points to fly them out faster.")));
-        }
         stats.extend([
             ("RESCUED", format!("{}", g.rescued), p.text, None),
             ("WAITING", format!("{}", g.waiting), p.text, None),
@@ -2915,6 +3014,7 @@ impl App {
         let aw = 248.0;
         let ax = area.right() - aw - 12.0;
         let mut ay = top.bottom() + 12.0;
+        ay += self.hq_card(g, Rect::new(ax, ay, aw, 78.0)) + 8.0;
         // cards get shorter when the screen is short
         let lab = !g.campaign && g.has(S::Lab);
         let lab_h = if lab { 44.0 + LAB_ONLY.len() as f32 * 30.0 } else { 0.0 };
@@ -3085,6 +3185,47 @@ impl App {
                 self.leave_game();
             }
         }
+    }
+
+    /// The HQ's level, the logistics it gives (turrets and squads in the field / allowed) and the
+    /// button for the next level. Returns its height.
+    fn hq_card(&mut self, g: &mut Game, r: Rect) -> f32 {
+        let p = pal(self.dark);
+        let me = self.me();
+        let lvl = g.hq_level(me);
+        let (used, cap) = (g.logi_used(me), g.logi_cap(me));
+        self.panel(r);
+        text(&self.fonts.head, &format!("HQ · level {}", lvl), r.x + 14.0, r.y + 23.0, 16.0, p.text);
+        // five pips for the levels
+        for k in 0..HQ_MAX {
+            let q = Rect::new(r.right() - 14.0 - (HQ_MAX - k) as f32 * 14.0, r.y + 13.0, 10.0, 10.0);
+            rrect(q, 2.0, if k < lvl { p.accent } else { alpha(p.line, 1.0) });
+        }
+        let full = used >= cap;
+        let logi = if lvl >= HQ_MAX { format!("Logistics {} · no limit", used) } else { format!("Logistics {} / {}", used, cap) };
+        text(&self.fonts.mono, &logi, r.x + 14.0, r.y + 41.0, 12.0, if full { p.bad } else { p.dim });
+        if lvl < HQ_MAX {
+            let pr = Rect::new(r.x + 14.0, r.y + 47.0, r.w - 28.0, 3.0);
+            self.progress(pr, (used as f32 / cap as f32).min(1.0), if full { p.bad } else { p.accent });
+        }
+        let br = Rect::new(r.x + 8.0, r.bottom() - 26.0, r.w - 16.0, 22.0);
+        match g.hq_up_cost(me) {
+            Some(cost) => {
+                let ok = g.scrap >= cost && !g.over;
+                if self.button(br, &format!("Upgrade to level {} · ${:.0}", lvl + 1, cost), ok, false) {
+                    self.act(g, Cmd::UpgradeHq);
+                }
+                if self.hot(br) {
+                    let next = if lvl + 1 >= HQ_MAX { "as many turrets and squads as you can pay for".to_string() } else { format!("{} turrets and squads", logi_cap(lvl + 1)) };
+                    self.tip = Some(format!("A bigger HQ with more health and room for {}.", next));
+                }
+            }
+            None => text(&self.fonts.mono, "Fully upgraded", br.x + 6.0, br.y + 15.0, 11.5, p.dim),
+        }
+        if self.hot(Rect::new(r.x, r.y, r.w, r.h - 28.0)) {
+            self.tip = Some("Logistics: every turret, rifle squad (six soldiers) and tank you have out counts one. Upgrade the HQ to field more.".into());
+        }
+        r.h
     }
 
     /// The end of a campaign city: held (bank civilians, carry the army on) or lost (try again).
@@ -3577,6 +3718,20 @@ impl App {
         if self.screen != Screen::Play {
             return false;
         }
+        let off: Vec<f32> = std::env::var("PH_NETSPOT").unwrap_or_default().split(',').filter_map(|x| x.parse().ok()).collect();
+        if let (false, true, false, [dx, dy]) = (host, self.placing.is_some(), self.spot_sent, off.as_slice()) {
+            let Some(g) = self.game.as_ref() else { return false };
+            let p = g.world.hq + vec2(*dx, *dy);
+            self.move_hq(p);
+            let mine = self.game.as_ref().map(|g| self.my_hq(g));
+            if let (Some(s), Some(m)) = (self.sess.as_mut(), mine) {
+                eprintln!("guest picks HQ at {:?} (asked {:?})", m, p);
+                s.send_spot(m);
+                self.spot_sent = true;
+            }
+            return false;
+        }
+        let s = self.sess.as_ref().unwrap();
         let exec = s.exec;
         let Some(g) = self.game.as_ref() else { return false };
         let hq = g.world.hq;
@@ -3601,7 +3756,8 @@ impl App {
         // a catching-up guest runs several ticks a frame, so log the first frame past each 100
         if exec / 100 > self.test_log / 100 {
             self.test_log = exec;
-            eprintln!("{} tick {} checksum {:016x} structs {} hqs {} hostiles {}{}", if host { "host" } else { "guest" }, exec, g.checksum(), g.structs.iter().filter(|s| !s.dead).count(), g.hqs.len(), g.hostiles(), if s.desync { " DESYNC" } else { "" });
+            let hqs: Vec<String> = g.hqs.iter().map(|&i| format!("{:.0},{:.0}", g.structs[i].center().x, g.structs[i].center().y)).collect();
+            eprintln!("{} tick {} checksum {:016x} structs {} hqs {} hostiles {}{}", if host { "host" } else { "guest" }, exec, g.checksum(), g.structs.iter().filter(|s| !s.dead).count(), hqs.join(" "), g.hostiles(), if s.desync { " DESYNC" } else { "" });
         }
         exec >= until
     }

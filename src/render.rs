@@ -1305,6 +1305,16 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
             ring(&mut mb, p.p, r * (0.4 + k as f32 * 0.2), 0.6, alpha(rgb(255, 146, 43), 0.5 + 0.5 * ((t * 4.0 + k as f32).sin()).abs()));
         }
     }
+    // war drums: a ring rolls out over the ground with every beat, and the rage zone glows
+    for d in &g.drummers {
+        if d.dead || !inview(d.p, DRUM_CALL) {
+            continue;
+        }
+        let f = d.beat / DRUM_BEAT;
+        mb.disc(d.p, DRUM_RAGE, rgba(255, 110, 30, 0.07 + 0.05 * (1.0 - f)));
+        ring(&mut mb, d.p, DRUM_RAGE, 0.5, rgba(255, 140, 50, 0.5));
+        ring(&mut mb, d.p, 3.0 + f * (DRUM_CALL - 3.0), 0.9 * (1.0 - f) + 0.2, Color::new(1.0, 0.55, 0.2, 0.55 * (1.0 - f)));
+    }
     // explosions on the ground
     for b in &g.booms {
         let f = 1.0 - b.t / b.life;
@@ -1442,10 +1452,22 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels, painter: bool
         } else {
             mb.obj(c, 0.0);
         }
+        if s.pending && s.build > 0.0 && !g.helis.iter().any(|hl| hl.kind == HeliKind::Deliver(i)) {
+            // going up behind scaffolding
+            let f = 1.0 - s.build / build_time(s.t).max(0.01);
+            art::scaffold(&mut mb, d, c, w, h, base, f.clamp(0.0, 1.0), 0.0);
+            let bw = w.max(6.0);
+            bar(&mut mb, c + vec2(0.0, -h / 2.0 - 2.0), base + d.ht + 1.5, bw, f, rgb(255, 196, 64));
+            continue;
+        }
         if s.pending {
             // flown in by helicopter: a translucent ghost until it lands
             mb.prism(&rect_pts(x, y, w, h), base, base + 0.3, alpha(d.top, 0.3), alpha(d.top, 0.3));
             continue;
+        }
+        let since = g.time - s.done_at;
+        if (0.0..SCAFFOLD_SINK).contains(&since) {
+            art::scaffold(&mut mb, d, c, w, h, base, 1.0, since / SCAFFOLD_SINK);
         }
         if v.sel_struct == Some(i) {
             art::ring_flat(&mut mb, c, w.max(h) / 2.0 + 1.5, 0.5, base + 0.05, rgb(255, 212, 59));
@@ -1472,6 +1494,15 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels, painter: bool
         let pts: Vec<Vec2> = (0..12).map(|k| b.c + vec2((k as f32 * 0.524).cos(), (k as f32 * 0.524).sin()) * 2.3).collect();
         mb.prism(&pts, b.h + 0.4, b.h + 0.5, col, col);
         labels.items.push((p3(b.c, b.h + 3.0), format!("{}", n), WHITE, 12.0));
+    }
+    // war-drum orcs, with their health
+    for d in &g.drummers {
+        if d.dead || !inview(d.p, 10.0) {
+            continue;
+        }
+        mb.obj(d.p, 0.0);
+        let top = art::drummer(&mut mb, d.p, d.hd, d.beat / DRUM_BEAT, t);
+        bar(&mut mb, d.p + vec2(0.0, -3.0), top + 1.2, 6.0, d.hp / d.max, rgb(255, 140, 50));
     }
     // hives: a living mound of pods
     for h in &g.hives {
@@ -1570,8 +1601,18 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
             2 => rgb(150, 240, 255),
             4 => rgb(200, 220, 255),
             6 => rgb(230, 248, 255),
+            7 => rgb(255, 150, 70),
             _ => rgb(220, 235, 255),
         };
+        if tr.kind == 7 {
+            // a rifle rocket: a short bright head flying along a fading smoke line
+            let f = 1.0 - (tr.t / 0.14).clamp(0.0, 1.0);
+            let (a, b) = (p3(tr.a, tr.az), p3(tr.b, 0.3));
+            let head = a + (b - a) * f;
+            draw_line_3d(a + (b - a) * (f * 0.5), head, Color::new(0.8, 0.8, 0.8, 0.45));
+            draw_sphere(head, 0.35, None, c);
+            continue;
+        }
         draw_line_3d(p3(tr.a, tr.az), p3(tr.b, 0.3), c);
     }
     for b in &g.booms {

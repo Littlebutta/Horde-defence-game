@@ -20,6 +20,11 @@ static TRACKS: [&[u8]; 6] = [
     include_bytes!("../assets/music/night-watch-pulse.mp3"),
 ];
 static AMBIENCE: [&[u8]; 1] = [include_bytes!("../assets/sfx/ambience.mp3")];
+/// Devin's war drum, looped while a war-drum orc is on the map.
+static DRUM: &[u8] = include_bytes!("../assets/sfx/orc-wardrum.mp3");
+const DRUM_GAIN: f32 = 0.8;
+/// seconds the drum takes to fade in or out
+const DRUM_FADE: f32 = 0.8;
 
 /// The news broadcast, from Devin's recordings: an opener, a report about the army in the game
 /// (indexed like `FACTIONS`: zombies, aliens, orcs) and a closer, over the newsroom bed.
@@ -140,6 +145,8 @@ pub struct Music {
     news_vol: Arc<AtomicU32>,
     /// the battle ambience plays while this is set (a game is on screen)
     amb: Arc<AtomicBool>,
+    /// the war drum's loudness, 0..=1000 (0: not playing)
+    drum: Arc<AtomicU32>,
     tx: Option<mpsc::Sender<Cmd>>,
 }
 
@@ -150,14 +157,15 @@ impl Music {
             sfx_vol: Arc::new(AtomicU32::new(sfx.min(100))),
             news_vol: Arc::new(AtomicU32::new(news.min(100))),
             amb: Arc::new(AtomicBool::new(false)),
+            drum: Arc::new(AtomicU32::new(0)),
             tx: None,
         };
         // headless test runs and the city fetcher stay silent (PH_SOUND=1 turns sound back on)
         let quiet = ["PH_SHOT", "PH_FETCH", "PH_NETTEST"].iter().any(|k| std::env::var(k).is_ok()) && std::env::var("PH_SOUND").is_err();
         if !quiet {
             let (tx, rx) = mpsc::channel();
-            let (v, s, n, a) = (m.vol.clone(), m.sfx_vol.clone(), m.news_vol.clone(), m.amb.clone());
-            if std::thread::Builder::new().name("audio".into()).spawn(move || player(v, s, n, a, rx)).is_ok() {
+            let (v, s, n, a, d) = (m.vol.clone(), m.sfx_vol.clone(), m.news_vol.clone(), m.amb.clone(), m.drum.clone());
+            if std::thread::Builder::new().name("audio".into()).spawn(move || player(v, s, n, a, d, rx)).is_ok() {
                 m.tx = Some(tx);
             }
         }
@@ -174,6 +182,10 @@ impl Music {
     }
     pub fn ambience(&self, on: bool) {
         self.amb.store(on, Ordering::Relaxed);
+    }
+    /// The war drum loops at this loudness (0..1) while it's above 0.
+    pub fn drum(&self, gain: f32) {
+        self.drum.store((gain.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
     }
     pub fn play(&self, p: Play) {
         if let Some(tx) = &self.tx {
@@ -449,7 +461,7 @@ impl Source for Voice {
     }
 }
 
-fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, rx: mpsc::Receiver<Cmd>) {
+fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, drum_gain: Arc<AtomicU32>, rx: mpsc::Receiver<Cmd>) {
     // no audio device: no sound, the game carries on
     let Ok((_stream, handle)) = OutputStream::try_default() else { return };
     let mut rng = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
@@ -459,6 +471,9 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>
     let mut last_play = [Instant::now() - Duration::from_secs(1); SNDS];
     let mut keyed: Vec<(u64, Arc<AtomicBool>)> = Vec::new();
     let mut news: Option<News> = None;
+    // the war drum: one endless loop, eased in and out
+    let mut drum: Option<Sink> = None;
+    let mut drum_level = 0.0f32;
     let mut t = Instant::now();
     loop {
         let dt = t.elapsed().as_secs_f32().min(0.5);
@@ -474,6 +489,22 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>
         ambience.update(&handle, &mut rng, in_game && sv > 0.0, sv * AMB_GAIN, dt);
         if news.as_mut().is_some_and(|n| !n.update(in_game, nv, dt)) {
             news = None;
+        }
+        let want = if in_game { drum_gain.load(Ordering::Relaxed) as f32 / 1000.0 } else { 0.0 };
+        drum_level = if want > drum_level { (drum_level + dt / DRUM_FADE).min(want) } else { (drum_level - dt / DRUM_FADE).max(want) };
+        if drum_level > 0.0 && drum.is_none() {
+            drum = Decoder::new(Cursor::new(DRUM)).ok().and_then(|dec| {
+                let sink = Sink::try_new(&handle).ok()?;
+                sink.set_volume(0.0);
+                sink.append(dec.repeat_infinite());
+                Some(sink)
+            });
+        }
+        if drum_level <= 0.0 {
+            drum = None;
+        }
+        if let Some(d) = &drum {
+            d.set_volume(drum_level * sv * DRUM_GAIN);
         }
         // effects queued since the last step; wait for the next one for up to 50 ms
         let deadline = t + Duration::from_millis(50);

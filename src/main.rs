@@ -168,6 +168,9 @@ async fn run(steam: Option<net::Steam>) {
                 if std::env::var("PH_ORCS").is_ok() {
                     selftest::orcs(g);
                 }
+                if let Some(l) = std::env::var("PH_BUILD").ok().and_then(|v| v.parse().ok()) {
+                    selftest::builds(g, l);
+                }
                 let mut hq = g.world.hq;
                 // PH_LOOK=air|gunship|heli|icbm: look at the first one in flight instead
                 match std::env::var("PH_LOOK").as_deref() {

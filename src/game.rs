@@ -42,6 +42,10 @@ pub struct Structure {
     pub snd: f32,
     /// co-op: the player who built it (their upgrades are the ones it gets)
     pub owner: u8,
+    /// seconds of building left (it stays `pending` until then; 0 while a helicopter flies it in)
+    pub build: f32,
+    /// game time the build finished (the scaffolding sinks away after it)
+    pub done_at: f32,
 }
 impl Structure {
     /// Up on a roof or a bunker: no footprint on the ground, and the rooftop range bonus.
@@ -70,7 +74,7 @@ pub struct Member {
     pub aim: f32,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum GState {
     Wait,
     Move,
@@ -89,6 +93,11 @@ pub struct Group {
     pub target: Vec2,
     pub dead: bool,
     pub job: u64,
+    /// co-op: the player it belongs to (their upgrades, their logistics)
+    pub own: u8,
+    /// seconds on the move without anyone getting anywhere, and how often it looked for a new way
+    stuck: f32,
+    retries: u8,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -133,7 +142,7 @@ pub const C_AT_HQ: u8 = 15;
 /// Wandering civilians this close to an HQ (in HQ-field cost, about 10 per cell, so roughly
 /// 75 cells past the edge of a fresh base zone) run for it.
 const HQ_SEEK: u32 = 1500;
-/// Scrap and ammo paid per civilian flown out, to make up for the income they cost while waiting.
+/// Scrap and ammo paid per civilian flown out.
 pub const EVAC_SCRAP: f32 = 30.0;
 pub const EVAC_AMMO: f32 = 10.0;
 
@@ -212,6 +221,7 @@ pub struct Gunship {
     /// last time it raised its gun sound
     pub snd: f32,
 }
+#[derive(Clone, Copy, PartialEq)]
 pub enum HeliKind {
     Deliver(usize),
     Extract,
@@ -273,6 +283,8 @@ pub enum Sfx {
     HeliGun,
     /// the horde is hitting the HQ; raised at most every ALARM_GAP
     BaseAttacked,
+    /// a rocket rifleman fired
+    Rocket,
 }
 /// seconds between two base-under-attack alarms
 const ALARM_GAP: f32 = 30.0;
@@ -291,6 +303,40 @@ pub const REGROUP_REST: f32 = 8.0;
 /// how far around a loss orcs join the regroup, and how far back they fall
 const REGROUP_R: f32 = 30.0;
 const REGROUP_DIST: usize = 34;
+
+/// A squad's gun, after upgrades (see `Game::weapon`).
+#[derive(Clone, Copy)]
+pub struct Weapon {
+    pub range: f32,
+    pub rate: f32,
+    pub dmg: f32,
+    pub rad: f32,
+    pub bdmg: f32,
+    /// rocket riflemen
+    pub rocket: bool,
+}
+
+/// A war-drum orc: bigger and much tougher than the rest, it marches on the nearest HQ beating its
+/// drum. Orcs within earshot rally to it, and those close by go into a rage (fast, at full fury).
+pub struct Drummer {
+    pub p: Vec2,
+    pub hp: f32,
+    pub max: f32,
+    /// facing
+    pub hd: f32,
+    /// seconds into the current drum beat (the rings on the ground)
+    pub beat: f32,
+    pub dead: bool,
+}
+/// How far its drum calls orcs to it, and how close they have to be to go into a rage.
+pub const DRUM_CALL: f32 = 70.0;
+pub const DRUM_RAGE: f32 = 18.0;
+/// Seconds between beats, its speed and how hard it hits what's in its way.
+pub const DRUM_BEAT: f32 = 1.6;
+const DRUM_SPD: f32 = 6.5;
+const DRUM_DPS: f32 = 70.0;
+/// At most this many at once.
+const DRUM_MAX: usize = 3;
 
 pub struct Portal {
     pub p: Vec2,
@@ -316,6 +362,8 @@ pub struct Perks {
     pub allowed: Option<Allowed>,
     /// civilians flown out from their evac points: their research points in a campaign
     pub flown: u32,
+    /// their HQ's level, 1..=HQ_MAX (0 reads as 1)
+    pub hq_lvl: u8,
 }
 
 /// What a campaign's tech tree has unlocked so far.
@@ -424,7 +472,12 @@ pub struct Game {
     alarm_at: f32,
     /// game time a horde last hit an HQ, and which player's (for the HUD popup, not in the checksum)
     pub hq_hit: (f32, u8),
+    /// game time a rifle rocket last raised its sound
+    rocket_snd: f32,
     pub portals: Vec<Portal>,
+    pub drummers: Vec<Drummer>,
+    /// the war drums' pulls on the orcs, after the regroups' in the rally list (see `regroup`)
+    drum_rallies: Vec<Rally>,
     spawnq: Vec<SpawnQ>,
     conv: Vec<Vec2>,
     pub scrap: f32,
@@ -459,7 +512,6 @@ pub struct Game {
     pub won: bool,
     /// campaign game: research is unlocked between cities, not at the lab
     pub campaign: bool,
-    pub income_mult: f32,
     /// the horde's health and attack, ×: campaign research into its army weakens it
     pub potency: f32,
     pub banner: (String, f32),
@@ -540,7 +592,10 @@ impl Game {
             sfx: Vec::new(),
             alarm_at: -ALARM_GAP,
             hq_hit: (f32::NEG_INFINITY, 0),
+            rocket_snd: -1.0,
             portals: Vec::new(),
+            drummers: Vec::new(),
+            drum_rallies: Vec::new(),
             spawnq: Vec::new(),
             conv: Vec::new(),
             scrap: 700.0,
@@ -570,7 +625,6 @@ impl Game {
             goal: 0.0,
             won: false,
             campaign: false,
-            income_mult: 1.0,
             potency: 1.0,
             banner: (String::new(), 0.0),
             dirty_buildings: Vec::new(),
@@ -680,12 +734,19 @@ impl Game {
     /// Co-op: an HQ (with a small starter base and its own base zone) for each player after the
     /// host, spread out around the main one. Both sides call this right after `new`, so it must
     /// stay deterministic.
+    #[allow(dead_code)]
     pub fn add_player_hqs(&mut self, players: usize) {
+        self.add_player_hqs_at(players, &[]);
+    }
+    /// `add_player_hqs`, with the HQs of the players who picked a spot (`spots[k]`) set up there
+    /// (or as close to it as there's room).
+    pub fn add_player_hqs_at(&mut self, players: usize, spots: &[Option<Vec2>]) {
         let main = self.world.hq;
         self.perks.resize(players.clamp(1, 4), Perks::default());
         for k in 1..players.min(4) {
             let ang = -std::f32::consts::FRAC_PI_2 + k as f32 * std::f32::consts::TAU / players.min(4) as f32;
-            let Some(c) = self.hq_spot(main, ang) else { continue };
+            let picked = spots.get(k).copied().flatten().and_then(|p| self.hq_spot_near(p));
+            let Some(c) = picked.or_else(|| self.hq_spot(main, ang)) else { continue };
             self.actor = k;
             let z = &mut self.base_zone;
             fill_disc(c, OUTPOST_R, |q| z[q] = 1);
@@ -716,22 +777,42 @@ impl Game {
         }
     }
 
-    /// A free 14x14 patch of dry ground about 160 cells from `main` in direction `ang`.
-    fn hq_spot(&self, main: Vec2, ang: f32) -> Option<Vec2> {
-        let free = |x: i32, y: i32| {
-            if x < 40 || y < 40 || x > W as i32 - 40 || y > H as i32 - 40 {
-                return false;
-            }
-            for yy in y - 9..y + 9 {
-                for xx in x - 9..x + 9 {
-                    let i = yy as usize * W + xx as usize;
-                    if self.occ[i] >= 0 || self.world.bid[i] >= 0 || self.world.terrain[i] == T_WATER {
-                        return false;
+    /// A free patch for an HQ at `p`, or the nearest one within 40 cells of it.
+    fn hq_spot_near(&self, p: Vec2) -> Option<Vec2> {
+        let (x0, y0) = (p.x as i32, p.y as i32);
+        for r in 0..=40i32 {
+            for oy in -r..=r {
+                for ox in -r..=r {
+                    if ox.abs().max(oy.abs()) != r || (r > 0 && (ox + oy) % 2 != 0) {
+                        continue;
+                    }
+                    if self.hq_free(x0 + ox, y0 + oy) {
+                        return Some(vec2((x0 + ox) as f32, (y0 + oy) as f32));
                     }
                 }
             }
-            true
-        };
+        }
+        None
+    }
+    /// Whether an HQ (with room around it) fits centred on (`x`, `y`).
+    fn hq_free(&self, x: i32, y: i32) -> bool {
+        if x < 40 || y < 40 || x > W as i32 - 40 || y > H as i32 - 40 {
+            return false;
+        }
+        for yy in y - 9..y + 9 {
+            for xx in x - 9..x + 9 {
+                let i = yy as usize * W + xx as usize;
+                if self.occ[i] >= 0 || self.world.bid[i] >= 0 || self.world.terrain[i] == T_WATER {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// A free 14x14 patch of dry ground about 160 cells from `main` in direction `ang`.
+    fn hq_spot(&self, main: Vec2, ang: f32) -> Option<Vec2> {
+        let free = |x: i32, y: i32| self.hq_free(x, y);
         for ring in 0..12 {
             let dist = 160.0 + ring as f32 * 12.0 * if ring % 2 == 0 { 1.0 } else { -1.0 } * 0.5;
             for step in 0..24 {
@@ -1096,6 +1177,8 @@ impl Game {
             on,
             dead: false,
             pending: false,
+            build: 0.0,
+            done_at: -100.0,
             last_fire: -100.0,
             aim: -1.2,
             target: None,
@@ -1203,9 +1286,13 @@ impl Game {
         if self.scrap < cost {
             return false;
         }
+        if !self.logi_room(self.actor, 1) {
+            return false;
+        }
         self.scrap -= cost;
         let d = def(t);
-        self.add_struct_on(t, (c.x - d.w as f32 / 2.0) as i32, (c.y - d.h as f32 / 2.0) as i32, -1, b as i32);
+        let i = self.add_struct_on(t, (c.x - d.w as f32 / 2.0) as i32, (c.y - d.h as f32 / 2.0) as i32, -1, b as i32);
+        self.construct(i);
         true
     }
     pub fn has_up(&self, o: usize, u: Up) -> bool {
@@ -1259,24 +1346,136 @@ impl Game {
         if self.scrap < cost || !self.build_ok(self.actor, t) || !self.can_place(t, x, y) {
             return false;
         }
+        if d.turret && !self.logi_room(self.actor, 1) {
+            return false;
+        }
         self.scrap -= cost;
-        self.add_struct(t, x, y, -1);
+        let i = self.add_struct(t, x, y, -1);
+        self.construct(i);
         true
     }
     /// Buys and places a turret on a rooftop.
     pub fn place_roof(&mut self, t: S, b: usize, p: Vec2) -> bool {
         let d = def(t);
         let cost = self.cost_at(t, p);
-        if !d.turret || d.ground || self.scrap < cost || !self.can_place_roof(t, b, p) || !self.build_ok(self.actor, t) {
+        if !d.turret || d.ground || self.scrap < cost || !self.can_place_roof(t, b, p) || !self.build_ok(self.actor, t) || !self.logi_room(self.actor, 1) {
             return false;
         }
         self.scrap -= cost;
-        self.add_struct(
+        let i = self.add_struct(
             t,
             (p.x - d.w as f32 / 2.0) as i32,
             (p.y - d.h as f32 / 2.0) as i32,
             b as i32,
         );
+        self.construct(i);
+        true
+    }
+
+    /// A structure the player just bought goes up behind scaffolding for a few seconds (after its
+    /// helicopter lands, for one flown in) and does nothing until it is finished.
+    fn construct(&mut self, i: usize) {
+        let s = &mut self.structs[i];
+        s.build = build_time(s.t);
+        if s.build > 0.0 && !s.pending {
+            s.pending = true;
+            if !s.up() {
+                // it no longer counts as standing in the horde's way
+                self.obj_dirty = true;
+            }
+        }
+    }
+    /// Counts down the builds in progress.
+    fn construction(&mut self) {
+        for i in 0..self.structs.len() {
+            let s = &self.structs[i];
+            if s.dead || !s.pending || s.build <= 0.0 || self.helis.iter().any(|h| h.kind == HeliKind::Deliver(i)) {
+                continue;
+            }
+            self.structs[i].build -= DT;
+            if self.structs[i].build <= 0.0 {
+                self.finish_build(i);
+            }
+        }
+    }
+    fn finish_build(&mut self, i: usize) {
+        let s = &mut self.structs[i];
+        s.build = 0.0;
+        s.pending = false;
+        s.done_at = self.time;
+        if !s.up() {
+            self.obj_dirty = true;
+            self.struct_dirty = true;
+        }
+        if s.t == S::Pad {
+            self.pad_dirty = true;
+        }
+    }
+
+    // ----------------------------------------------------------------------------- HQ and logistics
+
+    /// Player `o`'s HQ level, 1..=HQ_MAX.
+    pub fn hq_level(&self, o: usize) -> u8 {
+        self.pk(o).hq_lvl.clamp(1, HQ_MAX)
+    }
+    /// Turrets and squads player `o` has out: each turret is one, each squad of riflemen (six) one,
+    /// each tank one.
+    pub fn logi_used(&self, o: usize) -> u32 {
+        let o8 = o.min(self.perks.len() - 1) as u8;
+        let turrets = self.structs.iter().filter(|s| !s.dead && def(s.t).turret && s.owner == o8).count() as u32;
+        let troops: u32 = self
+            .groups
+            .iter()
+            .filter(|g| !g.dead && g.own == o8)
+            .map(|g| {
+                let n = g.m.iter().filter(|m| m.alive).count() as u32;
+                match g.kind {
+                    U::Rifle => n.div_ceil(6),
+                    U::Tank => n,
+                }
+            })
+            .sum();
+        turrets + troops
+    }
+    pub fn logi_cap(&self, o: usize) -> u32 {
+        logi_cap(self.hq_level(o))
+    }
+    /// Whether player `o` can put `n` more turrets or squads out.
+    pub fn logi_room(&self, o: usize, n: u32) -> bool {
+        self.logi_used(o) + n <= self.logi_cap(o)
+    }
+    /// What player `o`'s next HQ level costs (None at the top).
+    pub fn hq_up_cost(&self, o: usize) -> Option<f32> {
+        let l = self.hq_level(o);
+        (l < HQ_MAX).then(|| HQ_UP_COST[l as usize + 1])
+    }
+    /// Sets player `o`'s HQ to `level`: its health grows with it.
+    pub fn set_hq_level(&mut self, o: usize, level: u8) {
+        let o = o.min(self.perks.len() - 1);
+        let level = level.clamp(1, HQ_MAX);
+        self.perks[o].hq_lvl = level;
+        if let Some(&i) = self.hqs.get(o) {
+            let s = &mut self.structs[i];
+            if !s.dead {
+                let max = def(S::Hq).hp * (1.0 + HQ_HP_PER_LEVEL * (level - 1) as f32);
+                s.hp += max - s.max;
+                s.max = max;
+            }
+        }
+    }
+    /// The acting player buys their HQ's next level.
+    pub fn upgrade_hq(&mut self) -> bool {
+        let o = self.actor;
+        let Some(cost) = self.hq_up_cost(o) else { return false };
+        let hq = self.hqs.get(o).copied().unwrap_or(self.hq_idx);
+        if self.scrap < cost || self.structs[hq].dead {
+            return false;
+        }
+        self.scrap -= cost;
+        let l = self.hq_level(o) + 1;
+        self.set_hq_level(o, l);
+        self.structs[hq].done_at = self.time;
+        self.show(format!("HQ upgraded to level {}: room for {}", l, if l >= HQ_MAX { "as many turrets and squads as you can pay for".to_string() } else { format!("{} turrets and squads", logi_cap(l)) }), 3.0);
         true
     }
     /// The structure (not the HQ or a wall) under a point.
@@ -1646,7 +1845,8 @@ impl Game {
                     self.portals_opened += 1;
                     let np = 1 + (k / 2).min(2);
                     let size = (1500.0 * 1.45f32.powi(k as i32) * m).round();
-                    for _ in 0..np {
+                    let mut drum = false;
+                    for j in 0..np {
                         if let Some(p) = self.random_cell(2500) {
                             self.portals.push(Portal {
                                 p: vec2(p.0, p.1),
@@ -1654,14 +1854,21 @@ impl Game {
                                 taken: 0,
                             });
                             self.queue(p, size / np as f32, 15.0);
+                            // from the second wave on, a war-drum orc leads one of them
+                            if k >= 1 && j == 0 {
+                                let before = self.drummers.len();
+                                self.spawn_drummer(vec2(p.0, p.1));
+                                drum = self.drummers.len() > before;
+                            }
                         }
                     }
                     self.show(
                         format!(
-                            "{} portal{} open: {} orcs",
+                            "{} portal{} open: {} orcs{}",
                             np,
                             if np > 1 { "s" } else { "" },
-                            size as u64
+                            size as u64,
+                            if drum { ", led by a war-drum orc" } else { "" }
                         ),
                         4.0,
                     );
@@ -1702,6 +1909,9 @@ impl Game {
         }
         for b in &self.world.buildings {
             mix(b.hp.to_bits());
+        }
+        for d in &self.drummers {
+            mix(d.p.x.to_bits() ^ d.p.y.to_bits().rotate_left(16) ^ d.hp.to_bits());
         }
         for n in &self.napalm {
             mix(n.p.x.to_bits() ^ n.p.y.to_bits().rotate_left(16) ^ n.t.to_bits());
@@ -1791,7 +2001,7 @@ impl Game {
                 field: r.field.as_deref().map(|v| v.as_slice()),
             })
             .collect();
-        let rallies: Vec<Rally> = self.regroups.iter().map(|r| Rally { to: r.to, charge: r.t >= REGROUP_BACK }).collect();
+        let rallies: Vec<Rally> = self.regroups.iter().map(|r| Rally { to: r.to, charge: r.t >= REGROUP_BACK }).chain(self.drum_rallies.iter().copied()).collect();
         let (killed, deaths) = self.swarm.step(&StepIn {
             dt: DT,
             obj: &obj,
@@ -1861,6 +2071,9 @@ impl Game {
         self.abilities();
         lap(&mut self.prof[9]);
         self.director();
+        if !self.drummers.is_empty() {
+            self.drummers_tick();
+        }
         lap(&mut self.prof[10]);
         for v in self.world.irradiated.iter_mut() {
             if *v > 0.0 {
@@ -1919,13 +2132,7 @@ impl Game {
     }
 
     fn economy(&mut self) {
-        // a crowded base slows everything down
-        self.income_mult = if self.waiting > 40 {
-            (40.0 / self.waiting as f32).max(0.3)
-        } else {
-            1.0
-        };
-        let im = self.income_mult;
+        self.construction();
         let depots = |t: S| self.structs.iter().filter(|s| !s.dead && !s.pending && s.t == t).count() as f32;
         self.scrap_cap = SCRAP_CAP + depots(S::ScrapDepot) * DEPOT_SCRAP;
         self.ammo_cap = AMMO_CAP + depots(S::AmmoDepot) * DEPOT_AMMO;
@@ -1935,13 +2142,13 @@ impl Game {
                 continue;
             }
             match s.t {
-                S::Extractor => self.gain_scrap(2.5 * DT * im),
+                S::Extractor => self.gain_scrap(2.5 * DT),
                 S::Plant => {
                     // a full ammo store idles the plants instead of burning scrap
-                    if self.scrap >= 3.0 * DT && self.ammo < self.ammo_cap {
-                        self.scrap -= 3.0 * DT;
+                    if self.scrap >= PLANT_SCRAP * DT && self.ammo < self.ammo_cap {
+                        self.scrap -= PLANT_SCRAP * DT;
                         let rate = if self.res(s.owner as usize).presses { 10.0 } else { 6.0 };
-                        self.gain_ammo(rate * DT * im);
+                        self.gain_ammo(rate * DT);
                     }
                 }
                 _ => {}
@@ -2006,6 +2213,11 @@ impl Game {
     /// `hive` is damage dealt to alien hives, which only abilities and troops can hurt.
     pub fn blast(&mut self, at: Vec2, r: f32, dmg: f32, bdmg: f32, src: u16, hive: f32) {
         self.swarm.add_damage(at.x, at.y, r, dmg, src);
+        for d in &mut self.drummers {
+            if d.p.distance(at) < r + 1.5 {
+                d.hp -= dmg;
+            }
+        }
         self.damage_buildings(at, r, bdmg);
         if hive > 0.0 {
             self.damage_hives(at, r, hive);
@@ -2087,6 +2299,108 @@ impl Game {
                 }
             }
         }
+        // war drums: orcs in earshot gather on the drummer, and those around it charge in a rage
+        self.drum_rallies.clear();
+        let first = self.regroups.len();
+        for d in self.drummers.iter().filter(|d| !d.dead) {
+            let k = first + self.drum_rallies.len();
+            self.drum_rallies.push(Rally { to: d.p, charge: false });
+            self.drum_rallies.push(Rally { to: d.p, charge: true });
+            let c = d.p / CG as f32;
+            for (r, idx, over) in [(DRUM_CALL, k, false), (DRUM_RAGE, k + 1, true)] {
+                let rr = r / CG as f32;
+                let (x0, x1) = ((c.x - rr).floor().max(0.0) as usize, ((c.x + rr).ceil() as usize).min(CW - 1));
+                let (y0, y1) = ((c.y - rr).floor().max(0.0) as usize, ((c.y + rr).ceil() as usize).min(CH - 1));
+                for gy in y0..=y1 {
+                    for gx in x0..=x1 {
+                        let q = vec2(gx as f32 + 0.5, gy as f32 + 0.5);
+                        let cell = &mut self.rally[gy * CW + gx];
+                        if q.distance(c) <= rr && (over || *cell == 0) {
+                            *cell = idx as u16 + 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A war-drum orc comes through a portal.
+    fn spawn_drummer(&mut self, at: Vec2) {
+        if self.drummers.iter().filter(|d| !d.dead).count() >= DRUM_MAX {
+            return;
+        }
+        let hp = 2400.0 * self.mult.clamp(0.5, 3.0);
+        self.drummers.push(Drummer { p: at, hp, max: hp, hd: 0.0, beat: 0.0, dead: false });
+    }
+
+    /// War-drum orcs march on the nearest HQ, smashing whatever stands in the way.
+    fn drummers_tick(&mut self) {
+        let obj = self.obj.clone();
+        let hqd = self.hq_dist.clone();
+        for i in 0..self.drummers.len() {
+            if self.drummers[i].dead {
+                continue;
+            }
+            if self.drummers[i].hp <= 0.0 {
+                let p = self.drummers[i].p;
+                self.drummers[i].dead = true;
+                self.score += 500.0;
+                self.gain_scrap(150.0);
+                self.booms.push(Boom { p, r: 8.0, t: 0.6, life: 0.6, kind: 0 });
+                self.show("War-drum orc slain: +150 scrap", 3.0);
+                continue;
+            }
+            let d = &mut self.drummers[i];
+            d.beat = (d.beat + DT) % DRUM_BEAT;
+            let was = d.p;
+            let mut p = d.p;
+            Self::step_on_field(&obj, &mut p, &hqd, DRUM_SPD, &mut self.rng);
+            let d = &mut self.drummers[i];
+            d.p = p;
+            if p.distance_squared(was) > 1e-6 {
+                d.hd = libm::atan2f(p.y - was.y, p.x - was.x);
+                continue;
+            }
+            // blocked: beat on whatever lies on its way to the HQ
+            let (cx, cy) = (p.x as i32, p.y as i32);
+            let mut best = None;
+            let mut bv = hqd[cy as usize * W + cx as usize];
+            for k in 0..8 {
+                let (nx, ny) = (cx + DX[k], cy + DY[k]);
+                if nx < 1 || ny < 1 || nx >= W as i32 - 1 || ny >= H as i32 - 1 {
+                    continue;
+                }
+                let c = ny as usize * W + nx as usize;
+                if obj[c] != FREE && hqd[c] < bv {
+                    bv = hqd[c];
+                    best = Some(c);
+                }
+            }
+            let Some(c) = best else { continue };
+            let o = obj[c];
+            if o >= 0 {
+                let si = o as usize;
+                if si < self.structs.len() && !self.structs[si].dead {
+                    self.structs[si].hp -= DRUM_DPS * DT;
+                    if self.structs[si].hp <= 0.0 {
+                        self.kill_struct(si);
+                    }
+                }
+            } else if o <= -2 {
+                let b = (-o - 2) as usize;
+                if b < self.world.buildings.len() && self.world.buildings[b].alive {
+                    self.world.buildings[b].hp -= DRUM_DPS * DT;
+                    if self.world.buildings[b].hp <= 0.0 {
+                        self.destroy_building(b);
+                    }
+                }
+            }
+        }
+        self.drummers.retain(|d| !d.dead);
+    }
+    /// A war-drum orc within `r` of `p`, for turrets and troops to pick out.
+    pub fn drummer_in_range(&self, p: Vec2, r: f32) -> Option<Vec2> {
+        self.drummers.iter().filter(|d| !d.dead && d.p.distance(p) < r).map(|d| d.p).next()
     }
 
     /// Where orcs fall back to from `p`: a walk up the HQ field, away from the HQ.
@@ -2288,7 +2602,11 @@ impl Game {
                 continue;
             }
             let range = self.turret_range(t, up, o);
-            let tg = if t == S::Gun {
+            // every other turret in reach of a war-drum orc goes for it
+            let drum = if i % 2 == 0 { self.drummer_in_range(center, range) } else { None };
+            let tg = if let Some(p) = drum {
+                Some(p)
+            } else if t == S::Gun {
                 let cell = self.target_cell(center, range, &claimed, |_| false);
                 if let Some(k) = cell {
                     claimed.push(k);
@@ -3150,12 +3468,9 @@ impl Game {
         }
         self.helis.retain(|h| h.t < h.dur);
         for i in done {
-            if !self.structs[i].dead {
-                self.structs[i].pending = false;
-                if !self.structs[i].up() {
-                    self.obj_dirty = true;
-                    self.struct_dirty = true;
-                }
+            // landed: it goes up now (it was bought with its build time still to come)
+            if !self.structs[i].dead && self.structs[i].build <= 0.0 {
+                self.finish_build(i);
             }
         }
         // extraction flights: each pad flies out the civilians waiting at it once everyone it called
@@ -3934,7 +4249,7 @@ impl Game {
 
     pub fn deploy(&mut self, kind: U, at: Vec2) -> bool {
         let d = udef(kind);
-        if self.scrap < d.cost || self.world.irradiated_at(at) || !self.unit_ok(self.actor, kind) {
+        if self.scrap < d.cost || self.world.irradiated_at(at) || !self.unit_ok(self.actor, kind) || !self.logi_room(self.actor, 1) {
             return false;
         }
         if !self.spawn_group(kind, d.n, at) {
@@ -3950,12 +4265,21 @@ impl Game {
         let Some(tc) = self.order_cell(roof, bunker, at) else {
             return false;
         };
-        let hq = &self.structs[self.hq_idx];
-        let base = vec2(hq.center().x, (hq.y + hq.h + 3) as f32);
+        // out of the player's own HQ, on the side facing where they're going, on open ground
+        let hq = self.hqs.get(self.actor).map(|&i| &self.structs[i]).filter(|s| !s.dead).unwrap_or(&self.structs[self.hq_idx]);
+        let hc = hq.center();
+        let below = vec2(hc.x, (hq.y + hq.h + 3) as f32);
+        let dir = (Self::cell_pos(tc) - hc).normalize_or(vec2(0.0, 1.0));
+        let exit = hc + dir * (hq.w.max(hq.h) as f32 / 2.0 + 3.0);
+        let base = self.nearest_walkable(exit, 24).or_else(|| self.nearest_walkable(below, 24)).map(Self::cell_pos).unwrap_or(below);
         let mut m = Vec::new();
         for _ in 0..n {
+            let mut p = base + vec2((self.rng.f() - 0.5) * 5.0, (self.rng.f() - 0.5) * 5.0);
+            if self.obj[p.y as usize * W + p.x as usize] != FREE {
+                p = base;
+            }
             m.push(Member {
-                p: base + vec2((self.rng.f() - 0.5) * 8.0, self.rng.f() * 3.0),
+                p,
                 hp: d.hp,
                 cd: self.rng.f() * d.rate,
                 alive: true,
@@ -3976,6 +4300,9 @@ impl Game {
             target: Self::cell_pos(tc),
             dead: false,
             job,
+            own: self.actor as u8,
+            stuck: 0.0,
+            retries: 0,
         });
         true
     }
@@ -4092,6 +4419,8 @@ impl Game {
         let g = &mut self.groups[gi];
         g.job = job;
         g.state = GState::Wait;
+        g.stuck = 0.0;
+        g.retries = 0;
         g.tf = None;
         g.b = roof.map(|r| r.0 as i32).unwrap_or(-1);
         g.sb = bunker.map(|i| i as i32).unwrap_or(-1);
@@ -4138,6 +4467,34 @@ impl Game {
         vec2(libm::cosf(a), libm::sinf(a)) * 2.3 * ring as f32
     }
 
+    /// How a squad of `kind` belonging to player `o` shoots, with their rifle upgrades.
+    pub fn weapon(&self, kind: U, o: usize) -> Weapon {
+        let d = udef(kind);
+        let mut w = Weapon { range: d.range, rate: d.rate, dmg: d.dmg, rad: d.rad, bdmg: d.bdmg, rocket: false };
+        if kind != U::Rifle {
+            return w;
+        }
+        if self.has_up(o, Up::RifleDrill) {
+            w.rate /= 1.3;
+        }
+        if self.has_up(o, Up::RifleAp) {
+            w.dmg *= 1.6;
+            w.range *= 1.15;
+        }
+        if self.has_up(o, Up::RifleGrenade) {
+            w.rad = 1.8;
+            w.bdmg = 0.5;
+        }
+        if self.has_up(o, Up::RifleRocket) {
+            w.dmg = ROCKET_DMG;
+            w.rad = ROCKET_RAD;
+            w.bdmg = 3.0;
+            w.rate *= 1.6;
+            w.rocket = true;
+        }
+        w
+    }
+
     fn groups_tick(&mut self) {
         let obj = self.obj.clone();
         let atk = self.stats().atk;
@@ -4147,6 +4504,7 @@ impl Game {
             }
             let kind = self.groups[gi].kind;
             let d = udef(kind);
+            let w = self.weapon(kind, self.groups[gi].own as usize);
             if self.groups[gi].state == GState::Garrison && self.garrison_spot(&self.groups[gi]).is_none() {
                 self.garrison_lost(gi);
             }
@@ -4156,6 +4514,7 @@ impl Game {
             let tf = self.groups[gi].tf.clone();
             let target = self.groups[gi].target;
             let (mut live, mut arrived) = (0, 0);
+            let mut moved = false;
             let mut shots = Vec::new();
             for mi in 0..self.groups[gi].m.len() {
                 let mut m = self.groups[gi].m[mi].clone();
@@ -4199,23 +4558,25 @@ impl Game {
                 }
                 if m.p.distance_squared(was) > 1e-4 {
                     m.hd = libm::atan2f(m.p.y - was.y, m.p.x - was.x);
+                    moved = true;
                 }
                 live += 1;
                 m.cd -= DT;
                 if m.cd <= 0.0 && self.ammo >= d.ammo {
                     let (origin, muzzle, range) = match spot {
-                        Some((c, h)) => (c, (c, h + 1.0), d.range * 1.6),
-                        None => (m.p, (m.p, 1.0), d.range),
+                        Some((c, h)) => (c, (c, h + 1.0), w.range * 1.6),
+                        None => (m.p, (m.p, 1.0), w.range),
                     };
                     let tg = if kind == U::Tank {
                         self.cluster_target(origin, range, d.rad, &[])
                     } else {
                         self.find_target(origin, range)
                     };
+                    let tg = self.drummer_in_range(origin, range).or(tg);
                     if let Some(t) = tg.or_else(|| self.hive_in_range(origin, range)) {
                         shots.push((muzzle, t));
                         m.aim = libm::atan2f(t.y - origin.y, t.x - origin.x);
-                        m.cd = d.rate * (0.85 + 0.3 * self.rng.f());
+                        m.cd = w.rate * (0.85 + 0.3 * self.rng.f());
                     } else {
                         m.cd = 0.2;
                     }
@@ -4251,15 +4612,22 @@ impl Game {
                 self.rev_src(RevKey::Group(gi))
             };
             for ((a, az), t) in shots {
-                self.blast(t, d.rad, d.dmg, d.bdmg, src, d.dmg);
+                self.blast(t, w.rad, w.dmg, w.bdmg, src, w.dmg);
                 self.ammo -= d.ammo;
                 self.tracers.push(Tracer {
                     a,
                     az,
                     b: t,
-                    t: 0.08,
-                    kind: if kind == U::Tank { 4 } else { 3 },
+                    t: if w.rocket { 0.14 } else { 0.08 },
+                    kind: if kind == U::Tank { 4 } else if w.rocket { 7 } else { 3 },
                 });
+                if w.rocket {
+                    self.booms.push(Boom { p: t, r: w.rad, t: 0.3, life: 0.3, kind: 0 });
+                    if self.time - self.rocket_snd >= 0.12 {
+                        self.rocket_snd = self.time;
+                        self.sfx.push((Sfx::Rocket, a));
+                    }
+                }
                 if kind == U::Tank {
                     self.sfx.push((Sfx::Cannon, a));
                     self.booms.push(Boom {
@@ -4274,6 +4642,39 @@ impl Game {
             if live == 0 {
                 self.groups[gi].dead = true;
                 continue;
+            }
+            // nobody getting anywhere (the way was walled off since, or they started somewhere
+            // the route doesn't reach): look for a new way a couple of times, then hold
+            if self.groups[gi].state == GState::Move && !moved && arrived < (live as f32 * 0.6).ceil() as usize {
+                self.groups[gi].stuck += DT;
+                if self.groups[gi].stuck > 4.0 {
+                    let to = self.groups[gi].target;
+                    let tc = to.y as usize * W + to.x as usize;
+                    self.groups[gi].stuck = 0.0;
+                    if self.groups[gi].retries < 2 && self.obj[tc] == FREE {
+                        self.groups[gi].retries += 1;
+                        let job = self.target_job(tc);
+                        let g = &mut self.groups[gi];
+                        g.job = job;
+                        g.state = GState::Wait;
+                        // whoever is standing inside something steps out onto open ground
+                        let obj = self.obj.clone();
+                        for k in 0..self.groups[gi].m.len() {
+                            let p = self.groups[gi].m[k].p;
+                            if self.groups[gi].m[k].alive && obj[p.y as usize * W + p.x as usize] != FREE {
+                                if let Some(c) = self.nearest_walkable(p, 12) {
+                                    self.groups[gi].m[k].p = Self::cell_pos(c);
+                                }
+                            }
+                        }
+                    } else {
+                        self.groups[gi].state = GState::Hold;
+                        self.groups[gi].b = -1;
+                        self.groups[gi].sb = -1;
+                    }
+                }
+            } else {
+                self.groups[gi].stuck = 0.0;
             }
             let g = &self.groups[gi];
             if g.state == GState::Move && arrived >= (live as f32 * 0.6).ceil() as usize {
@@ -4457,5 +4858,86 @@ mod tests {
         let many = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(run);
         assert_eq!(one, many);
         assert!(one.1.iter().all(|&k| k > 1000), "{:?}", one.1);
+    }
+
+    /// Bought structures stand behind scaffolding for a few seconds; turrets and squads count
+    /// against the HQ's logistics, which upgrading the HQ raises.
+    #[test]
+    fn build_time_and_logistics() {
+        let mut g = Game::new(crate::citygen::generate(11), 0, 1.0, 3);
+        g.scrap = 1e6;
+        g.scrap_cap = 1e7;
+        let hq = g.world.hq;
+        let mut spots = (0..4000).map(|k| (hq.x as i32 - 60 + (k % 60) * 2, hq.y as i32 - 60 + (k / 60) * 2));
+        let first = loop {
+            let (x, y) = spots.next().unwrap();
+            if g.place(S::Gun, x, y) {
+                break g.structs.len() - 1;
+            }
+        };
+        assert!(g.structs[first].pending && g.structs[first].build > 0.0);
+        for _ in 0..((build_time(S::Gun) / DT) as usize + 2) {
+            g.tick();
+            g.scrap = 1e6;
+        }
+        assert!(!g.structs[first].pending, "built after its build time");
+        let cap = g.logi_cap(0);
+        assert_eq!(cap, logi_cap(1));
+        let mut placed = g.logi_used(0);
+        for (x, y) in spots.by_ref() {
+            if placed >= cap {
+                break;
+            }
+            if g.place(S::Gun, x, y) {
+                placed += 1;
+            }
+        }
+        assert_eq!(g.logi_used(0), cap);
+        let next = spots.find(|&(x, y)| g.can_place(S::Gun, x, y)).unwrap();
+        assert!(!g.place(S::Gun, next.0, next.1), "over the logistics limit");
+        assert!(!g.deploy(U::Rifle, hq + vec2(0.0, -40.0)));
+        let hp = g.structs[g.hq_idx].max;
+        assert!(g.upgrade_hq());
+        assert_eq!(g.hq_level(0), 2);
+        assert!(g.structs[g.hq_idx].max > hp);
+        assert!(g.place(S::Gun, next.0, next.1));
+        g.set_hq_level(0, HQ_MAX);
+        assert!(g.hq_up_cost(0).is_none() && g.logi_room(0, 1000));
+    }
+
+    /// A war-drum orc walks toward the HQ, rallies orcs, dies to enough fire, and stays in lockstep.
+    #[test]
+    fn war_drum() {
+        let run = || {
+            let mut g = Game::new(crate::citygen::generate(11), 2, 1.0, 5);
+            let at = g.random_cell(1500).map(|p| vec2(p.0, p.1)).unwrap();
+            g.spawn_drummer(at);
+            g.queue((at.x, at.y), 400.0, 1.0);
+            let d0 = g.drummers[0].p.distance(g.world.hq);
+            for _ in 0..300 {
+                g.tick();
+            }
+            let d1 = g.drummers[0].p.distance(g.world.hq);
+            assert!(d1 < d0 - 20.0, "marched on the HQ: {} -> {}", d0, d1);
+            assert!(!g.drum_rallies.is_empty());
+            let p = g.drummers[0].p;
+            g.blast(p, 3.0, 1e6, 0.0, 0, 0.0);
+            g.tick();
+            assert!(g.drummers.is_empty(), "slain");
+            g.checksum()
+        };
+        let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(run);
+        let many = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(run);
+        assert_eq!(one, many);
+    }
+
+    /// Rocket riflemen hit much harder, in a blast that stays small.
+    #[test]
+    fn rifle_rockets() {
+        let mut g = Game::new(crate::citygen::generate(11), 0, 1.0, 3);
+        let base = g.weapon(U::Rifle, 0);
+        g.perks[0].ups = RIFLE_UPS.to_vec();
+        let w = g.weapon(U::Rifle, 0);
+        assert!(w.rocket && w.dmg > base.dmg * 3.0 && w.rad <= 2.5 && w.rad < def(S::Cannon).rad);
     }
 }

@@ -62,6 +62,8 @@ pub struct Desc {
     pub aprons: Vec<Poly>,
     pub runways: Vec<Line>,
     pub hq: Vec2,
+    /// co-op: where the other players picked their HQs (set by the game, never saved or sent)
+    pub extra_hqs: Vec<Vec2>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -275,11 +277,13 @@ impl World {
         }
         let hq = desc.hq;
         // the HQ footprint is always dry
-        fill_disc(hq, 14.0, |c| {
-            if terrain[c] == T_WATER || terrain[c] == T_LAND {
-                terrain[c] = T_APRON
-            }
-        });
+        for &q in std::iter::once(&hq).chain(&desc.extra_hqs) {
+            fill_disc(q, 14.0, |c| {
+                if terrain[c] == T_WATER || terrain[c] == T_LAND {
+                    terrain[c] = T_APRON
+                }
+            });
+        }
 
         // base zone: the airport, plus a minimum circle around the HQ
         let mut zone = vec![0u8; N];
@@ -312,7 +316,7 @@ impl World {
         let mut buildings: Vec<Building> = Vec::new();
         for b in &desc.buildings {
             let c0 = centroid(&b.poly);
-            if c0.distance(hq) < HQ_CLEAR {
+            if c0.distance(hq) < HQ_CLEAR || desc.extra_hqs.iter().any(|q| c0.distance(*q) < 30.0) {
                 continue;
             }
             let mut cells = Vec::new();

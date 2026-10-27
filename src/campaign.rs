@@ -112,13 +112,15 @@ pub enum Tech {
     Ability(A),
     Research(R),
     Up(Up),
+    /// every city starts with the HQ at this level (2..=5)
+    Hq(u8),
 }
 
 /// What every campaign starts with.
 pub const START_BUILDS: [S; 5] = [S::Wall, S::Bunker, S::Extractor, S::Pad, S::Rescue];
 
 /// The whole tree, in the order the campaign screen lists it. Saves store indices into it, so new entries go at the end.
-pub const TECH: [Tech; 32] = [
+pub const TECH: [Tech; 40] = [
     Tech::Build(S::Gun),
     Tech::Build(S::Cannon),
     Tech::Build(S::Flame),
@@ -151,6 +153,14 @@ pub const TECH: [Tech; 32] = [
     Tech::Up(Up::ArtyRapid),
     Tech::Up(Up::ArtyHe),
     Tech::Research(R::Mounts),
+    Tech::Hq(2),
+    Tech::Hq(3),
+    Tech::Hq(4),
+    Tech::Hq(5),
+    Tech::Up(Up::RifleDrill),
+    Tech::Up(Up::RifleAp),
+    Tech::Up(Up::RifleGrenade),
+    Tech::Up(Up::RifleRocket),
 ];
 
 /// Turrets that shoot ammo: the first one unlocked brings the ammo plant with it.
@@ -166,6 +176,10 @@ impl Tech {
             Tech::Ability(a) => adef(a).name,
             Tech::Research(r) => rdef(r).name,
             Tech::Up(u) => updef(u).name,
+            Tech::Hq(2) => "Prefab HQ II",
+            Tech::Hq(3) => "Prefab HQ III",
+            Tech::Hq(4) => "Prefab HQ IV",
+            Tech::Hq(_) => "Prefab HQ V",
         }
     }
     pub fn tip(self) -> String {
@@ -177,6 +191,11 @@ impl Tech {
             Tech::Ability(a) => adef(a).tip.to_string(),
             Tech::Research(r) => rdef(r).tip.to_string(),
             Tech::Up(u) => updef(u).tip.to_string(),
+            Tech::Hq(l) => format!(
+                "Every city starts with the HQ already at level {}, room for {} turrets and squads.",
+                l,
+                if l >= HQ_MAX { "as many".to_string() } else { logi_cap(l).to_string() }
+            ),
         }
     }
     /// Research points it costs: three times the first campaign's prices, which one good city
@@ -204,13 +223,15 @@ impl Tech {
             },
             Tech::Research(r) => rdef(r).civs,
             Tech::Up(u) => updef(u).cost,
+            Tech::Hq(l) => [0, 0, 150, 260, 400, 600][l.min(5) as usize],
         }
     }
     /// The heading it's listed under.
     pub fn group(self) -> &'static str {
         match self {
             Tech::Build(s) if shoots(s) || s == S::Helium => "Turrets",
-            Tech::Build(_) | Tech::Unit(_) => "Support",
+            Tech::Build(_) | Tech::Unit(_) | Tech::Hq(_) => "Support",
+            Tech::Up(u) if RIFLE_UPS.contains(&u) => "Support",
             Tech::Ability(_) | Tech::Research(R::Rescue | R::Carpet | R::Nuke) => "Abilities",
             Tech::Research(_) => "Research",
             Tech::Up(_) => "Turret upgrades",
@@ -219,7 +240,9 @@ impl Tech {
     /// What has to be unlocked first, if anything: its parent in the tree.
     pub fn needs(self) -> Option<Tech> {
         match self {
+            Tech::Up(u) if RIFLE_UPS.contains(&u) => up_after(u).map(Tech::Up),
             Tech::Up(u) => Some(Tech::Build(updef(u).on)),
+            Tech::Hq(l) if l > 2 => Some(Tech::Hq(l - 1)),
             Tech::Build(S::Cannon | S::Flame) => Some(Tech::Build(S::Gun)),
             Tech::Build(S::Rail | S::Artillery) => Some(Tech::Build(S::Cannon)),
             Tech::Build(S::Silo) => Some(Tech::Ability(A::Air)),
@@ -860,6 +883,7 @@ impl Campaign {
                 match *t {
                     Tech::Research(r) => g.complete_research(o, r),
                     Tech::Up(u) => g.perks[o].ups.push(u),
+                    Tech::Hq(l) if l > g.hq_level(o) => g.set_hq_level(o, l),
                     _ => {}
                 }
             }

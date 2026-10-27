@@ -333,3 +333,30 @@ pub fn orcs(g: &mut Game) {
     }
     eprintln!("orcs checksum {:016x}", g.checksum());
 }
+
+/// `PH_BUILD=<level>`: the HQ at that level, a few structures half built behind scaffolding and a
+/// war-drum orc marching in, for checking their art.
+pub fn builds(g: &mut Game, level: u8) {
+    g.scrap = 1e6;
+    g.scrap_cap = 1e7;
+    g.set_hq_level(0, level);
+    g.set_hq_level(0, level);
+    let h = g.world.hq;
+    let mut n = 0;
+    for (t, dx, dy) in [(S::Cannon, 24, -14), (S::Gun, 24, 4), (S::Extractor, -36, 14), (S::Bunker, -20, -26)] {
+        for k in 0..40 {
+            if g.place(t, h.x as i32 + dx + (k % 8) * 3, h.y as i32 + dy + (k / 8) * 3) {
+                n += 1;
+                break;
+            }
+        }
+        // each a little further along than the last
+        for _ in 0..8 {
+            g.tick();
+        }
+    }
+    eprintln!("{} builds going up at HQ level {}", n, g.hq_level(0));
+    if let Some(p) = (0..40).map(|k| h + vec2(-30.0 - k as f32, -30.0)).find(|p| g.world.bid[p.y as usize * world::W + p.x as usize] < 0) {
+        g.drummers.push(game::Drummer { p, hp: 2000.0, max: 2400.0, hd: 0.6, beat: 0.4, dead: false });
+    }
+}

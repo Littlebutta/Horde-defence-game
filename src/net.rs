@@ -51,6 +51,8 @@ pub enum Cmd {
     Cease(u32),
     /// a turret on top of a bunker
     Mount { t: S, b: u32 },
+    /// the player's HQ goes up a level
+    UpgradeHq,
 }
 
 const ALL_S: [S; 19] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue, S::ScrapDepot, S::AmmoDepot, S::Bunker];
@@ -131,6 +133,7 @@ impl Wr {
                 self.u32(s_id(t));
                 self.u32(b);
             }
+            Cmd::UpgradeHq => self.u32(23),
         }
     }
 }
@@ -160,6 +163,7 @@ impl Rd<'_> {
             20 => Cmd::Aim(self.u32()?, self.v2()?),
             21 => Cmd::Cease(self.u32()?),
             22 => Cmd::Mount { t: self.s()?, b: self.u32()? },
+            23 => Cmd::UpgradeHq,
             _ => return None,
         })
     }
@@ -202,6 +206,7 @@ pub fn plan(t: S, a: Vec2, b: Vec2) -> Vec<(i32, i32)> {
 }
 
 pub const BAD_TARGET: &str = "Can't target that";
+pub const LOGI_FULL: &str = "Logistics full: upgrade the HQ to field more turrets and squads";
 
 /// Carries out one command from player `p` (what they build is theirs and gets their upgrades).
 /// Returns a line to show the player who gave it, if any.
@@ -214,16 +219,32 @@ pub fn apply(g: &mut Game, p: usize, c: Cmd) -> Option<&'static str> {
 fn apply_as(g: &mut Game, c: Cmd) -> Option<&'static str> {
     match c {
         Cmd::Build { t, a, b } => {
-            let placed = plan(t, a, b).into_iter().filter(|(x, y)| g.place(t, *x, *y)).count();
-            (placed == 0).then_some("Can't build there")
+            let spots = plan(t, a, b);
+            let n = spots.len();
+            let placed = spots.into_iter().filter(|(x, y)| g.place(t, *x, *y)).count();
+            // stopped short by the logistics limit
+            let full = def(t).turret && !g.logi_room(g.actor, 1);
+            if placed < n && full {
+                Some(LOGI_FULL)
+            } else {
+                (placed == 0).then_some("Can't build there")
+            }
         }
         Cmd::Roof { t, b, p } => {
             let ok = (b as usize) < g.world.buildings.len() && g.place_roof(t, b as usize, p);
-            (!ok).then_some("Can't put a turret on that roof")
+            let full = !g.logi_room(g.actor, 1);
+            (!ok).then_some(if full { LOGI_FULL } else { "Can't put a turret on that roof" })
         }
-        Cmd::Mount { t, b } => (!g.place_mount(t, b as usize)).then_some("Can't put a turret on that bunker"),
+        Cmd::Mount { t, b } => {
+            let full = !g.logi_room(g.actor, 1);
+            (!g.place_mount(t, b as usize)).then_some(if full { LOGI_FULL } else { "Can't put a turret on that bunker" })
+        }
         Cmd::Sell(p) => g.sell_at(p).then_some("Sold for half price"),
-        Cmd::Deploy(u, p) => (!g.deploy(u, p)).then_some("Can't deploy there"),
+        Cmd::Deploy(u, p) => {
+            let full = !g.logi_room(g.actor, 1);
+            (!g.deploy(u, p)).then_some(if full { LOGI_FULL } else { "Can't deploy there" })
+        }
+        Cmd::UpgradeHq => (!g.upgrade_hq()).then_some("Can't upgrade the HQ yet"),
         Cmd::Order(gi, p) => {
             let ok = (gi as usize) < g.groups.len() && g.order(gi as usize, p);
             (!ok).then_some("Can't send troops there")
@@ -309,6 +330,10 @@ const M_REJECT: u32 = 14;
 const M_LOBBY: u32 = 15;
 const M_HUB: u32 = 16;
 const M_VOTE: u32 = 17;
+/// guest to host: where the guest wants their HQ
+const M_SPOT: u32 = 18;
+/// host to guests: everybody's HQ spot, and the game can start
+const M_SPOTS: u32 = 19;
 
 /// What the host has picked in the co-op lobby, shown to everybody waiting there.
 #[derive(Clone, Default, PartialEq)]
@@ -353,6 +378,8 @@ pub enum Note {
     Msg(String),
     /// host: a guest voted on the campaign screen
     Vote { player: usize, act: u32 },
+    /// every player's HQ spot is settled (`Session::spots`): build the game around them and start
+    Spots,
 }
 
 struct Incoming {
@@ -385,6 +412,10 @@ pub struct Session {
     pub game_players: usize,
     /// the host's campaign screen (guests: as last received; None while the host isn't on it)
     pub hub: Option<Hub>,
+    /// where each player picked their HQ (the host's is in the map itself; None: picked for them)
+    pub spots: Vec<Option<Vec2>>,
+    /// every guest has picked (or the host stopped waiting): the game may run
+    pub spots_ready: bool,
     frames: BTreeMap<u64, Vec<(u8, Cmd)>>,
     pending: Vec<(u8, Cmd)>,
     hashes: BTreeMap<u64, u64>,
@@ -432,6 +463,8 @@ impl Session {
             lobby: Lobby::default(),
             game_players: 1,
             hub: None,
+            spots: Vec::new(),
+            spots_ready: true,
             frames: BTreeMap::new(),
             pending: Vec::new(),
             hashes: BTreeMap::new(),
@@ -573,6 +606,7 @@ impl Session {
                         self.outq.remove(&id);
                         self.notes.push(Note::Msg(format!("{} left", p.name)));
                         self.roster();
+                        self.check_spots();
                     }
                 }
                 Ev::Data(from, d) => self.on_data(from, &d),
@@ -640,6 +674,14 @@ impl Session {
                     }
                 }
                 M_PAUSE_REQ => self.toggle_pause(),
+                M_SPOT => {
+                    if let (Some(i), Some(p), true) = (pidx, r.v2(), self.in_game && !self.spots_ready) {
+                        if i > 0 && i < self.spots.len() && p.is_finite() {
+                            self.spots[i] = Some(p);
+                            self.check_spots();
+                        }
+                    }
+                }
                 M_VOTE => {
                     if let (Some(i), Some(act)) = (pidx, r.u32()) {
                         self.notes.push(Note::Vote { player: i, act });
@@ -694,6 +736,8 @@ impl Session {
                 self.paused = false;
                 self.desync = false;
                 self.host_busy = false;
+                self.spots = vec![None; self.game_players];
+                self.spots_ready = false;
             }
             M_CHUNK => {
                 let Some(inc) = self.incoming.as_mut() else { return };
@@ -726,6 +770,14 @@ impl Session {
                 }
             }
             M_PAUSE => self.paused = r.u32() == Some(1),
+            M_SPOTS => {
+                let Some(n) = r.u32() else { return };
+                let spots: Option<Vec<Option<Vec2>>> = (0..n.min(4)).map(|_| Some(if r.u32()? == 1 { Some(r.v2()?) } else { None })).collect();
+                let Some(spots) = spots else { return };
+                self.spots = spots;
+                self.spots_ready = true;
+                self.notes.push(Note::Spots);
+            }
             M_DESYNC => {
                 self.desync = true;
                 self.notes.push(Note::Msg("This game went out of sync with the host. Go back to the menu and start a new game.".into()));
@@ -767,12 +819,58 @@ impl Session {
         self.frames.clear();
         self.pending.clear();
         self.hashes.clear();
+        // the guests pick their own HQ spots before the clock starts
+        self.spots = vec![None; self.game_players];
+        self.spots_ready = self.game_players <= 1;
         self.paused = false;
         self.desync = false;
         self.link.set_joinable(false);
         self.flush();
         storage::decode(&raw).unwrap_or_else(|| d.clone())
     }
+    /// Guest: where I want my HQ.
+    pub fn send_spot(&mut self, p: Vec2) {
+        let mut w = msg(M_SPOT);
+        w.v2(p);
+        let h = self.link.host();
+        self.queue(h, w.0);
+        self.flush();
+    }
+    /// Host: guests that still have to pick their HQ spot, by player index.
+    pub fn spots_missing(&self) -> Vec<usize> {
+        if self.spots_ready {
+            return Vec::new();
+        }
+        (1..self.spots.len().min(self.players.len())).filter(|&k| self.spots[k].is_none()).collect()
+    }
+    fn check_spots(&mut self) {
+        if self.host && self.in_game && !self.spots_ready && self.spots_missing().is_empty() {
+            self.finish_spots();
+        }
+    }
+    /// Host: settles everybody's HQ spot (anyone who hasn't picked gets one picked for them), tells
+    /// the guests, and lets the clock start.
+    pub fn finish_spots(&mut self) {
+        if self.spots_ready {
+            return;
+        }
+        let mut w = msg(M_SPOTS);
+        w.u32(self.spots.len() as u32);
+        for s in &self.spots {
+            match s {
+                Some(p) => {
+                    w.u32(1);
+                    w.v2(*p);
+                }
+                None => w.u32(0),
+            }
+        }
+        self.to_clients(&w.0);
+        self.flush();
+        self.spots_ready = true;
+        self.notes.push(Note::Spots);
+    }
+
     /// Host: back to the menu for everybody.
     pub fn end_game(&mut self) {
         self.in_game = false;

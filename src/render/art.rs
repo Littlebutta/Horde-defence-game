@@ -233,8 +233,9 @@ pub fn structure(mb: &mut MB, g: &Game, i: usize, s: &Structure, base: f32, t: f
         S::Outpost => outpost(mb, d, c, w, h, base, t),
         S::Lab => lab(mb, d, c, w, h, base, g.perks.iter().any(|k| k.research.busy.is_some()), t),
         S::Hq => {
-            let top = hq(mb, d, c, w, h, base, t);
-            labels.items.push((p3(c, top + 3.0), "HQ".into(), WHITE, 14.0));
+            let lvl = g.hq_level(s.owner as usize);
+            let top = hq(mb, d, c, w, h, base, t, lvl);
+            labels.items.push((p3(c, top + 3.0), format!("HQ {}", ["", "I", "II", "III", "IV", "V"][lvl as usize]), WHITE, 14.0));
             let n = g.civs.iter().filter(|cv| cv.st == C_AT_HQ && cv.p.distance(c) < 24.0).count();
             if n > 0 {
                 labels.items.push((p3(c, top + 9.0), format!("{} awaiting evac", n), WHITE, 12.0));
@@ -860,43 +861,208 @@ fn lab(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, busy: bool, t: 
     z1 + 2.3
 }
 
-/// Headquarters: a glass podium, a stepped blue tower with mullion bands, a rooftop radome,
-/// antennas and red aircraft lights.
-fn hq(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, t: f32) -> f32 {
+/// Headquarters, one model for each of its five levels: a prefab command post at level 1, the glass
+/// podium and blue tower from level 2, a garage wing and a dish at 3, a taller stepped tower with a
+/// rooftop helipad at 4, and at 5 a command spire with a glowing beacon ring and corner pylons.
+fn hq(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, t: f32, lvl: u8) -> f32 {
     let (hw, hh) = (w / 2.0, h / 2.0);
     plinth(mb, c, hw, hh, base);
     let z0 = base + 0.5;
+    let blink = |k: f32| ((t * 0.9) + k).fract() < 0.35;
+    let red = |on: bool| if on { rgb(255, 60, 50) } else { rgb(110, 28, 28) };
+    if lvl <= 1 {
+        // a prefab command post: two stacked cabins, sandbagged corners and one mast
+        let cab = chamfer(c + vec2(0.0, 0.8), hw - 3.2, hh - 4.2, 0.6, 0.0);
+        let z1 = z0 + 1.6;
+        block(mb, &cab, z0, z1, rgb(186, 190, 196), CONCRETE_DARK);
+        band(mb, &cab, z0 + 0.7, z0 + 1.1, mix(GLASS, d.top, 0.3));
+        let top = chamfer(c + vec2(-1.0, 0.0), hw - 4.6, hh - 5.2, 0.5, 0.0);
+        let z2 = z1 + 1.4;
+        block(mb, &top, z1, z2, mix(d.top, CONCRETE, 0.5), mix(d.side, CONCRETE_DARK, 0.5));
+        band(mb, &top, z1 + 0.5, z1 + 0.85, mix(GLASS, d.top, 0.4));
+        for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            let q = c + vec2(sx * (hw - 1.6), sy * (hh - 1.6));
+            block(mb, &chamfer(q, 1.0, 1.0, 0.4, 0.0), z0, z0 + 0.6, rgb(150, 140, 112), rgb(112, 104, 82));
+        }
+        let a = c + vec2(2.0, -1.0);
+        strut(mb, a, z2, a, z2 + 3.0, 0.08, STEEL);
+        lamp(mb, a, z2 + 3.0, 0.2, red(blink(0.0)));
+        vent(mb, c + vec2(-2.4, 0.4), z2, 0.45, 0.0);
+        return z2 + 1.8;
+    }
     let pod = chamfer(c, hw - 0.6, hh - 0.6, 2.0, 0.0);
     let z1 = z0 + 2.2;
     block(mb, &pod, z0, z1, rgb(200, 205, 212), CONCRETE_DARK);
     band(mb, &pod, z0 + 0.6, z0 + 1.6, mix(GLASS, d.top, 0.3));
     mb.poly_at(&shrink(&pod, 0.4), z1 + 0.02, rgb(150, 156, 164));
+    // the tower gets taller with every level
+    let tall = [0.0, 0.0, 4.8, 5.8, 7.4, 8.6][lvl.min(5) as usize];
     let tw = chamfer(c, hw - 3.0, hh - 3.0, 1.4, 0.0);
-    let z2 = z1 + 4.8;
+    let z2 = z1 + tall;
     block(mb, &tw, z1, z2, mix(d.top, CONCRETE, 0.45), mix(d.side, GLASS, 0.45));
-    for k in 0..4 {
+    let bands = (tall / 1.0) as usize;
+    for k in 0..bands.saturating_sub(1) {
         let z = z1 + 0.8 + k as f32 * 1.0;
         band(mb, &tw, z, z + 0.18, mix(d.side, WHITE, 0.55));
     }
     let crown = shrink(&tw, 0.5);
-    block(mb, &crown, z2, z2 + 0.4, mix(d.top, CONCRETE, 0.6), mix(d.side, CONCRETE_DARK, 0.4));
+    let mut roof = z2 + 0.4;
+    block(mb, &crown, z2, roof, mix(d.top, CONCRETE, 0.6), mix(d.side, CONCRETE_DARK, 0.4));
+    if lvl >= 4 {
+        // a stepped upper tower, set back
+        let up = chamfer(c, hw - 4.4, hh - 4.4, 1.0, 0.0);
+        let z3 = roof + if lvl >= 5 { 3.2 } else { 1.8 };
+        block(mb, &up, roof, z3, mix(d.top, CONCRETE, 0.35), mix(d.side, GLASS, 0.55));
+        band(mb, &up, roof + 0.6, roof + 0.8, mix(d.side, WHITE, 0.6));
+        if lvl >= 5 {
+            band(mb, &up, roof + 1.8, roof + 2.0, mix(d.side, WHITE, 0.6));
+        }
+        // a helipad on the podium's corner
+        let hp = c + vec2(-hw + 1.9, hh - 2.0);
+        ring_flat(mb, hp, 1.0, 0.16, z1 + 0.04, rgb(255, 212, 59));
+        roof = z3;
+    }
+    if lvl >= 3 {
+        // a garage wing on the podium's side with a satellite dish
+        let wing = rect(c, hw - 3.4, -hh + 1.2, hw - 0.9, hh - 1.2, 0.0);
+        block(mb, &wing, z1, z1 + 1.3, rgb(176, 181, 188), CONCRETE_DARK);
+        for k in 0..3 {
+            let q = c + vec2(hw - 2.15, -hh + 3.2 + k as f32 * 3.6);
+            block(mb, &rect(q, -0.2, -1.1, 0.2, 1.1, 0.0), z1 + 0.2, z1 + 1.0, STEEL_DARK, STEEL_DARK);
+        }
+        let dish = c + vec2(hw - 2.1, -hh + 2.2);
+        strut(mb, dish, z1 + 1.3, dish, z1 + 2.3, 0.1, STEEL);
+        let rim = ngon(dish + vec2(0.2, 0.0), 1.0, 12, 0.0);
+        loft(mb, &ngon(dish, 0.25, 12, 0.0), &rim, z1 + 2.2, z1 + 2.9, None, rgb(232, 235, 240));
+    }
     // radome and antennas on the roof
     let rd = c + vec2(-1.2, -1.0);
-    cyl(mb, rd, 1.3, z2 + 0.4, z2 + 0.8, CONCRETE, CONCRETE_DARK);
-    dome(mb, rd, 1.3, z2 + 0.8, 1.4, rgb(240, 242, 245));
+    let dr = if lvl >= 4 { 1.0 } else { 1.3 };
+    cyl(mb, rd, dr, roof, roof + 0.4, CONCRETE, CONCRETE_DARK);
+    dome(mb, rd, dr, roof + 0.4, dr * 1.1, rgb(240, 242, 245));
     for (p, ht) in [(vec2(1.6, 1.4), 3.4), (vec2(2.2, -0.6), 2.4)] {
         let a = c + p;
-        strut(mb, a, z2 + 0.4, a, z2 + 0.4 + ht, 0.08, STEEL);
-        let on = ((t * 0.9) + ht).fract() < 0.35;
-        lamp(mb, a, z2 + 0.4 + ht, 0.2, if on { rgb(255, 60, 50) } else { rgb(110, 28, 28) });
+        strut(mb, a, roof, a, roof + ht, 0.08, STEEL);
+        lamp(mb, a, roof + ht, 0.2, red(blink(ht)));
     }
-    vent(mb, c + vec2(1.4, -1.8), z2 + 0.4, 0.5, 0.0);
+    vent(mb, c + vec2(1.4, -1.8), roof, 0.5, 0.0);
+    if lvl >= 5 {
+        // command spire: a beacon ring turning above the roof, and pylons on the corners
+        let a = c + vec2(0.4, 0.6);
+        strut(mb, a, roof, a, roof + 4.5, 0.14, STEEL);
+        let glow = 0.6 + 0.4 * (t * 2.2).sin().abs();
+        let beacon = Color::new(0.35, 0.75, 1.0, 1.0);
+        ring_flat(mb, a, 1.6, 0.22, roof + 3.2 + 0.2 * (t * 1.5).sin(), mix(beacon, WHITE, 0.3 * glow));
+        lamp(mb, a, roof + 4.5, 0.32, mix(beacon, WHITE, glow * 0.6));
+        for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            let q = c + vec2(sx * (hw - 1.2), sy * (hh - 1.2));
+            cyl(mb, q, 0.55, z0, z0 + 3.4, STEEL, STEEL_DARK);
+            lamp(mb, q, z0 + 3.4, 0.22, red(blink(sx + sy * 0.5)));
+        }
+    }
     // a few cars parked on the podium edge
     for k in 0..3 {
         let p = c + vec2(-hw + 1.4, -2.0 + k as f32 * 1.6);
         block(mb, &rect(p, -0.45, -0.3, 0.45, 0.3, 0.0), z0, z0 + 0.35, [rgb(200, 60, 50), rgb(230, 230, 235), rgb(40, 44, 52)][k], STEEL_DARK);
     }
-    z2 + 1.8
+    roof + 1.8
+}
+
+/// Scaffolding around a structure going up: poles at the corners and along the sides, a deck
+/// every storey up to how far the build is (`f` 0..1), and the structure's body rising inside it as
+/// a pale shell. Once finished (`sink` 0..1) the scaffolding sinks into the ground.
+pub fn scaffold(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, f: f32, sink: f32) {
+    let (hw, hh) = (w / 2.0 + 0.35, h / 2.0 + 0.35);
+    let full = d.ht.max(1.2) + 0.6;
+    let pole = rgb(232, 168, 52);
+    let deck = rgb(150, 112, 70);
+    if sink <= 0.0 {
+        // the shell of the structure, rising
+        let body = chamfer(c, w / 2.0 - 0.4, h / 2.0 - 0.4, 0.6, 0.0);
+        let z = base + (d.ht * f).max(0.15);
+        block(mb, &body, base, z, mix(d.top, CONCRETE, 0.55), mix(body_col(d), CONCRETE, 0.4));
+    }
+    let top = base + full * if sink > 0.0 { 1.0 - sink } else { (0.35 + 0.65 * f).min(1.0) };
+    if top <= base + 0.05 {
+        return;
+    }
+    let nx = ((w / 3.0).ceil() as i32).max(1);
+    let ny = ((h / 3.0).ceil() as i32).max(1);
+    let mut pts = Vec::new();
+    for i in 0..=nx {
+        let x = -hw + 2.0 * hw * i as f32 / nx as f32;
+        pts.push(vec2(x, -hh));
+        pts.push(vec2(x, hh));
+    }
+    for j in 1..ny {
+        let y = -hh + 2.0 * hh * j as f32 / ny as f32;
+        pts.push(vec2(-hw, y));
+        pts.push(vec2(hw, y));
+    }
+    for p in &pts {
+        let q = c + *p;
+        strut(mb, q, base, q, top, 0.09, pole);
+    }
+    // a deck and rails every storey that has gone up
+    let ring = [c + vec2(-hw, -hh), c + vec2(hw, -hh), c + vec2(hw, hh), c + vec2(-hw, hh)];
+    let mut z = base + 1.1;
+    while z < top - 0.1 {
+        for k in 0..4 {
+            let (a, b) = (ring[k], ring[(k + 1) % 4]);
+            beam(mb, a, b, 0.07, z, pole);
+            let n = vec2(-(b - a).y, (b - a).x).normalize_or_zero() * 0.35;
+            let inw = if (c - a).dot(n) > 0.0 { n } else { -n };
+            block(mb, &[a, b, b + inw, a + inw], z - 0.05, z, deck, deck);
+        }
+        z += 1.1;
+    }
+    // diagonal braces on the long sides
+    let zb = top.min(base + 1.1);
+    strut(mb, ring[0], base, ring[1], zb, 0.05, pole);
+    strut(mb, ring[3], base, ring[2], zb, 0.05, pole);
+}
+
+/// A war-drum orc: a hulking orange brute about three cells across, a big drum slung in front that
+/// it pounds with both arms on every beat (`beat` 0..1). Returns the top of its head.
+pub fn drummer(mb: &mut MB, p: Vec2, hd: f32, beat: f32, t: f32) -> f32 {
+    let skin = rgb(214, 104, 34);
+    let dark = rgb(120, 50, 10);
+    let hide = rgb(92, 64, 40);
+    let fwd = vec2(libm::cosf(hd), libm::sinf(hd));
+    let side = vec2(-fwd.y, fwd.x);
+    // a slight bob with the march
+    let bob = 0.12 * (t * 6.0).sin().abs();
+    // legs and a hide kilt
+    for s in [-1.0f32, 1.0] {
+        let q = p + side * 0.55 * s;
+        block(mb, &rect(q, -0.32, -0.32, 0.32, 0.32, hd), 0.0, 1.0, dark, dark);
+    }
+    loft(mb, &ngon(p, 1.05, 8, hd), &ngon(p, 0.85, 8, hd), 0.8, 1.4, None, hide);
+    // a barrel chest, hunched forward
+    let chest = p + fwd * 0.15;
+    loft(mb, &ngon(chest, 1.0, 10, hd), &ngon(chest + fwd * 0.2, 1.15, 10, hd), 1.3 + bob, 2.6 + bob, Some(skin), skin);
+    // shoulders and a small head with tusks
+    let head = chest + fwd * 0.45;
+    cyl(mb, head, 0.5, 2.6 + bob, 3.2 + bob, skin, mix(skin, dark, 0.3));
+    for s in [-1.0f32, 1.0] {
+        let tusk = head + fwd * 0.45 + side * 0.22 * s;
+        strut(mb, tusk, 2.75 + bob, tusk + fwd * 0.12, 3.05 + bob, 0.05, rgb(236, 228, 210));
+    }
+    // the drum, slung across the belly
+    let drum = p + fwd * 1.25;
+    cyl(mb, drum, 0.85, 1.1, 2.0, rgb(232, 214, 176), rgb(150, 70, 30));
+    band(mb, &ngon(drum, 0.85, 20, 0.0), 1.25, 1.35, rgb(60, 36, 20));
+    band(mb, &ngon(drum, 0.85, 20, 0.0), 1.75, 1.85, rgb(60, 36, 20));
+    // arms raised between beats, down on the skin when it lands
+    let lift = (beat * 1.4).min(1.0) * 0.9;
+    for s in [-1.0f32, 1.0] {
+        let sh = chest + side * 1.0 * s + fwd * 0.1;
+        let hand = drum + side * 0.35 * s + fwd * -0.1;
+        strut(mb, sh, 2.4 + bob, hand, 2.05 + lift, 0.2, skin);
+        // a bone drumstick
+        strut(mb, hand, 2.05 + lift, hand + fwd * 0.3, 1.95 + lift * 0.6, 0.06, rgb(236, 228, 210));
+    }
+    3.2 + bob
 }
 
 // ------------------------------------------------------------------------------------------ hives
