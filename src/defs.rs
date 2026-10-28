@@ -33,9 +33,18 @@ pub enum S {
     Bunker,
     /// a turret built in the garage (its parts are in `Structure::cu`)
     Custom,
+    /// a wall that lets civilians and the player's troops through but holds the horde back
+    Gate,
 }
-pub const BUILD_ORDER: [S; 18] = [
+impl S {
+    /// Walls and gates: low, cheap, laid in lines on the 3-cell grid.
+    pub fn is_wall(self) -> bool {
+        matches!(self, S::Wall | S::Gate)
+    }
+}
+pub const BUILD_ORDER: [S; 19] = [
     S::Wall,
+    S::Gate,
     S::Bunker,
     S::Gun,
     S::Cannon,
@@ -89,7 +98,7 @@ pub fn logi_cap(level: u8) -> u32 {
 pub fn build_time(t: S) -> f32 {
     match t {
         S::Hq => 0.0,
-        S::Wall => 1.0,
+        S::Wall | S::Gate => 1.0,
         _ if def(t).w >= 9 => 3.0,
         _ => 2.5,
     }
@@ -143,7 +152,8 @@ const BASE: Def = Def {
 };
 
 pub fn def(s: S) -> &'static Def {
-    static WALL: Def = Def { key: '1', name: "Wall", w: 3, h: 3, hp: 300.0, cost: 3.0, ht: 1.6, top: rgb(139, 147, 159), side: rgb(93, 100, 112), tip: "Drag across a street to seal it. Corners that touch still block. Hordes chew through when there is no other way.", ..BASE };
+    static WALL: Def = Def { key: '1', name: "Wall", w: 3, h: 3, hp: 300.0, cost: 3.0, ht: 2.2, top: rgb(139, 147, 159), side: rgb(93, 100, 112), tip: "Drag across a street to seal it. Corners that touch still block. Hordes chew through when there is no other way.", ..BASE };
+    static GATE: Def = Def { key: '=', name: "Gate", w: 3, h: 3, hp: 450.0, cost: 6.0, ht: 2.2, top: rgb(240, 180, 40), side: rgb(110, 104, 92), tip: "A wall your civilians and troops can walk through, but the horde can't. Drag it across a street to keep it open for your side only. The horde still chews through when there is no other way.", ..BASE };
     static GUN: Def = Def { key: '2', name: "Gun turret", w: 5, h: 5, hp: 220.0, cost: 90.0, ht: 3.0, top: rgb(255, 212, 59), side: rgb(184, 147, 31), range: 46.0, rate: 0.16, dmg: 14.0, rad: 1.3, ammo: 1.0, turret: true, tip: "Fast, 1 ammo per shot. Click a rooftop for +60% range (it falls with the building). Base price inside the base zone; outside it costs more the further from the HQ it goes and is flown in by helicopter.", ..BASE };
     static CANNON: Def = Def { key: '3', name: "Cannon", w: 7, h: 7, hp: 420.0, cost: 240.0, ht: 3.5, top: rgb(255, 146, 43), side: rgb(184, 100, 15), range: 80.0, rate: 1.4, dmg: 70.0, rad: 5.0, ammo: 6.0, bdmg: 6.0, turret: true, tip: "Slow splash damage, 6 ammo per shell. Rooftops give +60% range. Base price inside the base zone; outside it costs more the further from the HQ it goes.", ..BASE };
     static EXT: Def = Def {
@@ -247,6 +257,7 @@ pub fn def(s: S) -> &'static Def {
         S::Helipad => &HELIPAD,
         S::Rescue => &RESCUE,
         S::Wall => &WALL,
+        S::Gate => &GATE,
         S::Gun => &GUN,
         S::Cannon => &CANNON,
         S::Extractor => &EXT,
@@ -329,8 +340,10 @@ pub enum R {
     Presses,
     Barrels,
     Mounts,
+    /// a solid wall (with gates across the streets) around the base zone
+    Perimeter,
 }
-pub const RESEARCH: [R; 7] = [R::Rescue, R::Carpet, R::Nuke, R::Armour, R::Presses, R::Barrels, R::Mounts];
+pub const RESEARCH: [R; 8] = [R::Rescue, R::Carpet, R::Nuke, R::Armour, R::Presses, R::Barrels, R::Mounts, R::Perimeter];
 /// Lab topics that aren't tied to an ability (those show on the ability panel instead).
 pub const LAB_ONLY: [R; 4] = [R::Armour, R::Presses, R::Barrels, R::Mounts];
 pub struct RDef {
@@ -349,7 +362,9 @@ pub fn rdef(r: R) -> &'static RDef {
     static PRESSES: RDef = RDef { name: "Shell presses", tip: "Ammo plants make 10 ammo a second instead of 6 from the same scrap", cost: 800.0, civs: 180 };
     static BARRELS: RDef = RDef { name: "Long barrels", tip: "Turrets reach 25% further", cost: 1000.0, civs: 220 };
     static MOUNTS: RDef = RDef { name: "Turret mounts", tip: "A turret can be built on top of a bunker, where it gets the rooftop range bonus (+60%)", cost: 600.0, civs: 140 };
+    static PERIMETER: RDef = RDef { name: "Perimeter wall", tip: "A solid wall rings the base zone, with gates across every street so civilians and troops can still get in. It follows the zone out when an outpost pushes it", cost: 500.0, civs: 120 };
     match r {
+        R::Perimeter => &PERIMETER,
         R::Rescue => &RESCUE,
         R::Carpet => &CARPET,
         R::Nuke => &NUKE,

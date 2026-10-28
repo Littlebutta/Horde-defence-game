@@ -3196,7 +3196,9 @@ impl App {
         let aw = 248.0;
         let ax = area.right() - aw - 12.0;
         let mut ay = top.bottom() + 12.0;
-        ay += self.hq_card(g, Rect::new(ax, ay, aw, 78.0)) + 8.0;
+        // outside the campaign the perimeter wall is bought on the HQ card
+        let wall_row = !g.campaign && !g.res(self.me()).has(R::Perimeter);
+        ay += self.hq_card(g, Rect::new(ax, ay, aw, if wall_row { 104.0 } else { 78.0 })) + 8.0;
         // cards get shorter when the screen is short
         let lab = !g.campaign && g.has(S::Lab);
         let lab_h = if lab { 44.0 + LAB_ONLY.len() as f32 * 30.0 } else { 0.0 };
@@ -3390,6 +3392,16 @@ impl App {
             let pr = Rect::new(r.x + 14.0, r.y + 47.0, r.w - 28.0, 3.0);
             self.progress(pr, (used as f32 / cap as f32).min(1.0), if full { p.bad } else { p.accent });
         }
+        if !g.campaign && !g.res(me).has(R::Perimeter) {
+            let wr = Rect::new(r.x + 8.0, r.bottom() - 52.0, r.w - 16.0, 22.0);
+            let cost = rdef(R::Perimeter).cost;
+            if self.button(wr, &format!("Perimeter wall · ${:.0}", cost), g.can_research(me, R::Perimeter) && !g.over, false) {
+                self.act(g, Cmd::Research(R::Perimeter));
+            }
+            if self.hot(wr) {
+                self.tip = Some(format!("{}.", rdef(R::Perimeter).tip));
+            }
+        }
         let br = Rect::new(r.x + 8.0, r.bottom() - 26.0, r.w - 16.0, 22.0);
         match g.hq_up_cost(me) {
             Some(cost) => {
@@ -3404,7 +3416,7 @@ impl App {
             }
             None => text(&self.fonts.mono, "Fully upgraded", br.x + 6.0, br.y + 15.0, 11.5, p.dim),
         }
-        if self.hot(Rect::new(r.x, r.y, r.w, r.h - 28.0)) {
+        if self.hot(Rect::new(r.x, r.y, r.w, 52.0)) {
             self.tip = Some("Logistics: every turret, rifle squad (six soldiers) and tank you have out counts one. Upgrade the HQ to field more.".into());
         }
         r.h

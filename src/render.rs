@@ -1488,7 +1488,7 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels, painter: bool
             art::ring_flat(&mut mb, c, w.max(h) / 2.0 + 1.5, 0.5, base + 0.05, rgb(255, 212, 59));
         }
         let top = art::structure(&mut mb, g, i, s, base, t, labels);
-        if s.hp < s.max * 0.99 && s.t != S::Wall {
+        if s.hp < s.max * 0.99 && !s.t.is_wall() {
             let f = s.hp / s.max;
             bar(&mut mb, c + vec2(0.0, -h / 2.0 - 2.0), top + 1.0, w.max(6.0), f, if f > 0.4 { rgb(64, 192, 87) } else { rgb(250, 82, 82) });
         }

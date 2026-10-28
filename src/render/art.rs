@@ -205,7 +205,7 @@ pub fn structure(mb: &mut MB, g: &Game, i: usize, s: &Structure, base: f32, t: f
     let (w, h) = (s.w as f32, s.h as f32);
     let c = s.center();
     match s.t {
-        S::Wall => wall(mb, d, c, w, h, base),
+        S::Wall | S::Gate => wall(mb, d, c, base, wall_links(g, s), s.t == S::Gate),
         S::Bunker => {
             let manned = g.groups.iter().filter(|gr| !gr.dead && gr.state == GState::Garrison && gr.sb == i as i32).map(|gr| gr.m.iter().filter(|m| m.alive).count()).sum::<usize>();
             let top = bunker(mb, d, c, w, h, base, manned > 0, t);
@@ -549,16 +549,86 @@ fn rescue(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, t: f32) -> f
 }
 
 /// Jersey-barrier style concrete: sloped sides, a capping strip and hazard paint on the ends.
-fn wall(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32) -> f32 {
-    let (hw, hh) = (w / 2.0, h / 2.0);
+fn wall_links(g: &Game, s: &Structure) -> u8 {
+    use crate::fields::{DX, DY};
+    let mut bits = 0u8;
+    for k in 0..8 {
+        // the cell just past this piece's edge (or corner) in that direction
+        let x = s.x + 1 + DX[k] * 2;
+        let y = s.y + 1 + DY[k] * 2;
+        if x < 0 || y < 0 || x >= W as i32 || y >= H as i32 {
+            continue;
+        }
+        let o = g.occ[y as usize * W + x as usize];
+        if o >= 0 && g.structs.get(o as usize).is_some_and(|n| !n.dead && n.t.is_wall()) {
+            bits |= 1 << k;
+        }
+    }
+    bits
+}
+
+/// A piece of curtain wall: a post, with a stretch of wall out to every wall or gate next to it
+/// (diagonally too), so a line of pieces reads as one solid wall. Gates are steel posts with a
+/// lower striped barrier between them. Returns the top for the health bar.
+fn wall(mb: &mut MB, d: &Def, c: Vec2, base: f32, links: u8, gate: bool) -> f32 {
+    use crate::fields::{DX, DY};
     let top = base + d.ht;
-    let lo = rect(c, -hw, -hh, hw, hh, 0.0);
-    let mid = rect(c, -hw + 0.15, -hh + 0.15, hw - 0.15, hh - 0.15, 0.0);
-    let hi = rect(c, -hw + 0.45, -hh + 0.45, hw - 0.45, hh - 0.45, 0.0);
-    loft(mb, &lo, &mid, base, base + 0.35, None, d.side);
-    loft(mb, &mid, &hi, base + 0.35, top, Some(d.top), mix(d.side, d.top, 0.3));
-    mb.poly_at(&rect(c, -hw + 0.45, -0.18, hw - 0.45, 0.18, 0.0), top + 0.02, mix(d.top, WHITE, 0.2));
-    top
+    let cap = d.top;
+    let mut any = false;
+    for k in 0..8 {
+        if links & (1 << k) == 0 {
+            continue;
+        }
+        // a diagonal only where the two straight neighbours don't already close the corner
+        if k >= 4 {
+            let (sx, sy) = (if DX[k] > 0 { 0 } else { 1 }, if DY[k] > 0 { 2 } else { 3 });
+            if links & (1 << sx) != 0 || links & (1 << sy) != 0 {
+                continue;
+            }
+        }
+        any = true;
+        let a = (DY[k] as f32).atan2(DX[k] as f32);
+        let len = if k >= 4 { 2.15 } else { 1.52 };
+        if gate {
+            // a low barrier on rails: dark grille, amber and black striped bar on top
+            let z1 = base + d.ht * 0.6;
+            loft(mb, &rect(c, 0.0, -0.9, len, 0.9, a), &rect(c, 0.0, -0.75, len, 0.75, a), base, base + 0.25, Some(STEEL_DARK), STEEL_DARK);
+            block(mb, &rect(c, 0.0, -0.35, len, 0.35, a), base + 0.25, z1, STEEL, STEEL_DARK);
+            for j in 0..3 {
+                let (x0, x1) = (j as f32 * len / 3.0, (j as f32 + 1.0) * len / 3.0);
+                let col = if j % 2 == 0 { d.top } else { rgb(30, 30, 32) };
+                block(mb, &rect(c, x0, -0.45, x1, 0.45, a), z1, z1 + 0.22, col, mix(col, BLACK, 0.3));
+            }
+        } else {
+            loft(mb, &rect(c, 0.0, -1.45, len, 1.45, a), &rect(c, 0.0, -1.2, len, 1.2, a), base, base + 0.4, Some(d.side), mix(d.side, BLACK, 0.15));
+            loft(mb, &rect(c, 0.0, -1.15, len, 1.15, a), &rect(c, 0.0, -0.95, len, 0.95, a), base + 0.4, top, Some(d.top), mix(d.side, d.top, 0.3));
+            // the walkway along the top
+            mb.poly_at(&rect(c, 0.0, -0.32, len, 0.32, a), top + 0.02, mix(d.top, WHITE, 0.2));
+        }
+    }
+    if gate {
+        // two steel posts with amber caps either side of the way through
+        let a = if links & 0b0011 != 0 || links & 0b1100 == 0 { std::f32::consts::FRAC_PI_2 } else { 0.0 };
+        for sgn in [-1.0f32, 1.0] {
+            let pc = c + vec2(a.cos(), a.sin()) * 0.95 * sgn;
+            block(mb, &chamfer(pc, 0.5, 0.5, 0.15, 0.0), base, top + 0.15, STEEL, STEEL_DARK);
+            block(mb, &chamfer(pc, 0.55, 0.55, 0.15, 0.0), top + 0.15, top + 0.4, cap, mix(cap, BLACK, 0.25));
+        }
+        return top + 0.4;
+    }
+    if !any {
+        // standing alone: a squat block
+        let lo = rect(c, -1.5, -1.5, 1.5, 1.5, 0.0);
+        let mid = rect(c, -1.35, -1.35, 1.35, 1.35, 0.0);
+        let hi = rect(c, -1.05, -1.05, 1.05, 1.05, 0.0);
+        loft(mb, &lo, &mid, base, base + 0.35, None, d.side);
+        loft(mb, &mid, &hi, base + 0.35, top, Some(d.top), mix(d.side, d.top, 0.3));
+        mb.poly_at(&rect(c, -1.05, -0.18, 1.05, 0.18, 0.0), top + 0.02, mix(d.top, WHITE, 0.2));
+        return top;
+    }
+    // the post where the stretches meet, standing a little proud of them
+    loft(mb, &chamfer(c, 1.35, 1.35, 0.35, 0.0), &chamfer(c, 1.15, 1.15, 0.3, 0.0), base, top + 0.18, Some(mix(d.top, WHITE, 0.08)), mix(d.side, d.top, 0.2));
+    top + 0.18
 }
 
 /// A squat concrete bunker with sloped walls, a dark firing slit all the way round, and a

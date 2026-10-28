@@ -52,6 +52,8 @@ pub struct Structure {
     pub done_at: f32,
     /// custom turrets: their design and what they're doing
     pub cu: Option<Box<Custom>>,
+    /// a piece of the perimeter wall, laid (and taken down again) along the base zone's edge
+    pub auto: bool,
 }
 impl Structure {
     /// Up on a roof or a bunker: no footprint on the ground, and the rooftop range bonus.
@@ -148,6 +150,8 @@ pub const C_AT_HQ: u8 = 15;
 /// Wandering civilians this close to an HQ (in HQ-field cost, about 10 per cell, so roughly
 /// 75 cells past the edge of a fresh base zone) run for it.
 const HQ_SEEK: u32 = 1500;
+/// The same for the zone around an outpost (from the edge of its zone, about 75 cells).
+const OUTPOST_SEEK: u32 = 750;
 /// Scrap and ammo paid per civilian flown out.
 pub const EVAC_SCRAP: f32 = 30.0;
 pub const EVAC_AMMO: f32 = 10.0;
@@ -395,6 +399,7 @@ pub struct Research {
     pub presses: bool,
     pub barrels: bool,
     pub mounts: bool,
+    pub perimeter: bool,
     pub busy: Option<(R, f32)>,
 }
 impl Research {
@@ -407,6 +412,7 @@ impl Research {
             R::Presses => self.presses,
             R::Barrels => self.barrels,
             R::Mounts => self.mounts,
+            R::Perimeter => self.perimeter,
         }
     }
     pub fn set(&mut self, r: R) {
@@ -418,6 +424,7 @@ impl Research {
             R::Presses => self.presses = true,
             R::Barrels => self.barrels = true,
             R::Mounts => self.mounts = true,
+            R::Perimeter => self.perimeter = true,
         }
     }
 }
@@ -433,6 +440,10 @@ pub struct Game {
     /// which neighbours a unit may step to from each cell (see `fields::neighbour_mask`)
     nb: Arc<Vec<u8>>,
     pub hq_dist: Arc<Vec<u32>>,
+    /// `obj` with gates open: what civilians and the player's troops walk on
+    pub pass: Arc<Vec<i32>>,
+    /// their way to the HQ (through the gates); the horde's `hq_dist` when there are none
+    pub home: Arc<Vec<u32>>,
     pub hunt: Option<Arc<Vec<u16>>>,
     fw_hq: FieldWorker,
     fw_hunt: FieldWorker,
@@ -449,6 +460,11 @@ pub struct Game {
     pad_dirty: bool,
     pub portal_field: Option<Arc<Vec<u32>>>,
     portal_job: u64,
+    /// a field into the zones the outposts opened up: civilians near one run for it
+    outpost_field: Option<Arc<Vec<u32>>>,
+    outpost_job: u64,
+    /// the outposts changed (or the ground did): work `outpost_field` out again
+    outpost_call: bool,
     portal_ft: f32,
     pub obj_dirty: bool,
     obj_timer: f32,
@@ -568,6 +584,8 @@ impl Game {
             obj: Arc::new(vec![FREE; N]),
             nb: Arc::new(crate::fields::neighbour_mask(&vec![FREE; N])),
             hq_dist: Arc::new(vec![INF; N]),
+            pass: Arc::new(vec![FREE; N]),
+            home: Arc::new(vec![INF; N]),
             hunt: None,
             fw_hq: FieldWorker::new(),
             fw_hunt: FieldWorker::new(),
@@ -582,6 +600,9 @@ impl Game {
             pad_jobs: Vec::new(),
             pad_dirty: true,
             portal_field: None,
+            outpost_field: None,
+            outpost_job: 0,
+            outpost_call: false,
             portal_job: 0,
             portal_ft: 0.0,
             obj_dirty: true,
@@ -677,14 +698,8 @@ impl Game {
                 g.add_struct(t, x, y, -1);
             }
         }
-        g.build_perimeter_wall();
         // blocking first field so the opening spawns have somewhere to go
-        let obj = Arc::new(g.build_obj());
-        let src = g.hq_src();
-        let d = crate::fields::dial(&obj, &src, crate::fields::Mode::Hq, INF - 1);
-        g.obj = obj;
-        g.hq_dist = Arc::new(d);
-        g.obj_dirty = false;
+        g.fields_now();
         let ncivs = (9000.0 * (g.world.buildings.len() as f32).sqrt() / 70.0).clamp(3000.0, 14000.0)
             as usize;
         g.init_civilians(ncivs);
@@ -792,12 +807,7 @@ impl Game {
         self.actor = 0;
         if self.hqs.len() > 1 {
             self.zone_dirty = true;
-            let obj = Arc::new(self.build_obj());
-            let src = self.hq_src();
-            let d = crate::fields::dial(&obj, &src, crate::fields::Mode::Hq, INF - 1);
-            self.obj = obj;
-            self.hq_dist = Arc::new(d);
-            self.obj_dirty = false;
+            self.fields_now();
         }
     }
 
@@ -852,6 +862,35 @@ impl Game {
         None
     }
 
+    /// Works the object grid and the HQ fields out on the spot (setting a game up).
+    pub fn fields_now(&mut self) {
+        let obj = Arc::new(self.build_obj());
+        let src = self.hq_src();
+        let d = Arc::new(crate::fields::dial(&obj, &src, crate::fields::Mode::Hq, INF - 1));
+        let (pass, home) = crate::fields::friendly(&obj, &d, &src, &self.gate_cells());
+        self.nb = Arc::new(crate::fields::neighbour_mask(&obj));
+        self.obj = obj;
+        self.hq_dist = d;
+        self.pass = pass;
+        self.home = home;
+        self.obj_dirty = false;
+    }
+    /// Cells under standing gates.
+    fn gate_cells(&self) -> Vec<u32> {
+        let mut v = Vec::new();
+        for s in &self.structs {
+            if s.dead || s.pending || s.t != S::Gate {
+                continue;
+            }
+            for y in s.y..s.y + s.h {
+                for x in s.x..s.x + s.w {
+                    v.push((y as usize * W + x as usize) as u32);
+                }
+            }
+        }
+        v
+    }
+
     pub fn build_obj(&self) -> Vec<i32> {
         let w = &self.world;
         use rayon::prelude::*;
@@ -895,11 +934,14 @@ impl Game {
         }
         while let Some(d) = self.fw_hq.poll() {
             match d {
-                Done::Hq { obj, d, nb } => {
+                Done::Hq { obj, d, nb, pass, home } => {
                     self.obj = obj;
                     self.nb = nb;
                     self.hq_dist = d;
+                    self.pass = pass;
+                    self.home = home;
                     self.pad_dirty = true;
+                    self.outpost_call |= self.outpost_field.is_some();
                 }
                 Done::Target { id, d } => {
                     for g in &mut self.groups {
@@ -926,6 +968,8 @@ impl Game {
                     self.pad_fields.push((pi, d));
                 } else if id == self.portal_job {
                     self.portal_field = Some(d);
+                } else if id == self.outpost_job {
+                    self.outpost_field = Some(d);
                 } else if let Some(r) = self.revs.iter_mut().find(|r| r.job == id) {
                     r.field = Some(d);
                 } else if let Some(q) = self.squads.iter_mut().find(|q| q.gjob == id) {
@@ -950,7 +994,27 @@ impl Game {
                 }
                 let id = self.next_job();
                 self.pad_jobs.push((id, pi));
-                self.fw_aux.submit(Job::Multi { id, obj: self.obj.clone(), src, max: 9000 });
+                self.fw_aux.submit(Job::Multi { id, obj: self.pass.clone(), src, max: 9000 });
+            }
+        }
+        // outposts: civilians around the zone one opens up run into it, as they do for the HQ at
+        // the start
+        if self.outpost_call && self.fw_aux.busy < 3 {
+            self.outpost_call = false;
+            let mut src = Vec::new();
+            for s in self.structs.iter().filter(|s| !s.dead && s.t == S::Outpost) {
+                fill_disc(s.center(), OUTPOST_R, |c| {
+                    if self.pass[c] == FREE {
+                        src.push(c as u32);
+                    }
+                });
+            }
+            if src.is_empty() {
+                self.outpost_field = None;
+                self.outpost_job = 0;
+            } else {
+                self.outpost_job = self.next_job();
+                self.fw_aux.submit(Job::Multi { id: self.outpost_job, obj: self.pass.clone(), src, max: OUTPOST_SEEK });
             }
         }
         // orc portals: where captured civilians are dragged
@@ -986,7 +1050,8 @@ impl Game {
             self.obj_timer = 0.3;
             let obj = Arc::new(self.build_obj());
             let src = self.hq_src();
-            self.fw_hq.submit(Job::Hq { obj, src });
+            let gates = self.gate_cells();
+            self.fw_hq.submit(Job::Hq { obj, src, gates });
         }
         self.hunt_timer -= DT;
         if self.hunt_timer <= 0.0 && self.fw_hunt.busy == 0 {
@@ -1025,7 +1090,7 @@ impl Game {
                 // walls are never a target in themselves: the horde walks around them, and only
                 // chews through one when it blocks the way to the HQ (the HQ field handles that)
                 for s in &self.structs {
-                    if s.dead || s.pending || s.up() || s.t == S::Wall {
+                    if s.dead || s.pending || s.up() || s.t.is_wall() {
                         continue;
                     }
                     for y in s.y..s.y + s.h {
@@ -1081,7 +1146,7 @@ impl Game {
                     continue;
                 }
                 let c = y as usize * W + x as usize;
-                if self.obj[c] == FREE {
+                if self.pass[c] == FREE {
                     v.push(c as u32);
                 }
             }
@@ -1093,7 +1158,7 @@ impl Game {
         let id = self.next_job();
         self.fw_hq.submit(Job::Target {
             id,
-            obj: self.obj.clone(),
+            obj: self.pass.clone(),
             src: tc as u32,
         });
         id
@@ -1214,6 +1279,7 @@ impl Game {
             snd: -100.0,
             owner: self.actor as u8,
             cu: None,
+            auto: false,
         };
         // walkers stand on their own legs: they never block the street
         let walker = t == S::Custom && self.cur_design(self.actor).is_some_and(|d| d.spec.leash > 0.0);
@@ -1250,9 +1316,15 @@ impl Game {
         }
         self.structs.push(s);
         self.sd.push(AtomicU32::new(0));
-        self.low.push(t == S::Wall);
+        self.low.push(t.is_wall());
         if t == S::Custom {
             self.init_custom(idx);
+        }
+        if t == S::Outpost {
+            if self.has_perimeter() {
+                self.lay_perimeter();
+            }
+            self.outpost_call = true;
         }
         idx
     }
@@ -1268,7 +1340,7 @@ impl Game {
     /// Health multiplier from Reinforced armour (walls and turrets only), for player `o`'s.
     pub fn armour(&self, t: S, o: usize) -> f32 {
         let hull = if t == S::Helium && self.has_up(o, Up::HeliumHull) { 2.0 } else { 1.0 };
-        hull * if self.res(o).armour && (t == S::Wall || def(t).turret) { 1.75 } else { 1.0 }
+        hull * if self.res(o).armour && (t.is_wall() || def(t).turret) { 1.75 } else { 1.0 }
     }
     /// A turret's reach, with rooftop and its owner's Long barrels bonuses.
     pub fn turret_range(&self, t: S, roof: bool, o: usize) -> f32 {
@@ -1527,7 +1599,7 @@ impl Game {
     pub fn struct_at(&self, p: Vec2) -> Option<usize> {
         self.structs.iter().enumerate().rev().find(|(_, s)| {
             !s.dead
-                && !matches!(s.t, S::Hq | S::Wall)
+                && !matches!(s.t, S::Hq | S::Wall | S::Gate)
                 && p.x >= s.x as f32
                 && p.y >= s.y as f32
                 && p.x < (s.x + s.w) as f32
@@ -1613,55 +1685,71 @@ impl Game {
             self.world.add_outpost(c);
         }
         self.zone_dirty = true;
+        self.outpost_call = true;
+        if self.has_perimeter() {
+            self.lay_perimeter();
+        }
     }
 
-    /// Walls along the edge of the airport wherever the horde could walk in, leaving the roads open.
-    fn build_perimeter_wall(&mut self) {
-        let mut edge = vec![false; N];
+    /// Whether any player has the Perimeter wall upgrade.
+    pub fn has_perimeter(&self) -> bool {
+        self.perks.iter().any(|k| k.research.perimeter)
+    }
+
+    /// The perimeter wall: a solid ring of wall along the whole edge of the base zone, with a gate
+    /// wherever a street crosses it. Laid again whenever the zone changes, so pieces the zone has
+    /// grown past come down and the new edge is walled (pieces the horde broke are put back).
+    fn lay_perimeter(&mut self) {
+        const G: usize = 3;
+        let (gw, gh) = (W / G, H / G);
         let w = &self.world;
         let walk = |c: usize| World::walkable_terrain(w.terrain[c]) && w.bid[c] < 0;
+        // 3x3 blocks (the wall grid) holding a cell of the zone that touches the outside
+        let mut edge = vec![false; gw * gh];
         for y in 3..H - 3 {
             for x in 3..W - 3 {
                 let c = y * W + x;
-                if w.zone[c] != 1 || !walk(c) || w.terrain[c] == T_ROAD {
+                if w.zone[c] != 1 || !walk(c) || edge[(y / G) * gw + x / G] {
                     continue;
                 }
-                // the fence runs along the whole edge of the base zone
-                let mut outside = false;
-                'o: for oy in -1i32..=1 {
-                    for ox in -1i32..=1 {
-                        let nc = (y as i32 + oy) as usize * W + (x as i32 + ox) as usize;
-                        if w.zone[nc] != 1 {
-                            outside = true;
-                            break 'o;
-                        }
-                    }
+                let outside = (-1i32..=1).any(|oy| (-1i32..=1).any(|ox| w.zone[(y as i32 + oy) as usize * W + (x as i32 + ox) as usize] != 1));
+                if outside {
+                    edge[(y / G) * gw + x / G] = true;
                 }
-                edge[c] = true && outside;
             }
         }
-        let mut placed = vec![false; (W / 3) * (H / 3)];
-        for y in 0..H {
-            for x in 0..W {
-                if !edge[y * W + x] {
+        // pieces left behind inside the zone (or outside it, when an outpost fell) come down
+        let mut have = vec![false; gw * gh];
+        for i in 0..self.structs.len() {
+            let s = &self.structs[i];
+            if s.dead || !s.auto {
+                continue;
+            }
+            let b = (s.y as usize / G) * gw + s.x as usize / G;
+            if edge[b] {
+                have[b] = true;
+            } else {
+                self.kill_struct(i);
+            }
+        }
+        for gy in 1..gh - 1 {
+            for gx in 1..gw - 1 {
+                let b = gy * gw + gx;
+                if !edge[b] || have[b] {
                     continue;
                 }
-                let (gx, gy) = (x / 3, y / 3);
-                if placed[gy * (W / 3) + gx] {
-                    continue;
-                }
-                placed[gy * (W / 3) + gx] = true;
-                let (wx, wy) = (gx as i32 * 3, gy as i32 * 3);
+                let (wx, wy) = ((gx * G) as i32, (gy * G) as i32);
+                // a street (or the cell next to one) gets a gate, so the side's own can come and go
                 let mut road = false;
-                for yy in wy - 1..wy + 4 {
-                    for xx in wx - 1..wx + 4 {
-                        if self.world.terrain[yy as usize * W + xx as usize] == T_ROAD {
-                            road = true;
-                        }
+                for yy in wy - 1..wy + G as i32 + 1 {
+                    for xx in wx - 1..wx + G as i32 + 1 {
+                        road |= self.world.terrain[yy as usize * W + xx as usize] == T_ROAD;
                     }
                 }
-                if !road && self.can_place(S::Wall, wx, wy) {
-                    self.add_struct(S::Wall, wx, wy, -1);
+                let t = if road { S::Gate } else { S::Wall };
+                if self.can_place(t, wx, wy) {
+                    let i = self.add_struct(t, wx, wy, -1);
+                    self.structs[i].auto = true;
                 }
             }
         }
@@ -3236,6 +3324,10 @@ impl Game {
     }
     /// Whether player `o` can start researching this at the lab (each player researches for themselves).
     pub fn can_research(&self, o: usize, r: R) -> bool {
+        if r == R::Perimeter {
+            // an HQ upgrade, not lab work: bought outright (the campaign researches it between cities)
+            return !self.campaign && !self.res(o).has(r) && self.scrap >= rdef(r).cost;
+        }
         !self.campaign
             && !self.res(o).has(r)
             && self.res(o).busy.is_none()
@@ -3245,6 +3337,14 @@ impl Game {
     /// The acting player starts researching this.
     pub fn start_research(&mut self, r: R) {
         let o = self.actor.min(self.perks.len() - 1);
+        if r == R::Perimeter {
+            if self.can_research(o, r) {
+                self.scrap -= rdef(r).cost;
+                self.complete_research(o, r);
+                self.show("Perimeter wall going up: gates across every street", 3.0);
+            }
+            return;
+        }
         if self.can_research(o, r) {
             self.scrap -= rdef(r).cost;
             self.perks[o].research.busy = Some((r, 30.0));
@@ -3255,9 +3355,15 @@ impl Game {
     pub fn complete_research(&mut self, o: usize, r: R) {
         let o = o.min(self.perks.len() - 1);
         self.perks[o].research.set(r);
+        if r == R::Perimeter {
+            let a = self.actor;
+            self.actor = o;
+            self.lay_perimeter();
+            self.actor = a;
+        }
         if r == R::Armour {
             for s in &mut self.structs {
-                if s.owner as usize == o && (s.t == S::Wall || def(s.t).turret) {
+                if s.owner as usize == o && (s.t.is_wall() || def(s.t).turret) {
                     s.hp *= 1.75;
                     s.max *= 1.75;
                 }
@@ -3773,9 +3879,11 @@ impl Game {
     }
 
     fn civilians(&mut self) {
-        let obj = self.obj.clone();
-        let hqd = self.hq_dist.clone();
+        // civilians walk through the gates, and take the HQ field that runs through them
+        let obj = self.pass.clone();
+        let hqd = self.home.clone();
         let portf = self.portal_field.clone();
+        let outf = self.outpost_field.clone();
         let mut waiting = 0;
         let mut dragged: Vec<Vec2> = Vec::new();
         if self.ticks % 10 == 0 {
@@ -3958,10 +4066,21 @@ impl Game {
                     }
                 }
             }
-            if hqd[c] <= HQ_SEEK {
-                // close enough to an HQ to make a run for it
+            if self.world.in_zone(p) {
+                // the zone grew around them (an outpost): safe, off to the HQ
+                self.civs[i].st = C_TO_PAD;
+                self.rescued += 1;
+                continue;
+            }
+            let near_post = outf.as_ref().filter(|f| f[c] <= OUTPOST_SEEK);
+            if hqd[c] <= HQ_SEEK || near_post.is_some() {
+                // close enough to an HQ (or an outpost's zone) to make a run for it
+                let f = match near_post {
+                    Some(f) if hqd[c] > HQ_SEEK || f[c] < hqd[c] => f,
+                    _ => &hqd,
+                };
                 let mut pp = p;
-                Self::step_on_field(&obj, &mut pp, &hqd, if seen > 0 { 8.5 } else { 4.5 }, &mut self.rng);
+                Self::step_on_field(&obj, &mut pp, f, if seen > 0 { 8.5 } else { 4.5 }, &mut self.rng);
                 self.civs[i].p = pp;
                 if self.world.in_zone(pp) {
                     self.civs[i].st = C_TO_PAD;
@@ -4105,8 +4224,8 @@ impl Game {
     }
 
     fn squads_tick(&mut self) {
-        let obj = self.obj.clone();
-        let hqd = self.hq_dist.clone();
+        let obj = self.pass.clone();
+        let hqd = self.home.clone();
         for si in 0..self.squads.len() {
             if self.squads[si].done {
                 continue;
@@ -4547,7 +4666,7 @@ impl Game {
     }
 
     fn groups_tick(&mut self) {
-        let obj = self.obj.clone();
+        let obj = self.pass.clone();
         let atk = self.stats().atk;
         for gi in 0..self.groups.len() {
             if self.groups[gi].dead {
@@ -4702,14 +4821,14 @@ impl Game {
                     let to = self.groups[gi].target;
                     let tc = to.y as usize * W + to.x as usize;
                     self.groups[gi].stuck = 0.0;
-                    if self.groups[gi].retries < 2 && self.obj[tc] == FREE {
+                    if self.groups[gi].retries < 2 && self.pass[tc] == FREE {
                         self.groups[gi].retries += 1;
                         let job = self.target_job(tc);
                         let g = &mut self.groups[gi];
                         g.job = job;
                         g.state = GState::Wait;
                         // whoever is standing inside something steps out onto open ground
-                        let obj = self.obj.clone();
+                        let obj = self.pass.clone();
                         for k in 0..self.groups[gi].m.len() {
                             let p = self.groups[gi].m[k].p;
                             if self.groups[gi].m[k].alive && obj[p.y as usize * W + p.x as usize] != FREE {
@@ -4837,6 +4956,78 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cells reachable on open ground from the HQ, over `obj`.
+    fn reach(g: &Game, obj: &[i32]) -> Vec<u32> {
+        crate::fields::dial(obj, &g.hq_src(), crate::fields::Mode::Open, INF - 1)
+    }
+    fn leaks(g: &Game, d: &[u32]) -> usize {
+        (0..N).filter(|&c| d[c] != INF && g.world.zone[c] != 1).count()
+    }
+
+    /// No walls until the upgrade; then the zone is sealed to the horde, the gates let the
+    /// side's own out, and no city building is left standing in the HQ's zone.
+    #[test]
+    fn perimeter_seals_the_zone() {
+        let mut g = Game::new(crate::citygen::generate(3), 0, 1.0, 5);
+        assert!(!g.structs.iter().any(|s| s.t.is_wall()), "walls without the upgrade");
+        assert!(leaks(&g, &reach(&g, &g.obj)) > 0);
+        for c in 0..N {
+            if g.world.zone[c] == 1 {
+                assert!(g.world.bid[c] < 0, "a building inside the HQ zone");
+            }
+        }
+        g.scrap = 5000.0;
+        g.start_research(R::Perimeter);
+        assert!(g.res(0).perimeter);
+        g.fields_now();
+        let walls = g.structs.iter().filter(|s| !s.dead && s.t == S::Wall).count();
+        let gates = g.structs.iter().filter(|s| !s.dead && s.t == S::Gate).count();
+        assert!(walls > 100 && gates > 0, "{} walls, {} gates", walls, gates);
+        assert_eq!(leaks(&g, &reach(&g, &g.obj)), 0, "the horde can walk in");
+        assert!(leaks(&g, &reach(&g, &g.pass)) > 0, "the gates don't let anyone out");
+        assert!(g.home.iter().zip(g.hq_dist.iter()).any(|(a, b)| a < b));
+    }
+
+    /// An outpost pushes the perimeter out (taking down what is now inside), and civilians
+    /// around its new zone run in and on to the HQ.
+    #[test]
+    fn outpost_moves_wall_and_calls_civilians() {
+        let mut g = Game::new(crate::citygen::generate(3), 0, 1.0, 5);
+        g.scrap = 50_000.0;
+        g.start_research(R::Perimeter);
+        let hq = g.world.hq;
+        let spot = (0..64)
+            .map(|k| k as f32 * std::f32::consts::TAU / 64.0)
+            .map(|a| hq + vec2(libm::cosf(a), libm::sinf(a)) * 100.0)
+            .find(|p| g.can_place(S::Outpost, p.x as i32 - 4, p.y as i32 - 4))
+            .expect("room for an outpost");
+        // civilians just past where the new zone will end
+        let dir = (spot - hq).normalize();
+        let far = spot + dir * (OUTPOST_R + 20.0);
+        let n0 = g.civs.len();
+        for k in 0..20 {
+            let p = far + vec2(dir.y, -dir.x) * (k as f32 - 10.0);
+            if p.x < 2.0 || p.y < 2.0 || p.x > W as f32 - 2.0 || p.y > H as f32 - 2.0 || g.pass[p.y as usize * W + p.x as usize] != FREE {
+                continue;
+            }
+            g.civs.push(Civ { p, st: C_ROAM, sq: 0, esc: 0, pad: 0, hd: 0.0, flee_t: 0.0 });
+        }
+        assert!(g.civs.len() > n0 + 5);
+        assert!(g.place(S::Outpost, spot.x as i32 - 4, spot.y as i32 - 4));
+        // nothing auto-built is left standing deep inside the zone
+        for s in g.structs.iter().filter(|s| !s.dead && s.auto) {
+            assert!(!g.world.in_zone(s.center() + vec2(4.0, 0.0)) || !g.world.in_zone(s.center() - vec2(4.0, 0.0)) || !g.world.in_zone(s.center() + vec2(0.0, 4.0)) || !g.world.in_zone(s.center() - vec2(0.0, 4.0)), "a wall left inside the zone");
+        }
+        for _ in 0..30 * 40 {
+            g.tick();
+        }
+        let safe = g.civs[n0..].iter().filter(|c| matches!(c.st, C_TO_PAD | C_AT_HQ | C_TO_IDLE | C_AT_PAD | C_GONE)).count();
+        let total = g.civs.len() - n0;
+        assert!(safe * 2 > total, "{} of {} made it in", safe, total);
+        let at_hq = g.civs[n0..].iter().filter(|c| matches!(c.st, C_AT_HQ | C_TO_IDLE | C_AT_PAD | C_GONE) || c.p.distance(hq) < 40.0).count();
+        assert!(at_hq * 2 > total, "{} of {} reached the HQ", at_hq, total);
+    }
     /// Anything built inside the base zone costs its base price, however far from the HQ.
     #[test]
     fn zone_has_no_distance_cost() {

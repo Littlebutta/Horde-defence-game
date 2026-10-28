@@ -1202,6 +1202,8 @@ mod tests {
         g.ammo_cap = 1e7;
         // room for every test turret
         g.set_hq_level(0, HQ_MAX);
+        // walled in, as every base used to start
+        g.complete_research(0, R::Perimeter);
         g
     }
 

@@ -313,10 +313,29 @@ impl World {
         for r in &desc.runways {
             thick_line(&r.pts, r.w + 2.0, |c| keep_out[c] = true);
         }
+        // the HQ's zone is cleared to build in: no building stands with any part inside it (or in
+        // the strip just outside, where the perimeter wall goes), nor in a co-op HQ's zone
+        let mut clear = zone.clone();
+        for &q in &desc.extra_hqs {
+            fill_disc(q, OUTPOST_R, |c| clear[c] = 1);
+        }
+        let near_clear = |p: &Poly| {
+            let mut hit = false;
+            fill_poly(p, |c| {
+                if !hit {
+                    let (x, y) = ((c % W) as i32, (c / W) as i32);
+                    for (ox, oy) in [(0, 0), (4, 0), (-4, 0), (0, 4), (0, -4)] {
+                        let (xx, yy) = (x + ox, y + oy);
+                        hit |= xx >= 0 && yy >= 0 && xx < W as i32 && yy < H as i32 && clear[yy as usize * W + xx as usize] == 1;
+                    }
+                }
+            });
+            hit
+        };
         let mut buildings: Vec<Building> = Vec::new();
         for b in &desc.buildings {
             let c0 = centroid(&b.poly);
-            if c0.distance(hq) < HQ_CLEAR || desc.extra_hqs.iter().any(|q| c0.distance(*q) < 30.0) {
+            if c0.distance(hq) < HQ_CLEAR || desc.extra_hqs.iter().any(|q| c0.distance(*q) < 30.0) || near_clear(&b.poly) {
                 continue;
             }
             let mut cells = Vec::new();

@@ -63,7 +63,7 @@ impl Cmd {
     }
 }
 
-const ALL_S: [S; 20] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue, S::ScrapDepot, S::AmmoDepot, S::Bunker, S::Custom];
+const ALL_S: [S; 21] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue, S::ScrapDepot, S::AmmoDepot, S::Bunker, S::Custom, S::Gate];
 const ALL_U: [U; 2] = [U::Rifle, U::Tank];
 
 fn s_id(t: S) -> u32 {
@@ -202,7 +202,7 @@ impl Rd<'_> {
 /// steps, everything else fills a grid of copies.
 pub fn plan(t: S, a: Vec2, b: Vec2) -> Vec<(i32, i32)> {
     let d = def(t);
-    if t == S::Wall {
+    if t.is_wall() {
         let snap = |p: Vec2| ((p.x / 3.0).floor() as i32, (p.y / 3.0).floor() as i32);
         let (x0, y0) = snap(a);
         let (x1, y1) = snap(b);

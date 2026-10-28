@@ -116,10 +116,26 @@ pub fn neighbour_mask(obj: &[i32]) -> Vec<u8> {
     m
 }
 
+/// The object grid as the player's side sees it (gates are open ground to them), and their own
+/// field to the HQ over it. Without gates both are the horde's.
+pub fn friendly(obj: &Arc<Vec<i32>>, d: &Arc<Vec<u32>>, src: &[u32], gates: &[u32]) -> (Arc<Vec<i32>>, Arc<Vec<u32>>) {
+    if gates.is_empty() {
+        return (obj.clone(), d.clone());
+    }
+    let mut pass = obj.as_ref().clone();
+    for &c in gates {
+        pass[c as usize] = FREE;
+    }
+    let home = dial(&pass, src, Mode::Hq, INF - 1);
+    (Arc::new(pass), Arc::new(home))
+}
+
 pub enum Job {
     Hq {
         obj: Arc<Vec<i32>>,
         src: Vec<u32>,
+        /// cells under gates, open to the player's side
+        gates: Vec<u32>,
     },
     Hunt {
         obj: Arc<Vec<i32>>,
@@ -144,6 +160,8 @@ pub enum Done {
         obj: Arc<Vec<i32>>,
         d: Arc<Vec<u32>>,
         nb: Arc<Vec<u8>>,
+        pass: Arc<Vec<i32>>,
+        home: Arc<Vec<u32>>,
     },
     Hunt(Arc<Vec<u16>>),
     Target {
@@ -178,10 +196,11 @@ impl FieldWorker {
         std::thread::spawn(move || {
             while let Ok(job) = jrx.recv() {
                 let out = match job {
-                    Job::Hq { obj, src } => {
-                        let d = dial(&obj, &src, Mode::Hq, INF - 1);
+                    Job::Hq { obj, src, gates } => {
+                        let d = Arc::new(dial(&obj, &src, Mode::Hq, INF - 1));
                         let nb = Arc::new(neighbour_mask(&obj));
-                        Done::Hq { obj, d: Arc::new(d), nb }
+                        let (pass, home) = friendly(&obj, &d, &src, &gates);
+                        Done::Hq { obj, d, nb, pass, home }
                     }
                     Job::Hunt { obj, src, max } => {
                         let d = dial(&obj, &src, Mode::Open, max);

@@ -118,10 +118,10 @@ pub enum Tech {
 }
 
 /// What every campaign starts with.
-pub const START_BUILDS: [S; 5] = [S::Wall, S::Bunker, S::Extractor, S::Pad, S::Rescue];
+pub const START_BUILDS: [S; 6] = [S::Wall, S::Gate, S::Bunker, S::Extractor, S::Pad, S::Rescue];
 
 /// The whole tree, in the order the campaign screen lists it. Saves store indices into it, so new entries go at the end.
-pub const TECH: [Tech; 41] = [
+pub const TECH: [Tech; 42] = [
     Tech::Build(S::Gun),
     Tech::Build(S::Cannon),
     Tech::Build(S::Flame),
@@ -163,6 +163,7 @@ pub const TECH: [Tech; 41] = [
     Tech::Up(Up::RifleGrenade),
     Tech::Up(Up::RifleRocket),
     Tech::Build(S::Custom),
+    Tech::Research(R::Perimeter),
 ];
 
 /// Turrets that shoot ammo: the first one unlocked brings the ammo plant with it.
@@ -193,6 +194,7 @@ impl Tech {
             Tech::Build(s) => def(s).tip.to_string(),
             Tech::Unit(u) => format!("{}: a squad you can call in from the build bar.", udef(u).name),
             Tech::Ability(a) => adef(a).tip.to_string(),
+            Tech::Research(R::Perimeter) => format!("{}. Every city starts with it built.", rdef(R::Perimeter).tip),
             Tech::Research(r) => rdef(r).tip.to_string(),
             Tech::Up(u) => updef(u).tip.to_string(),
             Tech::Hq(l) => format!(
@@ -238,6 +240,7 @@ impl Tech {
             Tech::Build(_) | Tech::Unit(_) | Tech::Hq(_) => "Support",
             Tech::Up(u) if RIFLE_UPS.contains(&u) => "Support",
             Tech::Ability(_) | Tech::Research(R::Rescue | R::Carpet | R::Nuke) => "Abilities",
+            Tech::Research(R::Perimeter) => "Support",
             Tech::Research(_) => "Research",
             Tech::Up(_) => "Turret upgrades",
         }

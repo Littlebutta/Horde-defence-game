@@ -214,6 +214,11 @@ async fn run(steam: Option<net::Steam>) {
                         }
                     }
                 }
+                if std::env::var("PH_WALLS").is_ok() {
+                    // the perimeter wall upgrade, as if bought on the HQ card
+                    let o = g.actor;
+                    g.complete_research(o, defs::R::Perimeter);
+                }
                 if std::env::var("PH_SCRIPT").is_ok() {
                     selftest::abilities(g);
                 }
