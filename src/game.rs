@@ -1963,7 +1963,7 @@ impl Game {
             1 => {
                 self.drop_t -= DT;
                 if self.drop_t <= 0.0 {
-                    let n = ((15.0 + self.time * 0.4) * horde_scale(m)).round();
+                    let n = ((25.0 + self.time * 0.8) * horde_scale(m)).round();
                     if let Some(p) = self.random_cell(1800) {
                         // some drops are light flying bugs that cross rooftops and walls
                         if self.time > 40.0 && self.rng.f() < 0.22 {
@@ -5262,6 +5262,8 @@ mod tests {
 #[cfg(test)]
 mod horde_size_probe {
     use super::*;
+    /// How big each army's horde gets over nine minutes at four threats, with an HQ that can't
+    /// fall: `PF=<army> cargo test --release horde_sizes -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn horde_sizes() {
