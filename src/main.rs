@@ -274,6 +274,10 @@ async fn run(steam: Option<net::Steam>) {
                 app.set_angles(ang("PH_YAW", 0.0), ang("PH_PITCH", 0.95));
             }
         }
+        // PH_RESUME=1: Menu, garage, back and Resume during the test game (see App::resume_test)
+        if std::env::var("PH_RESUME").is_ok() && app.resume_test(frame) {
+            break;
+        }
         app.frame();
         if let (Some(path), true) = (&shot, frame == if menu_shot { 40 } else { std::env::var("PH_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(4) }) {
             get_screen_data().export_png(path);

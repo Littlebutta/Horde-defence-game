@@ -86,7 +86,7 @@ impl HubAct {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum Screen {
     Menu,
     Loading,
@@ -685,6 +685,11 @@ impl App {
     }
     /// Back into the match left behind the menu.
     fn resume_game(&mut self) {
+        if self.game.is_none() || self.scene.is_none() {
+            self.suspended = false;
+            self.paused = false;
+            return;
+        }
         // research and parts bought on the campaign screen meanwhile are ready to use
         if let (true, Some(c), Some(g)) = (self.in_camp, self.camp.as_ref(), self.game.as_mut()) {
             c.refresh(g);
@@ -1745,7 +1750,7 @@ impl App {
                 wrap(&self.fonts.mono, &self.status, x0, by + 6.0, w, 12.0, rgb(250, 82, 82));
             }
             let gr = Rect::new(x0, by + 30.0, w, 46.0);
-            if self.suspended {
+            if self.suspended && self.game.is_some() {
                 self.camp = Some(c);
                 self.suspended_buttons(gr, "Resume defense", "Abandon city");
                 if self.screen != Screen::Hub {
@@ -1904,6 +1909,29 @@ impl App {
         }
     }
 
+    /// Headless test hook (PH_RESUME): step `k` of leaving the match through the Menu button,
+    /// into the garage and back, then Resume. Prints what happened at the end.
+    pub fn resume_test(&mut self, k: u32) -> bool {
+        match k {
+            10 => self.open_menu(),
+            14 => self.open_workshop(self.in_camp),
+            18 => {
+                if let Some(w) = self.workshop.take() {
+                    self.screen = if w.campaign { Screen::Hub } else { Screen::Menu };
+                }
+            }
+            22 => {
+                eprintln!("resume test: behind the menu {:?}, game kept {}", self.screen, self.game.is_some());
+                self.resume_game();
+            }
+            30 => {
+                eprintln!("resume test: after Resume {:?}, game {}", self.screen, self.game.is_some());
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
     /// Headless test hook: start a random city right away.
     pub fn quick_start(&mut self, fac: usize, seed: u64) {
         self.fac = fac;
@@ -1957,6 +1985,8 @@ impl App {
 
     fn start(&mut self) {
         self.status.clear();
+        // a campaign city left earlier doesn't make this match a campaign one
+        self.in_camp = false;
         self.save_settings();
         if self.camp_mode {
             self.open_campaign(campaign::load());
@@ -2563,6 +2593,12 @@ impl App {
             self.scene = Some(sc);
         } else {
             self.due = 0;
+            // the Menu button: the match waits behind the menu (and the garage, the campaign
+            // screen) until Resume or Abandon
+            if self.suspended {
+                self.game = Some(g);
+                self.scene = Some(sc);
+            }
         }
         if self.placing.is_some() {
             if let Some(p) = self.place_at.take() {
