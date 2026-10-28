@@ -85,7 +85,9 @@ impl App {
         }
         y += 6.0;
         let card_h = ((r.bottom() - y) / 3.0 - 8.0).clamp(64.0, 104.0);
-        for a in [ZOMBIES, ALIENS, ORCS] {
+        // armies that haven't reached Earth yet stay secret
+        let found: Vec<usize> = [ZOMBIES, ALIENS, ORCS].into_iter().filter(|&a| c.arrived(a)).collect();
+        for a in found {
             let cr = Rect::new(r.x, y, r.w, card_h);
             let col = army_col(a);
             let here = c.arrived(a);
@@ -136,8 +138,6 @@ impl App {
                     let wipe = if c.ftier[a] as usize == FTIERS - 1 { "" } else { " Hordes 10% smaller, units 7% weaker." };
                     self.tip = Some(format!("{}: {}{} {} FP; you have {}. One point for every {} {} killed.", t.name, t.tip, wipe, t.cost, c.fpoints(a), campaign::KILLS_PER_POINT[a], campaign_army_name(a).to_lowercase()));
                 }
-            } else if self.hot(cr) && !here {
-                self.tip = Some(format!("{} haven't reached Earth yet. They will within the first six turns.", campaign_army_name(a)));
             }
             y += card_h + 8.0;
         }

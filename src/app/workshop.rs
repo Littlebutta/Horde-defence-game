@@ -544,11 +544,7 @@ impl App {
                 hover = Some(Some(i));
                 let need = match st {
                     Stock::Locked => {
-                        let prev = PARTS
-                            .iter()
-                            .find(|q| q.fam == pt.fam && q.lvl + 1 == pt.lvl)
-                            .map(|q| q.name)
-                            .unwrap_or("");
+                        let prev = parts::needs(i).map(|n| part(n).name).unwrap_or("");
                         format!(" Research the {} first.", prev)
                     }
                     Stock::Research(n) => {

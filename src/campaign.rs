@@ -854,10 +854,9 @@ impl Campaign {
     pub fn part_owned(&self, p: usize, i: u16) -> bool {
         garage::STARTER.contains(&garage::part(i).id) || self.crew(p).owned.contains(&i)
     }
-    /// A part can be researched once the weaker part of its family is.
+    /// A part can be researched once the one before it in its slot's tree is (see `garage::needs`).
     pub fn part_open(&self, p: usize, i: u16) -> bool {
-        let pt = garage::part(i);
-        !self.part_known(p, i) && (pt.lvl == 0 || garage::PARTS.iter().enumerate().any(|(j, q)| q.fam == pt.fam && q.lvl + 1 == pt.lvl && self.part_known(p, j as u16)))
+        !self.part_known(p, i) && garage::needs(i).is_none_or(|n| self.part_known(p, n))
     }
     pub fn research_part(&mut self, p: usize, i: u16) -> bool {
         let cost = garage::part(i).research();

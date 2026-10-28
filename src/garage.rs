@@ -293,6 +293,115 @@ pub const STARTER: [&str; 9] = [
     "g.plate1",
 ];
 
+/// The part a family's first strength needs researched before it, which makes each slot's parts
+/// one research tree: families with none are its roots (the starter parts and a few cheap basics).
+fn fam_after(f: Fam) -> Option<&'static str> {
+    use Fam::*;
+    Some(match f {
+        Sandbag | Ring | Iron | Optic | Rifle | Shotgun | Piercing | Incendiary | HighEx | Drum
+        | LightLoad | Rangefinder | Plates | Hopper => return None,
+        // mounts
+        Pintle => "m.sandbag",
+        Mast => "m.ring1",
+        Casemate => "m.ring2",
+        Twin => "m.ring3",
+        Popup => "m.case1",
+        Fortress => "m.case3",
+        Crane => "m.mast1",
+        Gyro => "m.pintle2",
+        Walker => "m.pintle2",
+        // heads
+        Crowd => "h.iron",
+        Guard => "h.iron",
+        Scatter => "h.crowd1",
+        Sweep => "h.scat1",
+        LastLine => "h.guard1",
+        Far => "h.optic1",
+        Split => "h.far1",
+        Lead => "h.optic2",
+        Overwatch => "h.lead2",
+        // barrels
+        Rotary => "b.rifle1",
+        Needle => "b.rifle2",
+        Rail => "b.rifle3",
+        Laser => "b.rail1",
+        Tesla => "b.laser1",
+        Sonic => "b.tesla1",
+        Flamer => "b.shot1",
+        Flak => "b.shot1",
+        Howitzer => "b.flak",
+        Mortar => "b.how1",
+        Missile => "b.mort1",
+        // modifiers
+        Ricochet => "x.ap1",
+        Seeker => "x.rico1",
+        Overcharge => "x.ap2",
+        Cryo => "x.fire1",
+        Cluster => "x.he1",
+        Volatile => "x.clus2",
+        HairTrigger => "x.drum1",
+        TwinLink => "x.drum2",
+        // accessories
+        Stabiliser => "g.range1",
+        Cooling => "g.stab1",
+        Spotter => "g.range2",
+        Repair => "g.plate1",
+        Shield => "g.rep2",
+        Mines => "g.hop1",
+        Recycler => "g.mine2",
+        Ciws => "g.hop2",
+    })
+}
+
+/// The part that has to be researched before part `i`: the weaker part of its family, or for a
+/// family's first part the one its branch grows from.
+pub fn needs(i: u16) -> Option<u16> {
+    let pt = part(i);
+    if pt.lvl > 0 {
+        return PARTS.iter().position(|q| q.fam == pt.fam && q.lvl + 1 == pt.lvl).map(|j| j as u16);
+    }
+    fam_after(pt.fam).and_then(find)
+}
+
+/// Where a part sits in its slot's research tree: column (how deep) and row (in leaf slots,
+/// parents level with the middle of their children).
+#[derive(Clone, Copy, Debug)]
+pub struct TreeNode {
+    pub part: u16,
+    pub col: usize,
+    pub row: f32,
+}
+
+/// One slot's parts as a tree, left to right, roots first. Also returns its (columns, rows).
+pub fn part_tree(slot: Slot) -> (Vec<TreeNode>, (usize, f32)) {
+    fn kids(i: u16) -> Vec<u16> {
+        (0..PARTS.len() as u16).filter(|&j| needs(j) == Some(i)).collect()
+    }
+    fn place(i: u16, col: usize, row: &mut f32, out: &mut Vec<TreeNode>) -> f32 {
+        let ks = kids(i);
+        let y = if ks.is_empty() {
+            let y = *row;
+            *row += 1.0;
+            y
+        } else {
+            let ys: Vec<f32> = ks.into_iter().map(|k| place(k, col + 1, row, out)).collect();
+            (ys[0] + ys[ys.len() - 1]) / 2.0
+        };
+        out.push(TreeNode { part: i, col, row: y });
+        y
+    }
+    let mut out = Vec::new();
+    let mut rows = 0.0f32;
+    for i in (0..PARTS.len() as u16).filter(|&i| part(i).slot() == slot && needs(i).is_none()) {
+        if rows > 0.0 {
+            rows += 0.5;
+        }
+        place(i, 0, &mut rows, &mut out);
+    }
+    let cols = out.iter().map(|n| n.col + 1).max().unwrap_or(1);
+    (out, (cols, rows))
+}
+
 pub fn find(id: &str) -> Option<u16> {
     PARTS.iter().position(|p| p.id == id).map(|i| i as u16)
 }
@@ -1506,5 +1615,35 @@ mod tests {
                 p.id
             );
         }
+    }
+
+    /// Every part sits once in its own slot's research tree, after a part of the same slot.
+    #[test]
+    fn part_trees_cover_everything() {
+        for i in 0..PARTS.len() as u16 {
+            if let Some(n) = needs(i) {
+                assert_eq!(part(n).slot(), part(i).slot(), "{}", part(i).id);
+            }
+            if part(i).lvl == 0 {
+                if let Some(id) = fam_after(part(i).fam) {
+                    assert!(find(id).is_some(), "{} needs a missing part {}", part(i).id, id);
+                }
+            }
+        }
+        let mut seen = 0;
+        for s in SLOT_KINDS {
+            let (nodes, (cols, rows)) = part_tree(s);
+            for n in &nodes {
+                assert_eq!(part(n.part).slot(), s);
+                assert!(n.col < cols && n.row < rows);
+                for m in &nodes {
+                    if m.part != n.part && m.col == n.col {
+                        assert!((m.row - n.row).abs() >= 0.99, "{} and {} overlap", part(m.part).id, part(n.part).id);
+                    }
+                }
+            }
+            seen += nodes.len();
+        }
+        assert_eq!(seen, PARTS.len());
     }
 }

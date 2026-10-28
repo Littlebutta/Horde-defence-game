@@ -6,11 +6,14 @@ use super::widgets::{R_CTRL, R_PANEL};
 use super::{fit, App, HubAct, PLAYER_COLS};
 use crate::campaign::{self, Campaign, Tech};
 use crate::defs::*;
+use crate::garage::{self, part, Slot, PARTS, SLOT_KINDS};
 use crate::render::{text, text_w};
 use crate::ui::{self, alpha, mix, pal, rrect, rrect_lines};
 use macroquad::prelude::*;
 
 const OWNED: Color = Color { r: 0.25, g: 0.75, b: 0.34, a: 1.0 };
+/// A researched garage part that hasn't been bought yet.
+const RESEARCHED: Color = Color { r: 0.30, g: 0.67, b: 0.97, a: 1.0 };
 
 /// The colour of a tech's branch of the game.
 fn group_col(t: Tech) -> Color {
@@ -135,7 +138,7 @@ impl App {
         self.panel(r);
         let x0 = r.x + 28.0;
         text(&self.fonts.head, "TECH TREE", x0, r.y + 44.0, 26.0, p.text);
-        let sub = "Unlock a tech with research points to open up the ones to its right.";
+        let sub = "Unlock a tech with research points to open up the ones to its right. Tab flips the page.";
         text(&self.fonts.mono, sub, x0, r.y + 66.0, 12.5, p.dim);
         let close = Rect::new(r.right() - 128.0, r.y + 22.0, 104.0, 34.0);
         if self.button(close, "Close (T)", true, false) {
@@ -146,6 +149,30 @@ impl App {
         if self.sess.as_ref().is_some_and(|s| s.players.len() > 1) {
             let mine = "YOUR TREE";
             text(&self.fonts.mono, mine, close.x - 24.0 - text_w(&self.fonts.mono, mine, 10.5), r.y + 66.0, 10.5, p.dim);
+        }
+
+        // the pages: the main tree, then one tree per kind of garage part
+        let mut labels = vec![format!("Main tree {}/{}", c.crew(me).tech.len(), campaign::TECH.len())];
+        for sl in SLOT_KINDS {
+            let all: Vec<u16> = (0..PARTS.len() as u16).filter(|i| part(*i).slot() == sl).collect();
+            let known = all.iter().filter(|i| c.part_known(me, **i)).count();
+            labels.push(format!("{} {}/{}", sl.plural(), known, all.len()));
+        }
+        let pages = labels.len();
+        if !self.blocked && is_key_pressed(KeyCode::Tab) {
+            let back = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+            self.tree_tab = (self.tree_tab + if back { pages - 1 } else { 1 }) % pages;
+        }
+        self.tree_tab = self.tree_tab.min(pages - 1);
+        let tabs = Rect::new(x0, r.y + 84.0, r.w - 56.0, 36.0);
+        let refs: Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
+        if let Some(t) = self.segmented(tabs, &refs, self.tree_tab) {
+            self.tree_tab = t;
+        }
+        let body = Rect::new(x0, tabs.bottom() + 20.0, r.w - 56.0, r.bottom() - tabs.bottom() - 20.0 - 48.0);
+        if self.tree_tab > 0 {
+            self.parts_page(c, r, body, SLOT_KINDS[self.tree_tab - 1]);
+            return;
         }
 
         // the legend along the bottom
@@ -160,7 +187,6 @@ impl App {
         text(&self.fonts.mono, states, r.right() - 28.0 - text_w(&self.fonts.mono, states, 11.5), ly, 11.5, p.dim);
 
         // the two halves of the tree side by side, each column as wide as the next
-        let body = Rect::new(x0, r.y + 92.0, r.w - 56.0, r.h - 92.0 - 48.0);
         let (nodes, dims) = campaign::tree_layout();
         let gap = 48.0;
         let unit = (body.w - gap) / (dims[0].0 + dims[1].0) as f32;
@@ -263,5 +289,140 @@ impl App {
             };
             self.tip = Some(format!("{}: {} {}", t.name(), t.tip(), state));
         }
+    }
+
+    /// One page of garage parts as a research tree: research a part with points to open the ones
+    /// to its right, then buy it with money for the garage's shelf.
+    fn parts_page(&mut self, c: &mut Campaign, r: Rect, body: Rect, slot: Slot) {
+        let p = pal(self.dark);
+        let me = self.me();
+        let (money, pts) = (c.crew(me).money, c.points(me));
+
+        // the legend along the bottom
+        let ly = r.bottom() - 22.0;
+        let mut lx = body.x;
+        for t in 1..=5u8 {
+            let name = format!("Tier {}", t);
+            draw_rectangle(lx, ly - 9.0, 10.0, 10.0, tier_col(t));
+            text(&self.fonts.mono, &name, lx + 16.0, ly, 11.5, p.dim);
+            lx += 30.0 + text_w(&self.fonts.mono, &name, 11.5);
+        }
+        let workshop = c.has_tech(me, Tech::Build(S::Custom));
+        let note = if workshop {
+            format!("${} to buy parts with · Green: on the shelf · blue: researched, click to buy · bright edge: ready to research", money)
+        } else {
+            format!("${} · Build your designs once the Turret workshop is unlocked in the main tree", money)
+        };
+        let note = fit(&self.fonts.mono, &note, r.right() - 28.0 - lx - 10.0, 11.5);
+        text(&self.fonts.mono, &note, r.right() - 28.0 - text_w(&self.fonts.mono, &note, 11.5), ly, 11.5, p.dim);
+
+        let (nodes, (cols, rows)) = garage::part_tree(slot);
+        let unit = body.w / cols as f32;
+        let nw = (unit - 26.0).min(210.0);
+        let rh = (body.h / rows.max(1.0)).min(64.0);
+        let top = body.y + (body.h - rows * rh) / 2.0;
+        let nh = (rh * 0.8).clamp(26.0, 46.0);
+        let at = |n: &garage::TreeNode| vec2(body.x + n.col as f32 * unit, top + (n.row + 0.5) * rh);
+        let find = |i: u16| nodes.iter().find(|n| n.part == i);
+
+        for n in &nodes {
+            let Some(par) = garage::needs(n.part).and_then(find) else { continue };
+            let (a, b) = (at(par), at(n));
+            let (sx, ex) = (a.x + nw, b.x);
+            let mx = ex - (unit - nw) / 2.0;
+            let col = if c.part_known(me, n.part) {
+                alpha(OWNED, 0.9)
+            } else if c.part_known(me, par.part) {
+                alpha(p.accent, 0.75)
+            } else {
+                p.line
+            };
+            let th = if c.part_known(me, par.part) { 2.0 } else { 1.2 };
+            draw_line(sx, a.y, mx, a.y, th, col);
+            draw_line(mx, a.y, mx, b.y, th, col);
+            draw_line(mx, b.y, ex, b.y, th, col);
+        }
+
+        let mut hovered = None;
+        for n in &nodes {
+            let i = n.part;
+            let pt = part(i);
+            let q = at(n);
+            let nr = Rect::new(q.x, q.y - nh / 2.0, nw, nh);
+            let owned = c.part_owned(me, i);
+            let known = c.part_known(me, i);
+            let open = c.part_open(me, i);
+            let can_research = open && pts >= pt.research();
+            let can_buy = known && !owned && money >= pt.price();
+            let hot = self.hot(nr);
+            let (fill, edge, ew) = if owned {
+                (mix(p.panel2, OWNED, 0.24), OWNED, 1.5)
+            } else if known {
+                (if hot { mix(p.panel2, RESEARCHED, 0.26) } else { mix(p.panel2, RESEARCHED, 0.14) }, RESEARCHED, 1.5)
+            } else if can_research {
+                (if hot { mix(p.panel2, p.accent, 0.18) } else { mix(p.panel2, p.accent, 0.07) }, p.accent, 1.8)
+            } else if open {
+                (if hot { mix(p.panel2, p.text, 0.06) } else { p.panel2 }, p.line, 1.0)
+            } else {
+                (alpha(p.panel2, 0.45), alpha(p.line, 0.6), 1.0)
+            };
+            if can_research || can_buy {
+                ui::shadow(nr, R_CTRL, alpha(edge, 0.25));
+            }
+            rrect(nr, R_CTRL, fill);
+            rrect_lines(nr, R_CTRL, ew, edge);
+            let tc = tier_col(pt.tier);
+            let lit = known || open;
+            draw_rectangle(nr.x + 1.0, nr.y + 6.0, 3.0, nr.h - 12.0, if lit { tc } else { alpha(tc, 0.4) });
+            let name = fit(&self.fonts.head, pt.name, nw - 22.0, 13.5);
+            let two = nh >= 34.0;
+            let ny = if two { nr.y + nr.h / 2.0 - 2.0 } else { nr.y + nr.h / 2.0 + 4.5 };
+            text(&self.fonts.head, &name, nr.x + 12.0, ny, 13.5, if lit { p.text } else { p.dim });
+            if two {
+                let (s, col) = if owned {
+                    ("ON THE SHELF".to_string(), OWNED)
+                } else if known {
+                    (format!("Buy ${}", pt.price()), if can_buy { RESEARCHED } else { p.dim })
+                } else if open {
+                    (format!("{} RP", pt.research()), if can_research { p.accent } else { p.dim })
+                } else {
+                    (format!("{} RP · locked", pt.research()), alpha(p.dim, 0.8))
+                };
+                text(&self.fonts.mono, &s, nr.x + 12.0, nr.y + nr.h / 2.0 + 13.0, 11.0, col);
+            }
+            if hot {
+                hovered = Some(i);
+                if self.pressed(can_research || can_buy) {
+                    self.hub_act(c, if known { HubAct::BuyPart(i) } else { HubAct::ResearchPart(i) });
+                }
+            }
+            self.ui_rects.push(nr);
+        }
+        if let Some(i) = hovered {
+            let pt = part(i);
+            let state = if c.part_owned(me, i) {
+                "On the shelf: it can go on any turret in the garage.".to_string()
+            } else if c.part_known(me, i) {
+                if money >= pt.price() { format!("Researched. Click to buy it for ${}.", pt.price()) } else { format!("Researched. Buying it takes ${}; you have ${}.", pt.price(), money) }
+            } else if let Some(n) = garage::needs(i).filter(|n| !c.part_known(me, *n)) {
+                format!("Needs the {} researched first. {} RP.", part(n).name, pt.research())
+            } else if pts >= pt.research() {
+                format!("Click to research for {} RP, then buy it for ${}.", pt.research(), pt.price())
+            } else {
+                format!("{} RP: {} more to go.", pt.research(), pt.research() - pts)
+            };
+            self.tip = Some(format!("{} {}", garage::tip(i), state));
+        }
+    }
+}
+
+/// A garage part's strength as a colour, cool for the basics to hot for the best.
+fn tier_col(t: u8) -> Color {
+    match t {
+        1 => rgb(134, 142, 150),
+        2 => rgb(77, 171, 247),
+        3 => rgb(132, 94, 247),
+        4 => rgb(255, 146, 43),
+        _ => rgb(255, 212, 59),
     }
 }

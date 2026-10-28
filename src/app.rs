@@ -163,6 +163,8 @@ pub struct App {
     globe_city: Option<usize>,
     /// the campaign's tech tree is open over the campaign screen
     tree_open: bool,
+    /// which page of the tech tree is showing: 0 the main tree, then one per kind of garage part
+    tree_tab: usize,
     /// co-op campaign screen, on the host: who voted for what, and for how many players
     votes: Vec<(usize, HubAct)>,
     vote_n: usize,
@@ -401,6 +403,7 @@ impl App {
             globe: None,
             globe_city: None,
             tree_open: false,
+            tree_tab: 0,
             votes: Vec::new(),
             vote_n: 0,
             hub_text: String::new(),
@@ -890,25 +893,27 @@ impl App {
         for (i, l) in lines.iter().enumerate() {
             text(&self.fonts.mono, l, d.x, d.y + 13.0 + i as f32 * 18.0, 13.0, p.text);
         }
-        let y = self.heading("Faction", a.x, a.y);
-        a.cut_top(y - a.y, 0.0);
-        let nf = FACTIONS.len();
-        let rows = a.cut_top(nf as f32 * FAC_ROW + (nf - 1) as f32 * 6.0, 18.0).rows(nf, 6.0);
-        for (i, f) in FACTIONS.iter().enumerate() {
-            let cr = rows[i];
-            let active = lob.fac as usize == i;
-            let c = Color::from_rgba(f.col[0], f.col[1], f.col[2], 255);
-            rrect(cr, R_CTRL, if active { mix(p.panel2, c, 0.16) } else { alpha(p.panel2, 0.5) });
-            rrect_lines(cr, R_CTRL, if active { 2.0 } else { 1.0 }, if active { c } else { p.line });
-            for k in 0..16 {
-                let q = vec2(cr.x + 14.0 + (k * 37 % 27) as f32, cr.y + 14.0 + (k * 13 % 29) as f32);
-                let c = swatch(i, k, c);
-                draw_rectangle(q.x, q.y, 3.0, 3.0, if active { c } else { alpha(c, 0.4) });
-            }
-            text(&self.fonts.head, f.name, cr.x + 56.0, cr.y + 21.0, 16.0, if active { p.text } else { p.dim });
-            let lines = wrap_lines(&self.fonts.mono, f.blurb, cr.w - 70.0, 11.0);
-            for (k, l) in lines.iter().take(2).enumerate() {
-                text(&self.fonts.mono, l, cr.x + 56.0, cr.y + 36.0 + k as f32 * 13.0, 11.0, p.dim);
+        if lob.mode != net::MODE_CAMPAIGN {
+            let y = self.heading("Faction", a.x, a.y);
+            a.cut_top(y - a.y, 0.0);
+            let nf = FACTIONS.len();
+            let rows = a.cut_top(nf as f32 * FAC_ROW + (nf - 1) as f32 * 6.0, 18.0).rows(nf, 6.0);
+            for (i, f) in FACTIONS.iter().enumerate() {
+                let cr = rows[i];
+                let active = lob.fac as usize == i;
+                let c = Color::from_rgba(f.col[0], f.col[1], f.col[2], 255);
+                rrect(cr, R_CTRL, if active { mix(p.panel2, c, 0.16) } else { alpha(p.panel2, 0.5) });
+                rrect_lines(cr, R_CTRL, if active { 2.0 } else { 1.0 }, if active { c } else { p.line });
+                for k in 0..16 {
+                    let q = vec2(cr.x + 14.0 + (k * 37 % 27) as f32, cr.y + 14.0 + (k * 13 % 29) as f32);
+                    let c = swatch(i, k, c);
+                    draw_rectangle(q.x, q.y, 3.0, 3.0, if active { c } else { alpha(c, 0.4) });
+                }
+                text(&self.fonts.head, f.name, cr.x + 56.0, cr.y + 21.0, 16.0, if active { p.text } else { p.dim });
+                let lines = wrap_lines(&self.fonts.mono, f.blurb, cr.w - 70.0, 11.0);
+                for (k, l) in lines.iter().take(2).enumerate() {
+                    text(&self.fonts.mono, l, cr.x + 56.0, cr.y + 36.0 + k as f32 * 13.0, 11.0, p.dim);
+                }
             }
         }
         let y = self.heading("Difficulty", a.x, a.y);
@@ -1085,7 +1090,7 @@ impl App {
             _ if !self.camp_mode => (if self.real { net::MODE_REAL } else { net::MODE_RANDOM }, self.fac, self.diff, if self.real { self.city.trim().to_string() } else { String::new() }),
             Some(c) if c.fired() || c.finished() => (net::MODE_CAMPAIGN, c.fac, c.diff, "over, a new one starts in New York".to_string()),
             Some(c) => (net::MODE_CAMPAIGN, c.fac, c.diff, format!("turn {}, {} cities held, next up {}", c.fought + 1, c.held(), c.city().name)),
-            None => (net::MODE_CAMPAIGN, self.fac, self.diff, "a new one, starting in New York".to_string()),
+            None => (net::MODE_CAMPAIGN, campaign::ZOMBIES, self.diff, "a new one, starting in New York".to_string()),
         };
         let line = match self.screen {
             Screen::Hub => match &self.camp {
@@ -1364,45 +1369,47 @@ impl App {
             wrap(&self.fonts.mono, "A new random city every game: river, airport, avenues and downtown all move around.", d.x, d.y + 13.0, d.w, 13.0, p.dim);
         }
 
-        // faction
-        let y = self.heading("Faction", a.x, a.y);
-        a.cut_top(y - a.y, 0.0);
-        let nf = FACTIONS.len();
-        // the difficulty picker needs its 20 + 38 points under the factions; when the mode's
-        // details leave too little room the factions go two by two with one line of blurb each
-        let full = nf as f32 * FAC_ROW + (nf - 1) as f32 * 6.0;
-        let compact = a.h - 18.0 - 58.0 < full;
-        let rows: Vec<Rect> = if compact {
-            let g = a.cut_top(2.0 * FAC_ROW_COMPACT + 6.0, 14.0);
-            g.rows(2, 6.0).into_iter().flat_map(|r| r.cols(2, 6.0)).collect()
-        } else {
-            a.cut_top(full, 18.0).rows(nf, 6.0)
-        };
-        for (i, f) in FACTIONS.iter().enumerate() {
-            let cr = rows[i];
-            let active = self.fac == i;
-            let hot = self.hot(cr);
-            let c = Color::from_rgba(f.col[0], f.col[1], f.col[2], 255);
-            rrect(cr, R_CTRL, if active { mix(p.panel2, c, 0.16) } else if hot { mix(p.panel2, p.text, 0.06) } else { p.panel2 });
-            rrect_lines(cr, R_CTRL, if active { 2.0 } else { 1.0 }, if active { c } else { p.line });
-            // a little swarm of the faction's pixels
-            for k in 0..16 {
-                let q = vec2(cr.x + 14.0 + (k * 37 % 27) as f32, cr.y + 14.0 + (k * 13 % 29) as f32);
-                draw_rectangle(q.x, q.y, 3.0, 3.0, swatch(i, k, c));
+        // faction: the campaign is always zombies, the others arrive on their own
+        if !self.camp_mode {
+            let y = self.heading("Faction", a.x, a.y);
+            a.cut_top(y - a.y, 0.0);
+            let nf = FACTIONS.len();
+            // the difficulty picker needs its 20 + 38 points under the factions; when the mode's
+            // details leave too little room the factions go two by two with one line of blurb each
+            let full = nf as f32 * FAC_ROW + (nf - 1) as f32 * 6.0;
+            let compact = a.h - 18.0 - 58.0 < full;
+            let rows: Vec<Rect> = if compact {
+                let g = a.cut_top(2.0 * FAC_ROW_COMPACT + 6.0, 14.0);
+                g.rows(2, 6.0).into_iter().flat_map(|r| r.cols(2, 6.0)).collect()
+            } else {
+                a.cut_top(full, 18.0).rows(nf, 6.0)
+            };
+            for (i, f) in FACTIONS.iter().enumerate() {
+                let cr = rows[i];
+                let active = self.fac == i;
+                let hot = self.hot(cr);
+                let c = Color::from_rgba(f.col[0], f.col[1], f.col[2], 255);
+                rrect(cr, R_CTRL, if active { mix(p.panel2, c, 0.16) } else if hot { mix(p.panel2, p.text, 0.06) } else { p.panel2 });
+                rrect_lines(cr, R_CTRL, if active { 2.0 } else { 1.0 }, if active { c } else { p.line });
+                // a little swarm of the faction's pixels
+                for k in 0..16 {
+                    let q = vec2(cr.x + 14.0 + (k * 37 % 27) as f32, cr.y + 14.0 + (k * 13 % 29) as f32);
+                    draw_rectangle(q.x, q.y, 3.0, 3.0, swatch(i, k, c));
+                }
+                text(&self.fonts.head, f.name, cr.x + 56.0, cr.y + 21.0, 16.0, p.text);
+                let lines = wrap_lines(&self.fonts.mono, f.blurb, cr.w - 70.0, 11.0);
+                for (k, l) in lines.iter().take(if compact { 1 } else { 2 }).enumerate() {
+                    let l = if compact && lines.len() > 1 { fit(&self.fonts.mono, &format!("{} {}", l, lines[1]), cr.w - 64.0, 11.0) } else { l.clone() };
+                    text(&self.fonts.mono, &l, cr.x + 56.0, cr.y + 36.0 + k as f32 * 13.0, 11.0, p.dim);
+                }
+                if compact && hot {
+                    self.tip = Some(f.blurb.into());
+                }
+                if self.pressed(hot && !self.blocked) {
+                    self.fac = i;
+                }
+                self.ui_rects.push(cr);
             }
-            text(&self.fonts.head, f.name, cr.x + 56.0, cr.y + 21.0, 16.0, p.text);
-            let lines = wrap_lines(&self.fonts.mono, f.blurb, cr.w - 70.0, 11.0);
-            for (k, l) in lines.iter().take(if compact { 1 } else { 2 }).enumerate() {
-                let l = if compact && lines.len() > 1 { fit(&self.fonts.mono, &format!("{} {}", l, lines[1]), cr.w - 64.0, 11.0) } else { l.clone() };
-                text(&self.fonts.mono, &l, cr.x + 56.0, cr.y + 36.0 + k as f32 * 13.0, 11.0, p.dim);
-            }
-            if compact && hot {
-                self.tip = Some(f.blurb.into());
-            }
-            if self.pressed(hot && !self.blocked) {
-                self.fac = i;
-            }
-            self.ui_rects.push(cr);
         }
 
         // difficulty
@@ -1696,7 +1703,7 @@ impl App {
             draw_rectangle(x0, cy, w * (lvl as f32 / 16.0).clamp(0.03, 1.0), 8.0, level_col(lvl));
             cy += 26.0;
             text(&self.fonts.head, &format!("Threat level {}", lvl), x0, cy, 15.0, level_col(lvl));
-            let pay = format!("pays ${} each", fmt_n(c.city_pay(i) as usize));
+            let pay = format!("${} payout", fmt_n(c.city_pay(i) as usize));
             text(&self.fonts.mono, &pay, card.x + card.w - 12.0 - text_w(&self.fonts.mono, &pay, 12.5), cy, 12.5, p.good);
             cy += 18.0;
             text(&self.fonts.mono, &format!("Horde ×{:.2} of {} · hold out {}", c.horde_mult(), DIFFS[c.diff].0, mmss(c.hold_secs())), x0, cy, 12.5, p.text);
@@ -1832,7 +1839,7 @@ impl App {
                     _ => "",
                 };
                 format!(
-                    "{}, {}: falls in {}, {:.1} million alive. Threat level {} (horde ×{:.2}), {} civilians on the map, pays ${} for holding it.{}",
+                    "{}, {}: falls in {}, {:.1} million alive. Threat level {} (horde ×{:.2}), {} civilians on the map, ${} payout for holding it.{}",
                     city.name,
                     city.country(),
                     turns_s(s.turns),
@@ -1907,6 +1914,8 @@ impl App {
         c.crew_mut(0).tech = vec![campaign::Tech::Build(S::Gun), campaign::Tech::Ability(A::Rescue), campaign::Tech::Research(R::Rescue), campaign::Tech::Research(R::Armour)];
         // PH_TREE=1: the tech tree open
         self.tree_open = std::env::var("PH_TREE").is_ok();
+        // PH_TREE_TAB=n: that page of it
+        self.tree_tab = std::env::var("PH_TREE_TAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
         c.units = vec![(U::Rifle, 6), (U::Rifle, 4), (U::Tank, 1), (U::Rifle, 6)];
         let c_city = c.city();
         self.camp = Some(c);
