@@ -1709,15 +1709,24 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
             air::heli(&mut glow, s.center(), def(S::Helipad).ht + 1.0, -std::f32::consts::FRAC_PI_2, if s.cd > 0.0 { 0.0 } else { t }, true, false, mk.min(1.4));
         }
     }
+    let clear = sky_clear(g);
     for h in &g.helis {
         let f = (h.t / h.dur).clamp(0.0, 1.0);
         let ground = h.from.lerp(h.to, f);
-        let alt = 30.0 * (f * 8.0).min(1.0) * ((1.0 - f) * 8.0).min(1.0) + 1.0;
+        // a delivery sets its turret down on the roof it's going to, not through it, and every
+        // helicopter climbs over the rooftop turrets on its way
+        let land = match h.kind {
+            HeliKind::Deliver(i) if i < g.structs.len() => g.struct_base(i),
+            _ => 0.0,
+        };
+        let cruise = 31.0f32.max(clear(ground)).max(land + 12.0);
+        let lo = if f < 0.5 { 1.0 } else { land + 1.0 };
+        let alt = lo + (cruise - lo) * (f * 8.0).min(1.0).min(((1.0 - f) * 8.0).min(1.0));
         air::heli(&mut glow, ground, alt, (h.to - h.from).to_angle(), t, false, matches!(h.kind, HeliKind::Deliver(_)), mk);
     }
     for s in &g.gunships {
         let heading = if s.phase == 1 { s.ang + std::f32::consts::FRAC_PI_2 } else { (s.center - s.p).to_angle() };
-        air::heli(&mut glow, s.p, 16.0 + 20.0, heading, t, true, false, mk);
+        air::heli(&mut glow, s.p, 36.0f32.max(clear(s.p)), heading, t, true, false, mk);
     }
     for gr in &g.groups {
         if gr.dead || gr.kind != U::Tank {
@@ -1732,6 +1741,32 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
         draw_mesh(&m);
     }
     gl_use_default_material();
+}
+
+/// The height a helicopter has to keep above a point to clear the turrets standing on roofs and
+/// bunkers near it. It rises smoothly as one comes closer, so a flight path never jumps.
+fn sky_clear(g: &Game) -> impl Fn(Vec2) -> f32 + '_ {
+    let tops: Vec<(Vec2, f32)> = g
+        .structs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !s.dead && !s.pending && s.up())
+        .map(|(i, s)| {
+            let own = match s.cu.as_ref() {
+                Some(c) => g.designs.get(c.d as usize).map_or(3.0, |d| d.spec.height + 2.5),
+                None => def(s.t).ht + 2.0,
+            };
+            (s.center(), g.struct_base(i) + own + 8.0)
+        })
+        .collect();
+    move |p: Vec2| {
+        tops.iter()
+            .map(|(c, top)| {
+                let w = (1.0 - (p.distance(*c) - 8.0) / 22.0).clamp(0.0, 1.0);
+                top * w * w * (3.0 - 2.0 * w)
+            })
+            .fold(0.0, f32::max)
+    }
 }
 
 /// Ghost of a structure about to be placed (drawn by the app at ground or roof height).

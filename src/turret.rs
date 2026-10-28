@@ -219,10 +219,10 @@ impl Game {
         cu.shield -= soak;
         d - soak
     }
-    /// Range of a custom turret: its own, the rooftop bonus and its owner's Long barrels.
-    pub fn custom_range(&self, sp: &Spec, up: bool, o: usize) -> f32 {
-        sp.range * if up { 1.6 } else { 1.0 } * if self.res(o).barrels { 1.25 } else { 1.0 }
-            + sp.reach
+    /// Range of a custom turret standing `base` cells up (a roof or a bunker; 0 on the ground):
+    /// its own, the height bonus and its owner's Long barrels.
+    pub fn custom_range(&self, sp: &Spec, base: f32, o: usize) -> f32 {
+        sp.range * height_mult(sp, base) * if self.res(o).barrels { 1.25 } else { 1.0 } + sp.reach
     }
 
     /// Every custom turret's turn, then the shots in the air, the mines and the frost.
@@ -289,7 +289,7 @@ impl Game {
             .filter(|(p, _)| p.distance(cu.pos) < 40.0 && p.distance(cu.pos) > 0.5)
             .map(|l| l.1)
             .fold(0.0, f32::max);
-        let range = self.custom_range(sp, up, o) * (1.0 + link);
+        let range = self.custom_range(sp, self.struct_base(i), o) * (1.0 + link);
         let c = cu.pos;
         let src = self.rev_src(RevKey::Struct(i));
         let hit = Hit {
@@ -355,8 +355,8 @@ impl Game {
                 }
             }
         }
-        // walkers get mobbed by whatever crowds round their legs
-        if sp.leash > 0.0 {
+        // walkers get mobbed by whatever crowds round their legs (on a roof they stand guard)
+        if sp.leash > 0.0 && !up {
             let crowd = self.units_in(c, 3.0) as f32;
             if crowd > 0.0 {
                 let atk = self.faction().stats.atk;
@@ -418,7 +418,7 @@ impl Game {
             });
             cu.arm += (want - cu.arm).clamp(-8.0 * DT, 8.0 * DT);
         }
-        if sp.leash > 0.0 {
+        if sp.leash > 0.0 && !up {
             self.walk(cu, sp, tg, range);
         }
         let Some(tg) = tg else { return };
@@ -735,12 +735,18 @@ impl Game {
     /// One shot (or pellet spread, or bolt) at `tg`, with a twin-link's partner if it has one.
     fn fire_once(&mut self, i: usize, cu: &mut Custom, sp: &Spec, tg: Vec2, range: f32, hit: Hit) {
         self.shot(i, cu, sp, tg, range, hit);
-        if sp.twin_link && self.ammo >= sp.ammo {
-            let k0 = tg.y as usize * W + tg.x as usize;
-            if let Some(k) = self.target_cell(tg, 8.0, &[k0], |p| p.distance(cu.pos) > range) {
-                self.ammo -= sp.ammo;
-                self.shot(i, cu, sp, Self::cell_pos(k), range, hit);
+        // each twin-link sends a partner shot at another target near the first
+        let mut taken = vec![tg.y as usize * W + tg.x as usize];
+        for _ in 0..sp.twin_link {
+            if self.ammo < sp.ammo {
+                break;
             }
+            let Some(k) = self.target_cell(tg, 8.0, &taken, |p| p.distance(cu.pos) > range) else {
+                break;
+            };
+            taken.push(k);
+            self.ammo -= sp.ammo;
+            self.shot(i, cu, sp, Self::cell_pos(k), range, hit);
         }
     }
 
@@ -1316,5 +1322,16 @@ mod tests {
             .unwrap()
             .push(find("b.rifle1").unwrap());
         assert!(g.pick_design(&Build::starter()));
+    }
+}
+
+/// How much further a custom turret reaches standing `base` cells up: the higher its gun sits (the
+/// roof or bunker plus its own mount, so a mast sees furthest), the more, from +35% on a bunker to
+/// at most +120% on a tower.
+pub fn height_mult(sp: &Spec, base: f32) -> f32 {
+    if base <= 0.0 {
+        1.0
+    } else {
+        (1.25 + 0.035 * (base + sp.height)).min(2.2)
     }
 }

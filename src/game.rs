@@ -1159,7 +1159,7 @@ impl Game {
     }
     pub fn can_place_roof(&self, t: S, b: usize, p: Vec2) -> bool {
         let bb = &self.world.buildings[b];
-        if !bb.alive || self.world.irradiated_at(p) || self.hive_blocks(p) || self.ground_only(t) {
+        if !bb.alive || self.world.irradiated_at(p) || self.hive_blocks(p) {
             return false;
         }
         // the whole base has to stand on this roof
@@ -1273,7 +1273,7 @@ impl Game {
     /// A turret's reach, with rooftop and its owner's Long barrels bonuses.
     pub fn turret_range(&self, t: S, roof: bool, o: usize) -> f32 {
         if t == S::Custom {
-            return self.cur_design(o).map_or(0.0, |d| self.custom_range(&d.spec, roof, o));
+            return self.turret_range_on(t, if roof { 10.0 } else { 0.0 }, o);
         }
         let up = match t {
             S::Flame if self.has_up(o, Up::FlameReach) => 1.3,
@@ -1281,6 +1281,14 @@ impl Game {
             _ => 1.0,
         };
         def(t).range * if roof { 1.6 } else { 1.0 } * if self.res(o).barrels { 1.25 } else { 1.0 } * up
+    }
+    /// Range of turret `t` standing `base` cells up (custom turrets reach further the higher they
+    /// stand; the rest get the flat rooftop bonus).
+    pub fn turret_range_on(&self, t: S, base: f32, o: usize) -> f32 {
+        if t == S::Custom {
+            return self.cur_design(o).map_or(0.0, |d| self.custom_range(&d.spec, base, o));
+        }
+        self.turret_range(t, base > 0.0, o)
     }
     /// Height a structure stands at: a building's roof, a bunker's top, or the ground.
     pub fn struct_base(&self, i: usize) -> f32 {
@@ -1306,7 +1314,6 @@ impl Game {
         self.res(self.actor).mounts
             && d.turret
             && !d.ground
-            && !self.ground_only(t)
             && d.w <= bs.w
             && self.build_ok(self.actor, t)
             && !bs.dead
@@ -1332,10 +1339,6 @@ impl Game {
         let i = self.add_struct_on(t, (c.x - d.w as f32 / 2.0) as i32, (c.y - d.h as f32 / 2.0) as i32, -1, b as i32);
         self.construct(i);
         true
-    }
-    /// Custom turrets whose mount has to stand on the ground (casemates, masts, walkers...).
-    pub fn ground_only(&self, t: S) -> bool {
-        t == S::Custom && self.cur_design(self.actor).is_none_or(|d| d.spec.ground)
     }
     pub fn has_up(&self, o: usize, u: Up) -> bool {
         self.pk(o).ups.contains(&u)

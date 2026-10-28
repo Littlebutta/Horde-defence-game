@@ -660,7 +660,8 @@ pub struct Spec {
     pub cryo: f32,
     pub cluster: u8,
     pub bounce: u8,
-    pub twin_link: bool,
+    /// twin-link modifiers fitted: each fires one more shot at a second target
+    pub twin_link: u8,
     pub volatile: f32,
     pub regen: f32,
     pub shield: f32,
@@ -677,8 +678,7 @@ pub struct Spec {
     /// walker legs: how far from home it walks (0: stays put)
     pub leash: f32,
     pub fire_on_move: bool,
-    pub ground: bool,
-    /// how tall the mount stands (art only)
+    /// how tall the mount stands (the art, and how far it sees from a rooftop)
     pub height: f32,
     pub cost: f32,
     pub load: f32,
@@ -717,7 +717,7 @@ impl Spec {
             cryo: 0.0,
             cluster: 0,
             bounce: 0,
-            twin_link: false,
+            twin_link: 0,
             volatile: 0.0,
             regen: 0.0,
             shield: 0.0,
@@ -730,7 +730,6 @@ impl Spec {
             twin_mount: false,
             leash: 0.0,
             fire_on_move: false,
-            ground: false,
             height: 1.8,
             cost: 0.0,
             load: 0.0,
@@ -755,7 +754,7 @@ impl Spec {
         } * (1.0
             + 0.35 * self.cluster as f32
             + 0.5 * self.bounce as f32
-            + if self.twin_link { 1.0 } else { 0.0 });
+            + self.twin_link as f32);
         let shots = self.burst as f32 * if self.twin_mount { 2.0 } else { 1.0 };
         let cycle = self.reload / self.spin.max(1.0).sqrt()
             + self.charge
@@ -767,7 +766,7 @@ impl Spec {
     pub fn ammo_rate(&self) -> f32 {
         let shots = self.burst as f32
             * if self.twin_mount { 2.0 } else { 1.0 }
-            * if self.twin_link { 2.0 } else { 1.0 };
+            * (1 + self.twin_link) as f32;
         let cycle = self.reload / self.spin.max(1.0).sqrt()
             + self.charge
             + self.burst_gap * (self.burst as f32 - 1.0);
@@ -812,7 +811,6 @@ fn apply(pt: &Part, s: &mut Spec) {
             s.arc = 70f32.to_radians();
             s.cap = k([18.0, 23.0, 28.0]);
             s.dmg *= 1.1;
-            s.ground = true;
             s.height = 2.2;
         }
         Mast => {
@@ -820,7 +818,6 @@ fn apply(pt: &Part, s: &mut Spec) {
             s.traverse = 2.0;
             s.cap = k([10.0, 13.0, 0.0]);
             s.range *= k([1.3, 1.45, 0.0]);
-            s.ground = true;
             s.height = k([6.0, 8.0, 0.0]);
         }
         Popup => {
@@ -856,7 +853,6 @@ fn apply(pt: &Part, s: &mut Spec) {
             s.traverse = 1.5;
             s.cap = 34.0;
             s.regen += 6.0;
-            s.ground = true;
             s.height = 2.6;
         }
         Walker => {
@@ -864,7 +860,6 @@ fn apply(pt: &Part, s: &mut Spec) {
             s.traverse = 3.4;
             s.cap = k([14.0, 18.0, 0.0]);
             s.leash = k([22.0, 34.0, 0.0]);
-            s.ground = true;
             s.height = 3.2;
         }
         // ---- heads: how it picks targets
@@ -1132,7 +1127,7 @@ fn apply(pt: &Part, s: &mut Spec) {
             s.rad *= k([1.35, 1.6, 1.0]);
             s.dmg *= 0.9;
         }
-        TwinLink => s.twin_link = true,
+        TwinLink => s.twin_link += 1,
         Ricochet => s.bounce += k([1.0, 2.0, 0.0]) as u8,
         Overcharge => {
             s.charge += 0.5;
@@ -1167,11 +1162,18 @@ fn apply(pt: &Part, s: &mut Spec) {
             s.spread *= 0.4;
             s.traverse *= k([1.5, 1.8, 1.0]);
         }
-        Mines => s.mines = k([12.0, 9.0, 6.0]),
-        Ciws => s.ciws = k([9.0, 12.0, 0.0]),
-        Spotter => s.uplink = k([0.1, 0.15, 0.0]),
+        // a second of these lays mines, fires the point defence, lends range faster or further
+        Mines => {
+            let v = k([12.0, 9.0, 6.0]);
+            s.mines = if s.mines > 0.0 { s.mines.min(v) * 0.6 } else { v };
+        }
+        Ciws => {
+            let v = k([9.0, 12.0, 0.0]);
+            s.ciws = if s.ciws > 0.0 { s.ciws.max(v) * 1.35 } else { v };
+        }
+        Spotter => s.uplink += k([0.1, 0.15, 0.0]),
         Shield => s.shield += k([150.0, 300.0, 550.0]),
-        Recycler => s.recycle = 0.02,
+        Recycler => s.recycle += 0.02,
         Cooling => s.reload *= k([0.88, 0.8, 1.0]),
     }
 }
@@ -1252,18 +1254,12 @@ impl Build {
         }
         Some(b)
     }
-    /// What's wrong with it, if anything: it needs a mount, a head and a barrel, no family twice,
-    /// and no more weight than the mount carries.
+    /// What's wrong with it, if anything: it needs a mount, a head and a barrel, and no more weight
+    /// than the mount carries. Two of the same modifier or accessory is fine: their effects stack.
     pub fn problem(&self) -> Option<String> {
         for (k, what) in [(0, "a mount"), (1, "a head"), (2, "a barrel")] {
             if self.parts[k].is_none() {
                 return Some(format!("Needs {}", what));
-            }
-        }
-        let fams: Vec<Fam> = self.part_ids().map(|i| part(i).fam).collect();
-        for (i, f) in fams.iter().enumerate() {
-            if fams[..i].contains(f) {
-                return Some(format!("Two {} parts", fam_name(*f)));
             }
         }
         let s = spec_raw(self);
@@ -1275,11 +1271,6 @@ impl Build {
     pub fn ok(&self) -> bool {
         self.problem().is_none()
     }
-}
-
-/// The family's name for messages ("Two Rifle parts").
-pub fn fam_name(f: Fam) -> String {
-    format!("{:?}", f)
 }
 
 /// The spec of a complete, legal build.
@@ -1585,15 +1576,19 @@ mod tests {
         assert!(s.range > 40.0 && s.range < 60.0);
     }
     #[test]
-    fn overweight_and_doubled_families_are_refused() {
+    fn overweight_is_refused_and_doubled_parts_stack() {
         let mut b = Build::starter();
         b.parts[0] = find("m.sandbag");
         b.parts[2] = find("b.rail3");
         assert!(b.problem().unwrap().starts_with("Too heavy"));
         let mut b = Build::starter();
+        b.parts[0] = find("m.fort");
         b.parts[3] = find("x.fire1");
-        b.parts[4] = find("x.fire2");
-        assert!(b.problem().unwrap().starts_with("Two"));
+        let one = spec_raw(&b);
+        b.parts[4] = find("x.fire1");
+        assert!(b.problem().is_none(), "{:?}", b.problem());
+        let two = spec_raw(&b);
+        assert!(two.napalm > one.napalm && two.cost > one.cost && two.load > one.load);
     }
     #[test]
     fn every_part_fits_a_heavy_mount() {

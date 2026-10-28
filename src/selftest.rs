@@ -427,6 +427,47 @@ pub fn customs(g: &mut Game) {
         );
     }
     eprintln!("placed {placed} custom turrets");
+    // ground mounts on rooftops: a fortress with two of the same plates, and a walker
+    for (k, (m, x)) in [("m.fort", "g.plate1"), ("m.walk1", "g.plate1")].iter().enumerate() {
+        let mut b = Build::starter();
+        b.name = format!("Roof {k}");
+        b.parts[0] = garage::find(m);
+        b.parts[5] = garage::find(x);
+        b.parts[6] = garage::find(x);
+        if !b.ok() || !g.pick_design(&b) {
+            eprintln!("roof design {k} refused: {:?}", b.problem());
+            continue;
+        }
+        let ground = g.turret_range(S::Custom, false, 0);
+        let spot = (0..g.world.buildings.len())
+            .filter(|bi| g.world.buildings[*bi].alive)
+            .filter(|bi| g.world.buildings[*bi].cells > 60)
+            .find_map(|bi| {
+                let bb = &g.world.buildings[bi];
+                let (x0, y0, x1, y1) = (bb.x0 as i32, bb.y0 as i32, bb.x1 as i32, bb.y1 as i32);
+                (y0..=y1).step_by(2).find_map(|y| {
+                    (x0..=x1).step_by(2).find_map(|x| {
+                        let c = vec2(x as f32 + 0.5, y as f32 + 0.5);
+                        g.can_place_roof(S::Custom, bi, c).then_some((bi, c))
+                    })
+                })
+            });
+        match spot {
+            Some((bi, c)) => {
+                let ok = g.place_roof(S::Custom, bi, c);
+                eprintln!(
+                    "{} on a {:.0}-high roof: placed {} range {:.0} (ground {:.0}) hp {:.0}",
+                    b.name,
+                    g.world.buildings[bi].h,
+                    ok,
+                    g.turret_range_on(S::Custom, g.world.buildings[bi].h, 0),
+                    ground,
+                    garage::spec(&b).map_or(0.0, |s| s.hp)
+                );
+            }
+            None => eprintln!("{}: no roof found", b.name),
+        }
+    }
     for (dx, dy) in [(0.0, -130.0), (-90.0, -100.0), (100.0, 80.0)] {
         g.queue((h.x + dx, h.y + dy), 2500.0, 4.0);
     }

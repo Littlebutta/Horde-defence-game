@@ -2757,6 +2757,11 @@ impl App {
     }
 
     /// Ground marks are drawn with `flat`; ghosts of buildings are real 3D boxes.
+    /// The range bonus, in percent, turret `t` gets standing `base` cells up.
+    fn up_bonus(&self, g: &Game, t: S, base: f32) -> f32 {
+        let ground = g.turret_range_on(t, 0.0, self.me()).max(0.01);
+        (g.turret_range_on(t, base, self.me()) / ground - 1.0) * 100.0
+    }
     fn preview(&self, g: &Game, sc: &Scene, mw: Vec2) -> Option<(String, Color)> {
         let flat = &sc.flat;
         let ghost = |x: f32, y: f32, w: f32, h: f32, z: f32, ok: bool| {
@@ -2797,8 +2802,9 @@ impl App {
                         } else if !can {
                             "This bunker already has a turret".to_string()
                         } else {
-                            draw_circle_lines(c.x, c.y, g.turret_range(t, true, self.me()), 0.4, rgba(255, 212, 59, 0.6));
-                            format!("On the bunker  ${:.0}  +60% range", cost)
+                            let hb = def(S::Bunker).ht;
+                            draw_circle_lines(c.x, c.y, g.turret_range_on(t, hb, self.me()), 0.4, rgba(255, 212, 59, 0.6));
+                            format!("On the bunker  ${:.0}  +{:.0}% range", cost, self.up_bonus(g, t, hb))
                         };
                         return Some((s, if can && afford { WHITE } else { rgb(255, 140, 140) }));
                     }
@@ -2811,19 +2817,21 @@ impl App {
                         let cost = g.cost_for(self.me(), t, p);
                         let afford = g.scrap >= cost;
                         ghost(q.x - d.w as f32 / 2.0, q.y - d.h as f32 / 2.0, d.w as f32, d.h as f32, g.world.buildings[b].h, can && afford);
-                        draw_circle_lines(q.x, q.y, g.turret_range(t, true, self.me()), 0.4, rgba(255, 212, 59, 0.6));
+                        let hb = g.world.buildings[b].h;
+                        draw_circle_lines(q.x, q.y, g.turret_range_on(t, hb, self.me()), 0.4, rgba(255, 212, 59, 0.6));
                         let extra = cost - d.cost;
                         let s = if !can {
                             "Rooftop full".to_string()
                         } else {
                             format!(
-                                "Rooftop  ${:.0}{}  +60% range",
+                                "Rooftop  ${:.0}{}  +{:.0}% range",
                                 cost,
                                 if extra > 0.0 {
                                     format!(" (+{:.0} distance)", extra)
                                 } else {
                                     String::new()
-                                }
+                                },
+                                self.up_bonus(g, t, hb)
                             )
                         };
                         return Some((

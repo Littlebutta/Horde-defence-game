@@ -282,11 +282,13 @@ pub(super) fn turret(mb: &mut MB, b: &Build, sp: &Spec, c: Vec2, base: f32, pose
         match f {
             Fam::Plates => {
                 if mount != Fam::Walker && mount != Fam::Mast {
+                    // a second set goes on above the first
+                    let z = if k == 6 && fam(5) == Some(Fam::Plates) { 0.6 } else { 0.0 };
                     band(
                         mb,
                         &chamfer(c, 2.65, 2.65, 1.0, 0.0),
-                        base + 0.6,
-                        base + 1.1,
+                        base + 0.6 + z,
+                        base + 1.1 + z,
                         mix(STEEL_DARK, body, 0.2),
                     );
                 }
@@ -294,7 +296,7 @@ pub(super) fn turret(mb: &mut MB, b: &Build, sp: &Spec, c: Vec2, base: f32, pose
             Fam::Shield => ring_flat(
                 mb,
                 c,
-                3.3,
+                if k == 6 { 3.7 } else { 3.3 },
                 0.12,
                 base + 0.15,
                 rgba(120, 200, 255, 0.55 + 0.25 * (pose.t * 3.0).sin().abs()),
@@ -696,10 +698,12 @@ pub fn preview(
         &art::ngon(c, 6.5, 40, 0.0),
         -0.4,
         0.0,
-        rgb(58, 62, 68),
-        rgb(36, 38, 42),
+        rgb(206, 210, 216),
+        rgb(160, 166, 175),
     );
-    art::ring_flat(&mut mb, c, 6.2, 0.15, 0.02, rgba(255, 196, 40, 0.65));
+    // the launch pad: a light concrete disc, an orange ring and blueprint ticks
+    art::ring_flat(&mut mb, c, 6.2, 0.15, 0.02, rgba(232, 128, 0, 0.75));
+    art::ring_flat(&mut mb, c, 3.4, 0.06, 0.02, rgba(26, 115, 232, 0.35));
     for k in 0..12 {
         let a = k as f32 / 12.0 * std::f32::consts::TAU;
         mb.line(
@@ -708,7 +712,7 @@ pub fn preview(
                 c + vec2(a.cos(), a.sin()) * 5.6,
             ],
             0.08,
-            rgba(255, 255, 255, 0.10),
+            rgba(26, 60, 110, 0.22),
         );
     }
     mb.obj(c, 0.5);
