@@ -60,6 +60,11 @@ fn window_conf() -> Conf {
 }
 
 fn main() {
+    // `--version`: print the build and quit (the Mac build checks that the app starts with this)
+    if std::env::args().any(|a| a == "--version") {
+        println!("Pixel Horde build {}", update::build_number());
+        return;
+    }
     // PH_FETCH=<dir>: download the campaign cities for the `cities` release (GitHub workflow), no window
     if let Ok(dir) = std::env::var("PH_FETCH") {
         std::process::exit(if campaign::fetch_all(std::path::Path::new(&dir)) { 0 } else { 1 });

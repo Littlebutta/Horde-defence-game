@@ -1,17 +1,18 @@
-name: Build PixelHorde.exe
+name: Build PixelHorde
 
-# Every push to main builds the Windows game and publishes it as release build-N.
+# Every push to main builds the Windows and Mac games and publishes them as release build-N.
 # The game checks the latest release on start and updates itself, so nobody needs Git.
+# Other branches (and manual runs on them) only build, so a change can be tried without a release.
 on:
   push:
-    branches: [main]
+    branches: [main, "claude/**"]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -25,6 +26,90 @@ jobs:
         env:
           BUILD_NUMBER: ${{ github.run_number }}
         run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: target/release/PixelHorde.exe
+
+  # One app for both Apple Silicon and Intel Macs. It is not signed with an Apple developer ID,
+  # so the first start goes through System Settings > Privacy & Security > Open Anyway (README).
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+      - name: Make PixelHorde.app
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          set -e
+          app=dist/PixelHorde.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/PixelHorde" \
+            target/aarch64-apple-darwin/release/PixelHorde target/x86_64-apple-darwin/release/PixelHorde
+          # the Steam API library is loaded from next to the program (@loader_path)
+          cp "$(find target/aarch64-apple-darwin/release/build -name libsteam_api.dylib | head -1)" "$app/Contents/MacOS/"
+          cp assets/icon.icns "$app/Contents/Resources/PixelHorde.icns"
+          cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Pixel Horde</string>
+            <key>CFBundleDisplayName</key><string>Pixel Horde</string>
+            <key>CFBundleIdentifier</key><string>com.littlebutta.pixelhorde</string>
+            <key>CFBundleExecutable</key><string>PixelHorde</string>
+            <key>CFBundleIconFile</key><string>PixelHorde</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.$BUILD_NUMBER</string>
+            <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>LSApplicationCategoryType</key><string>public.app-category.strategy-games</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+          # ad-hoc signatures (no Apple ID): Apple Silicon refuses to run unsigned code at all.
+          # The bundle itself stays unsealed so the game can swap in a newer program when it updates.
+          codesign --force --sign - "$app/Contents/MacOS/libsteam_api.dylib"
+          codesign --force --sign - --identifier com.littlebutta.pixelhorde "$app/Contents/MacOS/PixelHorde"
+          lipo -info "$app/Contents/MacOS/PixelHorde"
+          # the program on its own is what the Mac app downloads when it updates itself
+          cp "$app/Contents/MacOS/PixelHorde" dist/PixelHorde-macOS
+          ditto -c -k --keepParent "$app" dist/PixelHorde-mac.zip
+      - name: Check it starts
+        run: |
+          # no window in CI: this proves the program and the Steam library load on this Mac
+          otool -L dist/PixelHorde.app/Contents/MacOS/PixelHorde
+          dist/PixelHorde.app/Contents/MacOS/PixelHorde --version
+          arch -x86_64 dist/PixelHorde.app/Contents/MacOS/PixelHorde --version || echo "no Rosetta on this runner, Intel half not started"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            dist/PixelHorde-mac.zip
+            dist/PixelHorde-macOS
+
+  # A broken Mac build never holds back the Windows update: the release goes out without it.
+  release:
+    needs: [windows, mac]
+    if: always() && github.ref == 'refs/heads/main' && needs.windows.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -32,7 +117,14 @@ jobs:
         run: |
           tag="build-${{ github.run_number }}"
           msg="$(git log -1 --pretty=%s)"
-          gh release create "$tag" target/release/PixelHorde.exe \
+          files=(dist/windows/PixelHorde.exe)
+          mac="Mac: download PixelHorde-mac.zip, open it and drag Pixel Horde into Applications (see the README for the first start)."
+          if [ -f dist/mac/PixelHorde-mac.zip ]; then
+            files+=(dist/mac/PixelHorde-mac.zip dist/mac/PixelHorde-macOS)
+          else
+            mac="The Mac build failed this time; Macs stay on the previous build."
+          fi
+          gh release create "$tag" "${files[@]}" \
             --title "Pixel Horde build ${{ github.run_number }}" \
-            --notes "Download PixelHorde.exe and run it. It updates itself after that. Latest change: $msg" \
+            --notes "Windows: download PixelHorde.exe and run it. $mac Both update themselves after that. Latest change: $msg" \
             --latest

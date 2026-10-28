@@ -1,6 +1,6 @@
 # Draws the Pixel Horde icon: four plain squares in the army colours (defs.rs FACTIONS col, and
 # the civilians' white). The unit sprites below are kept for reference. Writes assets/icon.ico
-# (exe), assets/icon.png and the 16/32/64 RGBA windows that main.rs passes to the window. Run: python3 tools/make_icon.py
+# (exe), assets/icon.icns (macOS app), assets/icon.png and the 16/32/64 RGBA windows that main.rs passes to the window. Run: python3 tools/make_icon.py
 from pathlib import Path
 from PIL import Image
 
@@ -107,5 +107,6 @@ big.save(out / "icon.png")
 sizes = [16, 24, 32, 48, 64, 128, 256]
 imgs = [render(s) for s in sizes]
 imgs[-1].save(out / "icon.ico", format="ICO", sizes=[(s, s) for s in sizes], append_images=imgs[:-1])
+render(1024).save(out / "icon.icns")
 for s in (16, 32, 64):
     (out / f"icon{s}.rgba").write_bytes(render(s).tobytes())

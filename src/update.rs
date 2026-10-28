@@ -2,12 +2,16 @@
 //! PixelHorde.exe and publishes it as release `build-N`. On start the game asks GitHub for the latest
 //! release; if it is newer than this build it downloads it next to the running exe and swaps it in
 //! (Windows lets a running exe be renamed, so the old one becomes PixelHorde.old and is deleted on the
-//! next start).
+//! next start). The Mac app does the same with the program inside PixelHorde.app, which every
+//! release also carries on its own as PixelHorde-macOS.
 
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 pub const REPO: &str = "Littlebutta/Horde-defence-game";
+
+/// The release asset this platform updates from.
+const ASSET: &str = if cfg!(target_os = "macos") { "PixelHorde-macOS" } else { "PixelHorde.exe" };
 
 pub fn build_number() -> u32 {
     option_env!("BUILD_NUMBER")
@@ -101,10 +105,10 @@ fn check_and_fetch(st: &Arc<Mutex<UpState>>) -> Result<(), String> {
         .as_array()
         .and_then(|v| {
             v.iter()
-                .find(|x| x["name"].as_str() == Some("PixelHorde.exe"))
+                .find(|x| x["name"].as_str() == Some(ASSET))
         })
         .and_then(|x| x["browser_download_url"].as_str())
-        .ok_or("release has no PixelHorde.exe")?;
+        .ok_or(format!("release has no {}", ASSET))?;
     *st.lock().unwrap() = UpState::Downloading(latest);
     let mut bytes = Vec::new();
     a.get(asset)
@@ -119,7 +123,19 @@ fn check_and_fetch(st: &Arc<Mutex<UpState>>) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let new = exe.with_extension("new");
     let old = exe.with_extension("old");
-    std::fs::write(&new, &bytes).map_err(|e| e.to_string())?;
+    std::fs::write(&new, &bytes).map_err(|e| {
+        // macOS runs an app straight from Downloads out of a read-only copy
+        if cfg!(target_os = "macos") && e.kind() == std::io::ErrorKind::ReadOnlyFilesystem {
+            "move Pixel Horde to Applications to get updates".to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
     let _ = std::fs::remove_file(&old);
     std::fs::rename(&exe, &old).map_err(|e| e.to_string())?;
     if let Err(e) = std::fs::rename(&new, &exe) {

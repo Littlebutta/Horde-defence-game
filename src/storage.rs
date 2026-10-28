@@ -1,13 +1,21 @@
 //! Everything the game saves lives in a `data` folder next to PixelHorde.exe: settings and every
 //! real city that has been downloaded, so it can be played again instantly without the internet.
+//! The Mac app keeps it in ~/Library/Application Support/Pixel Horde instead, because macOS may run
+//! a downloaded app from a read-only copy and an app bundle is replaced whole when it is moved.
 
 use crate::world::*;
 use macroquad::prelude::{vec2, Vec2};
 use std::path::PathBuf;
 
 pub fn data_dir() -> PathBuf {
-    let base = std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf())).unwrap_or_else(|| PathBuf::from("."));
-    let d = base.join("data");
+    let exe = std::env::current_exe().ok();
+    let base = exe.as_ref().and_then(|p| p.parent().map(|p| p.to_path_buf())).unwrap_or_else(|| PathBuf::from("."));
+    let mut d = base.join("data");
+    if cfg!(target_os = "macos") && base.ends_with("Contents/MacOS") {
+        if let Some(home) = std::env::var_os("HOME") {
+            d = PathBuf::from(home).join("Library/Application Support/Pixel Horde");
+        }
+    }
     let _ = std::fs::create_dir_all(d.join("maps"));
     d
 }

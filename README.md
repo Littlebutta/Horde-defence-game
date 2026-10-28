@@ -2,7 +2,7 @@
 
 A horde defence game where every enemy is a single pixel. Up to millions of zombies, alien bugs or orcs pour through a city's streets like water while you hold an airport with walls, turrets, an economy, rescue squads, troops and missile strikes.
 
-It is a native Windows game written in Rust. The horde is simulated in parallel on every CPU core and drawn on the GPU.
+It is a native Windows and Mac game written in Rust. The horde is simulated in parallel on every CPU core and drawn on the GPU.
 
 ## Play on Windows
 
@@ -11,7 +11,16 @@ It is a native Windows game written in Rust. The horde is simulated in parallel 
 
 That's all. No Git, browser or installer needed. The game keeps everything it saves in a `data` folder next to the exe: your settings and every real city you have downloaded, so you can move or back up the whole folder. Every time the game starts it checks this repo's releases; when a newer build exists it downloads it in the background and a **Restart now** button appears on the menu.
 
-Each push to `main` builds a new `PixelHorde.exe` with GitHub Actions and publishes it as release `build-N`. The update check needs the repo to be public.
+## Play on a Mac
+
+1. Open the [latest release](https://github.com/Littlebutta/Horde-defence-game/releases/latest) and download `PixelHorde-mac.zip`. One app runs on both Apple Silicon (M1 and newer) and Intel Macs, macOS 11 or newer.
+2. Double-click the zip to unpack it, then drag **Pixel Horde** into the **Applications** folder.
+3. Double-click Pixel Horde. The app is not signed with a paid Apple developer account, so the first time macOS says it can't check it for malicious software (or that Apple could not verify it). Click **Done** (or **OK**), open **System Settings > Privacy & Security**, scroll down to the message about Pixel Horde and click **Open Anyway**, then confirm with your password. On macOS 14 and older, right-clicking the app and choosing **Open** works too.
+4. If macOS instead says the app "is damaged and can't be opened", open **Terminal** and run `xattr -dr com.apple.quarantine /Applications/PixelHorde.app`, then double-click it again.
+
+After that it opens like any other app and updates itself the same way the Windows game does. Keep it in Applications: an app started straight from Downloads runs from a read-only copy and can't update. The Mac app saves its settings, cities and campaign in `~/Library/Application Support/Pixel Horde` (in Finder: **Go > Go to Folder**, paste that path).
+
+Each push to `main` builds a new `PixelHorde.exe` and Mac app with GitHub Actions and publishes it as release `build-N`. The update check needs the repo to be public.
 
 ## Controls
 
@@ -85,7 +94,7 @@ Pick **World campaign** on the menu. The outbreak is spreading through the world
 
 Up to 4 players share one base: the same scrap, buildings and troops, and everyone can build, deploy and fire abilities. Upgrades are each player's own: research at the lab only upgrades the turrets, squads and strikes of the player who started it.
 
-1. Everyone starts Steam, then starts `PixelHorde.exe`.
+1. Everyone starts Steam, then starts Pixel Horde.
 2. The host clicks **Play co-op with Steam friends**. The Steam invite window opens; invite your friends.
 3. Friends accept the invite in Steam (or right-click the host in the friends list and pick **Join game**) while Pixel Horde is open. They see a waiting room.
 4. The host picks the faction, map and difficulty and presses **Start**. The map is sent to everyone, so real cities only need downloading on the host.
@@ -107,7 +116,7 @@ How it stays in sync: every player runs the same deterministic simulation and on
 cargo build --release
 ```
 
-The exe is at `target/release/PixelHorde.exe` (or `PixelHorde` on Linux/macOS). Builds without `BUILD_NUMBER` set report themselves as development builds and don't self-update.
+The exe is at `target/release/PixelHorde.exe` (or `PixelHorde` on Linux/macOS; the Mac app bundle is put together in `.github/workflows/build.yml`). Builds without `BUILD_NUMBER` set report themselves as development builds and don't self-update.
 
 Steam support is the default `steam` feature; `cargo build --release --no-default-features` builds without it. The Steam API DLL ships inside the exe and is written next to it on first start.
 
