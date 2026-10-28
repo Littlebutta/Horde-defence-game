@@ -1103,9 +1103,11 @@ impl Game {
     }
 
     /// The turret's shot sound: one of the game's effects, pitched and filtered for its barrel.
-    /// Fast guns only raise it every so often, like the gun turrets.
+    /// Gun barrels crack on every shot like the gun turrets; other fast guns only every so often.
     fn voice(&mut self, i: usize, sp: &Spec, at: Vec2) {
-        let gap = if sp.reload < 0.35 || sp.burst > 2 {
+        let gap = if sp.voice.base == 0 {
+            0.0
+        } else if sp.reload < 0.35 || sp.burst > 2 {
             0.4
         } else {
             0.0

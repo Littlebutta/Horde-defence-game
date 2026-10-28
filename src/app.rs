@@ -1143,7 +1143,16 @@ impl App {
                     5 => music::Snd::HeliGun,
                     _ => music::Snd::Gun,
                 };
-                let gain = if v.base == 4 { 0.3 } else { 0.45 } * near * near * zoom;
+                // the gun barrels sit well under the cannon and railgun
+                let gain = match v.base {
+                    0 => 0.14,
+                    3 => 0.35,
+                    4 => 0.3,
+                    5 => 0.3,
+                    _ => 0.45,
+                } * near
+                    * near
+                    * zoom;
                 self.music.play_toned(music::Play { snd, gain, pan, speed: v.pitch * jitter, key: if v.base == 4 { key } else { 0 } }, v.tone);
                 continue;
             }
@@ -1151,12 +1160,12 @@ impl App {
                 Sfx::Cannon => (music::Snd::Cannon, 0.55, jitter),
                 Sfx::Flame => (music::Snd::Flame, 0.3, jitter),
                 Sfx::Railgun => (music::Snd::Railgun, 0.8, jitter),
-                Sfx::ArtilleryShot => (music::Snd::ArtilleryShot, 0.8, jitter),
+                Sfx::ArtilleryShot => (music::Snd::ArtilleryShot, 0.55, jitter),
                 Sfx::ArtilleryHit => (music::Snd::ArtilleryHit, 0.8, jitter),
                 Sfx::Bomb => (music::Snd::ArtilleryHit, 0.9, 0.85 * jitter),
                 Sfx::Nuke => (music::Snd::Nuke, 1.0, 1.0),
-                Sfx::Gun => (music::Snd::Gun, 0.4, jitter),
-                Sfx::HeliGun => (music::Snd::HeliGun, 0.6, jitter),
+                Sfx::Gun => (music::Snd::Gun, 0.14, jitter),
+                Sfx::HeliGun => (music::Snd::HeliGun, 0.35, jitter),
                 Sfx::Rocket => (music::Snd::Cannon, 0.3, 1.45 * jitter),
                 Sfx::BaseAttacked => (music::Snd::BaseAttacked, 0.8, 1.0),
                 Sfx::FlameStop | Sfx::Custom(_) => continue,

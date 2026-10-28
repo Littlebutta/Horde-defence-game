@@ -2683,8 +2683,8 @@ impl Game {
                     t: 0.09,
                     kind: if t == S::Cannon { 1 } else { 0 },
                 });
-                if t == S::Gun && self.time - self.structs[i].snd >= 0.45 {
-                    self.structs[i].snd = self.time;
+                // one short crack per shot, so the sound keeps time with the tracers
+                if t == S::Gun {
                     self.sfx.push((Sfx::Gun, center));
                 }
                 if t == S::Cannon {

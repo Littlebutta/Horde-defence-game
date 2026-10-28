@@ -22,7 +22,7 @@ static TRACKS: [&[u8]; 6] = [
 static AMBIENCE: [&[u8]; 1] = [include_bytes!("../assets/sfx/ambience.mp3")];
 /// Devin's war drum, looped while a war-drum orc is on the map.
 static DRUM: &[u8] = include_bytes!("../assets/sfx/orc-wardrum.mp3");
-const DRUM_GAIN: f32 = 0.8;
+const DRUM_GAIN: f32 = 0.55;
 /// seconds the drum takes to fade in or out
 const DRUM_FADE: f32 = 0.8;
 
@@ -104,8 +104,12 @@ static SFX: [&[u8]; SNDS] = [
 ];
 /// at most this many copies of one effect play at once, and a new copy waits this long after the
 /// last one, so a hundred cannons firing together stay a rumble instead of a wall of noise
-const VOICES: [usize; SNDS] = [5, 3, 5, 3, 3, 5, 3, 2, 2, 1];
-const GAP_MS: [u64; SNDS] = [70, 120, 90, 250, 150, 70, 200, 300, 40, 20_000];
+const VOICES: [usize; SNDS] = [5, 3, 5, 3, 3, 10, 3, 2, 2, 1];
+const GAP_MS: [u64; SNDS] = [70, 120, 90, 250, 150, 15, 200, 300, 40, 20_000];
+/// seconds of each clip that play (0: all of it), ending in a short fade. The gun turret plays
+/// once per shot, so its long ringing tail is cut to a crack that fits between shots.
+const CUT_S: [f32; SNDS] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.0];
+const CUT_FADE_S: f32 = 0.06;
 
 /// seconds each music crossfade takes; the end of a track fades out while the next fades in
 const FADE: f32 = 6.0;
@@ -411,7 +415,7 @@ struct Clip {
     playing: Arc<AtomicUsize>,
 }
 
-fn decode(bytes: &'static [u8]) -> Option<Clip> {
+fn decode(bytes: &'static [u8], cut: f32) -> Option<Clip> {
     let dec = Decoder::new(Cursor::new(bytes)).ok()?;
     let (ch, rate) = (dec.channels() as usize, dec.sample_rate());
     let s: Vec<f32> = dec.convert_samples().collect();
@@ -419,6 +423,20 @@ fn decode(bytes: &'static [u8]) -> Option<Clip> {
         s.iter().flat_map(|v| [*v, *v]).collect()
     } else {
         s.chunks_exact(ch).flat_map(|f| [f[0], f[1]]).collect()
+    };
+    let data = if cut > 0.0 {
+        let end = ((cut * rate as f32) as usize).min(data.len() / 2);
+        let fade = ((CUT_FADE_S * rate as f32) as usize).clamp(1, end.max(1));
+        let mut d = data;
+        d.truncate(end * 2);
+        for f in end - fade.min(end)..end {
+            let g = (end - f) as f32 / fade as f32;
+            d[f * 2] *= g;
+            d[f * 2 + 1] *= g;
+        }
+        d
+    } else {
+        data
     };
     Some(Clip { data: data.into(), rate, playing: Arc::new(AtomicUsize::new(0)) })
 }
@@ -476,7 +494,7 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>
     let mut rng = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
     let mut music = Playlist::new(&TRACKS, FADE);
     let mut ambience = Playlist::new(&AMBIENCE, AMB_FADE);
-    let clips: Vec<Option<Clip>> = SFX.iter().map(|b| decode(b)).collect();
+    let clips: Vec<Option<Clip>> = SFX.iter().zip(CUT_S).map(|(b, cut)| decode(b, cut)).collect();
     let mut last_play = [Instant::now() - Duration::from_secs(1); SNDS];
     let mut keyed: Vec<(u64, Arc<AtomicBool>)> = Vec::new();
     let mut news: Option<News> = None;
@@ -590,7 +608,7 @@ mod tests {
     }
     #[test]
     fn stopped_voice_fades_out() {
-        let c = decode(SFX[Snd::Flame as usize]).unwrap();
+        let c = decode(SFX[Snd::Flame as usize], 0.0).unwrap();
         let stopped = Arc::new(AtomicBool::new(false));
         c.playing.fetch_add(1, Ordering::Relaxed);
         let mut v = Voice { data: c.data.clone(), i: 0, rate: c.rate, gl: 1.0, gr: 1.0, playing: c.playing.clone(), stopped: stopped.clone(), fade: 1.0 };
@@ -615,8 +633,12 @@ mod tests {
     #[test]
     fn effects_decode() {
         for b in SFX {
-            let c = decode(b).expect("decodes");
+            let c = decode(b, 0.0).expect("decodes");
             assert!(c.data.len() > 4_000);
         }
+        // the gun turret is cut to a short crack that ends in silence
+        let c = decode(SFX[Snd::Gun as usize], CUT_S[Snd::Gun as usize]).unwrap();
+        assert!(c.data.len() / 2 <= (0.21 * c.rate as f32) as usize);
+        assert!(c.data[c.data.len() - 2..].iter().all(|v| v.abs() < 0.05));
     }
 }
