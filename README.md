@@ -62,7 +62,7 @@ Each push to `main` builds a new `PixelHorde.exe` and Mac app with GitHub Action
 - Gun turrets never pile onto the same target, and a rooftop turret needs a roof big enough for its whole base.
 - Civilians queuing at a pad that is turning around walk over to an idle pad.
 - A **rescue station** (J) sends a rescue team every 25 s to the biggest group of civilians it can reach safely and walks them back to the base.
-- The research lab unlocks upgrades: bigger rescue squads, carpet bombing (drag to aim the bomb run), a nuclear warhead that leaves radiation nobody of yours can enter or build in, and (on its own panel under the abilities) reinforced armour for walls and turrets, shell presses for faster ammo, long barrels for turret range, and turret mounts (a turret on top of a bunker gets the rooftop range bonus).
+- The research lab unlocks upgrades: bigger rescue squads, carpet bombing (drag to aim the bomb run), a nuclear warhead that leaves radiation nobody of yours can enter or build in, and (on its own panel under the abilities) reinforced armour for walls and turrets, shell presses for faster ammo, long barrels for turret range, turret mounts (a turret on top of a bunker gets the rooftop range bonus), and napalm bombs (every airstrike bomb leaves burning napalm for 10 s).
 - Units go anywhere on land except inside buildings: water is the only barrier. Only your turrets and garrisoned rifles stand on rooftops.
 - Hordes walk around your walls and only chew through one when it blocks the way.
 - Real cities you have played appear under **Played before** on the menu and start instantly, without downloading again (the x removes one).
@@ -105,9 +105,10 @@ How it stays in sync: every player runs the same deterministic simulation and on
 
 ## Factions
 
-- **Zombies:** small outbreaks that grow by eating civilians; every bite turns one civilian into two zombies. A zombie that dies gets back up once. When one is killed, the zombies around it speed up and swarm whatever killed it, and stay locked on until it's dead. They wander, attack what they see, and periodically rush the HQ.
+- **Zombies:** small outbreaks that grow by eating civilians; every bite turns one civilian into two zombies. A zombie that dies gets back up once. When one is killed, the zombies around it speed up and swarm whatever killed it, and stay locked on until it's dead. They wander, attack what they see, and periodically rush the HQ. The fewer civilians are left out on the map, the more of them drift toward the HQ and the sooner and longer they rush it; once nearly everyone is eaten or rescued, they come for the HQ for good.
 - **Alien bugs:** small drops all over the city, straight for the HQ. Some drops are lighter-coloured flyers that cross rooftops and walls. Hives take root now and then: they spawn bugs, stop you building nearby, grow, and infect buildings around them, each one making the hive's waves bigger. Turrets can't hurt a hive; use abilities or troops.
 - **Orcs:** portals pour out huge waves that destroy everything they see. Orcs build rage as units around them die, turning redder and running faster. When one falls, the orcs around it pull back, bunch up, and charge in again together at full rage. They sometimes grab civilians and drag them back through a portal (troops nearby can free them); every capture brings more orcs out at full rage.
+- Hordes grow much faster than the difficulty: an easy city sees tens of thousands, the hardest ones millions.
 - **Chaos:** all three armies at once, each a little smaller than on its own and each in its own colour: zombie outbreaks, bug drops and hives, and orc portals.
 
 ## Building from source

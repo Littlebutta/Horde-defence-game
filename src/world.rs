@@ -162,6 +162,24 @@ pub fn fill_poly(poly: &[Vec2], mut f: impl FnMut(usize)) {
     }
 }
 
+/// The cells a polygon's outline passes through, sampled along each edge just inside it (so a
+/// wall lying right on a cell border doesn't take the cell on its outer side).
+pub fn touch_edges(poly: &[Vec2], mut f: impl FnMut(usize)) {
+    let n = poly.len();
+    let sign = if poly_area(poly) > 0.0 { 1.0 } else { -1.0 };
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        let inward = (b - a).perp().normalize_or_zero() * sign * 0.15;
+        let steps = ((b - a).length() * 4.0).ceil().max(1.0) as usize;
+        for k in 0..=steps {
+            let p = a + (b - a) * (k as f32 / steps as f32) + inward;
+            if p.x >= 0.0 && p.y >= 0.0 && p.x < W as f32 && p.y < H as f32 {
+                f(p.y as usize * W + p.x as usize);
+            }
+        }
+    }
+}
+
 /// Whether an HQ at `p` takes the airport into its base zone: on it, or within reach of its fence.
 pub fn near_airport(d: &Desc, p: Vec2) -> bool {
     let Some(a) = &d.airport else { return false };
@@ -362,11 +380,11 @@ impl World {
             if cells.len() < 3 {
                 continue;
             }
-            let b = BDesc { poly, h: b.h };
             let idx = buildings.len() as i32;
             for &c in &cells {
                 bid[c] = idx;
             }
+            let b = BDesc { poly, h: b.h };
             let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
             for p in &b.poly {
                 x0 = x0.min(p.x);
@@ -389,6 +407,19 @@ impl World {
                 alive: true,
                 area: poly_area(&b.poly),
             });
+        }
+        // the cells their walls only partly cover belong to them too, so the horde can't stand half
+        // inside one (streets, water and cells already taken keep theirs)
+        for (i, b) in buildings.iter_mut().enumerate() {
+            let mut more = 0;
+            touch_edges(&b.poly, |c| {
+                let t = terrain[c];
+                if bid[c] < 0 && t != T_WATER && t != T_ROAD && t != T_RUNWAY {
+                    bid[c] = i as i32;
+                    more += 1;
+                }
+            });
+            b.cells += more;
         }
         for c in 0..N {
             if zone[c] == 1 && terrain[c] == T_LAND && bid[c] < 0 {

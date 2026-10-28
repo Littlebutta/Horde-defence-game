@@ -197,6 +197,9 @@ pub struct StepIn<'a> {
     pub hq_pos: Vec2,
     pub hunt: Option<&'a [u16]>,
     pub rush: bool,
+    /// zombies off the rush: the share of their steps that head for the HQ anyway (0..1), which
+    /// grows as the civilians they could hunt run out
+    pub pull: f32,
     pub stats: FactionStats,
     /// chaos game: every army's stats, looked up per unit
     pub mixed: Option<[FactionStats; 3]>,
@@ -810,7 +813,11 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
         // whether its members would all take the same step
         let follow = field_hq && !(wander && !(use_hunt && hunt[c] < U16));
         let mut cs = [f32::INFINITY; 8];
+        // zombies off the rush: a share of their steps head for the HQ anyway (see `StepIn::pull`)
+        let pulled = wander && field_hq && inp.pull > 0.0 && xs(&mut s) < inp.pull;
         if !field_hq {
+        } else if pulled {
+            best = descend(m, c, f32::MAX, |i| hq[i], INF, prev, dk, &k.jt[(xr(&mut s) & 255) as usize]);
         } else if let (Some(tab), true) = (tab, follow) {
             cs = tab[((cy - y0) * TS as i32 + cx - x0) as usize];
             best = pick(&cs, &k.jt[(xr(&mut s) & 255) as usize]);
@@ -884,7 +891,7 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
         // Where the crowd is thin enough to see single units, the clump then breaks up into single
         // units, each taking its own step; inside a packed crowd it keeps together (merging keeps its
         // share of the cell small, so the crowd still spreads out much as single units would).
-        if u.n > 1 && follow && !packed {
+        if u.n > 1 && follow && !packed && !pulled {
             let (mut b1, mut b2) = (f32::INFINITY, f32::INFINITY);
             for &v in &cs {
                 if v < b1 {
@@ -1207,6 +1214,12 @@ fn core_units(k: &Ctx, t: usize, seed: u64, us: &mut Vec<Unit>, out: &mut Vec<Un
             } else if !wander {
                 costs(&mut cs, m, c, |i| inp.hq[i], INF, k.prev, DK);
             }
+            // zombies off the rush send a share of their parcels for the HQ anyway
+            let pull = if zombie && !inp.rush { inp.pull } else { 0.0 };
+            let mut ch = [f32::INFINITY; 8];
+            if pull > 0.0 {
+                costs(&mut ch, m, c, |i| inp.hq[i], INF, k.prev, DK);
+            }
             // the members split into a few parcels, each moving the way one of them would: it picks
             // a neighbour, then attacks what stands there or takes one step (from a random spot in
             // the cell to a random spot in the neighbour), and the parcel goes wherever that lands
@@ -1217,14 +1230,23 @@ fn core_units(k: &Ctx, t: usize, seed: u64, us: &mut Vec<Unit>, out: &mut Vec<Un
                 let n = all / parcels + (j < all % parcels) as u32;
                 let r = xr(&mut s);
                 // (one draw feeds it all: neighbour, start and end spots, step length)
-                let d = if wander { (r >> 61) as i32 } else { pick(&cs, &k.jt[(r >> 56) as usize]) };
+                // (a pulled parcel heads for the HQ; other wanderers go anywhere)
+                let pulled = ((r >> 50) & 0x3f) as f32 * (1.0 / 64.0) < pull;
+                let roam = wander && !pulled;
+                let d = if pulled {
+                    pick(&ch, &k.jt[(r >> 56) as usize])
+                } else if roam {
+                    (r >> 61) as i32
+                } else {
+                    pick(&cs, &k.jt[(r >> 56) as usize])
+                };
                 if d < 0 || m & (1 << d) == 0 {
                     continue;
                 }
                 let nc = (c as isize + OFF[d as usize]) as usize;
                 let o = inp.obj[nc];
                 if o != FREE {
-                    if wander {
+                    if roam {
                     } else if o >= 0 {
                         if let Some(a) = inp.sd.get(o as usize) {
                             a.fetch_add((st.atk * inp.dt * DMG_SCALE * n as f32) as u32, Relaxed);

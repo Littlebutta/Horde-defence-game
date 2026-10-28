@@ -209,6 +209,8 @@ pub enum Strike {
         len: f32,
         bombs: Vec<(Vec2, f32, bool)>,
         line: (Vec2, Vec2),
+        /// the bombs leave burning napalm (Napalm bombs)
+        napalm: bool,
     },
     Icbm {
         from: Vec2,
@@ -328,7 +330,7 @@ pub struct Weapon {
     pub rocket: bool,
 }
 
-/// A war-drum orc: bigger and much tougher than the rest, it marches on the nearest HQ beating its
+/// A war-drum orc: a bigger pixel than the rest and a little tougher, it marches on the nearest HQ beating its
 /// drum. Orcs within earshot rally to it, and those close by go into a rage (fast, at full fury).
 pub struct Drummer {
     pub p: Vec2,
@@ -340,6 +342,17 @@ pub struct Drummer {
     pub beat: f32,
     pub dead: bool,
 }
+/// The first zombie outbreak's size before the threat (`horde_scale`), and how much bigger each next one is.
+pub const ZOMBIE_OUTBREAK: f32 = 500.0;
+pub const OUTBREAK_GROWTH: f32 = 2.0;
+
+/// How much bigger every horde is at a threat (the difficulty times the campaign's horde size):
+/// steeper than the threat itself, so the hardest cities send millions where the easiest send
+/// tens of thousands.
+pub fn horde_scale(m: f32) -> f32 {
+    libm::powf(m.max(0.05), 1.6)
+}
+
 /// How far its drum calls orcs to it, and how close they have to be to go into a rage.
 pub const DRUM_CALL: f32 = 70.0;
 pub const DRUM_RAGE: f32 = 18.0;
@@ -400,6 +413,8 @@ pub struct Research {
     pub barrels: bool,
     pub mounts: bool,
     pub perimeter: bool,
+    /// airstrike bombs leave burning napalm
+    pub napalm: bool,
     pub busy: Option<(R, f32)>,
 }
 impl Research {
@@ -413,6 +428,7 @@ impl Research {
             R::Barrels => self.barrels,
             R::Mounts => self.mounts,
             R::Perimeter => self.perimeter,
+            R::Napalm => self.napalm,
         }
     }
     pub fn set(&mut self, r: R) {
@@ -425,6 +441,7 @@ impl Research {
             R::Barrels => self.barrels = true,
             R::Mounts => self.mounts = true,
             R::Perimeter => self.perimeter = true,
+            R::Napalm => self.napalm = true,
         }
     }
 }
@@ -534,6 +551,11 @@ pub struct Game {
     pub rush_left: f32,
     pub rushes: u32,
     pub rush_forever: bool,
+    /// zombies off the rush: the share of their steps that head for the HQ anyway, which grows as
+    /// the civilians out on the map run out (see `zombie_mood`)
+    pub pull: f32,
+    /// share of the civilians still out on the map (-1: not counted yet)
+    civ_out: f32,
     pub out_t: f32,
     outbreaks: u32,
     pub drop_t: f32,
@@ -660,6 +682,8 @@ impl Game {
             rush_left: 0.0,
             rushes: 0,
             rush_forever: false,
+            pull: 0.0,
+            civ_out: -1.0,
             out_t: 70.0,
             outbreaks: 0,
             drop_t: 2.0,
@@ -707,7 +731,7 @@ impl Game {
             g.army = 0;
             for _ in 0..6 {
                 if let Some(p) = g.random_cell(3000) {
-                    g.queue(p, (6.0 * mult).max(3.0), 1.0);
+                    g.queue(p, (20.0 * horde_scale(mult)).max(3.0), 1.0);
                 }
             }
         }
@@ -1878,13 +1902,24 @@ impl Game {
             self.direct(self.fac, self.mult);
         }
     }
+    /// The share of the civilians still out on the map (0..1), and the zombies' pull on the HQ that
+    /// comes with it: with no one left to hunt, more and more of them head for the HQ.
+    fn zombie_mood(&mut self) -> f32 {
+        if self.ticks % 20 == 0 || self.civ_out < 0.0 {
+            let n = self.civs.len().max(1) as f32;
+            self.civ_out = self.civs.iter().filter(|c| c.st < C_DEAD).count() as f32 / n;
+        }
+        let out = self.civ_out;
+        self.pull = (0.85 * (1.0 - out)).clamp(0.0, 0.85);
+        out
+    }
     fn direct(&mut self, army: usize, m: f32) {
         match army {
             0 => {
                 self.out_t -= DT;
                 if self.out_t <= 0.0 {
                     self.outbreaks += 1;
-                    let n = (40.0 * 1.5f32.powi(self.outbreaks as i32) * m).round();
+                    let n = (ZOMBIE_OUTBREAK * OUTBREAK_GROWTH.powi(self.outbreaks as i32) * horde_scale(m)).round();
                     for _ in 0..2 {
                         if let Some(p) = self.random_cell(1500) {
                             self.queue(p, n / 2.0, 3.0);
@@ -1893,18 +1928,25 @@ impl Game {
                     self.show(format!("New outbreak: {} infected", n as u64), 4.0);
                     self.out_t = 70.0;
                 }
+                let out = self.zombie_mood();
+                if !self.rush_forever && out < 0.08 && self.time > 60.0 {
+                    self.rush_forever = true;
+                    self.show("No one left to eat: the dead swarm your HQ for good", 4.0);
+                }
                 if !self.rush_forever {
                     if self.rush {
                         self.rush_left -= DT;
                         if self.rush_left <= 0.0 {
                             self.rush = false;
-                            self.rush_t = 150.0;
+                            // the fewer people left out there, the sooner they come again
+                            self.rush_t = 150.0 * (0.3 + 0.7 * out);
                         }
                     } else {
-                        self.rush_t -= DT;
+                        // (they come on sooner, too, as the people run out)
+                        self.rush_t -= DT * (1.0 + (1.0 - out));
                         if self.rush_t <= 0.0 {
                             self.rush = true;
-                            self.rush_left = 40.0;
+                            self.rush_left = 40.0 + 40.0 * (1.0 - out);
                             self.rushes += 1;
                             if self.rushes >= 4 {
                                 self.rush_forever = true;
@@ -1921,7 +1963,7 @@ impl Game {
             1 => {
                 self.drop_t -= DT;
                 if self.drop_t <= 0.0 {
-                    let n = ((10.0 + self.time * 0.2) * m).round();
+                    let n = ((15.0 + self.time * 0.4) * horde_scale(m)).round();
                     if let Some(p) = self.random_cell(1800) {
                         // some drops are light flying bugs that cross rooftops and walls
                         if self.time > 40.0 && self.rng.f() < 0.22 {
@@ -1977,7 +2019,7 @@ impl Game {
                     let k = self.portals_opened;
                     self.portals_opened += 1;
                     let np = 1 + (k / 2).min(2);
-                    let size = (1500.0 * 1.45f32.powi(k as i32) * m).round();
+                    let size = (1500.0 * 1.55f32.powi(k as i32) * horde_scale(m)).round();
                     let mut drum = false;
                     for j in 0..np {
                         if let Some(p) = self.random_cell(2500) {
@@ -2147,6 +2189,7 @@ impl Game {
             hq_pos: self.world.hq,
             hunt: hunt.as_deref().map(|v| v.as_slice()),
             rush: self.rush,
+            pull: self.pull,
             stats,
             mixed: chaos.then(|| [FACTIONS[0].stats, FACTIONS[1].stats, FACTIONS[2].stats]),
             sd: &self.sd,
@@ -2468,7 +2511,7 @@ impl Game {
         if self.drummers.iter().filter(|d| !d.dead).count() >= DRUM_MAX {
             return;
         }
-        let hp = 2400.0 * self.mult.clamp(0.5, 3.0);
+        let hp = 700.0 * self.mult.clamp(0.5, 3.0);
         self.drummers.push(Drummer { p: at, hp, max: hp, hd: 0.0, beat: 0.0, dead: false });
     }
 
@@ -3208,10 +3251,15 @@ impl Game {
                 _ => {}
             }
         }
-        // burning napalm
+        // burning napalm: whatever stands in it or walks through it burns, war-drum orcs too
         for n in &mut self.napalm {
             n.t -= DT;
             self.swarm.add_damage(n.p.x, n.p.y, n.r, n.dmg, 0);
+            for d in &mut self.drummers {
+                if d.p.distance(n.p) < n.r + 1.5 {
+                    d.hp -= n.dmg;
+                }
+            }
         }
         self.napalm.retain(|n| n.t > 0.0);
         // shells in the air
@@ -3392,6 +3440,7 @@ impl Game {
             }
             A::Air => {
                 let upgraded = self.res(o).air;
+                let napalm = self.res(o).napalm;
                 // the run is drawn from `from` to `to`; a plain click gets a short run through it
                 let (start, end) = if from.distance(to) > 8.0 {
                     (from, from + (to - from).clamp_length_max(AIR_RUN_MAX))
@@ -3423,6 +3472,7 @@ impl Game {
                     len: back * 2.0 + seg.length(),
                     bombs,
                     line: (start, end),
+                    napalm,
                 });
             }
             A::Gunship => {
@@ -3489,7 +3539,7 @@ impl Game {
         let mut irradiate: Vec<(Vec2, f32)> = Vec::new();
         strikes.retain_mut(|s| match s {
             Strike::Air {
-                pos, len, bombs, ..
+                pos, len, bombs, napalm, ..
             } => {
                 *pos += 170.0 * DT;
                 for b in bombs.iter_mut() {
@@ -3497,6 +3547,9 @@ impl Game {
                         b.2 = true;
                         blasts.push((b.0, 12.0, 600.0, 300.0, 0, 450.0));
                         self.sfx.push((Sfx::Bomb, b.0));
+                        if *napalm {
+                            self.napalm.push(Napalm { p: b.0, r: AIR_NAPALM_R, t: AIR_NAPALM_LIFE, dmg: AIR_NAPALM_DPS * DT });
+                        }
                     }
                 }
                 *pos < *len
@@ -4130,7 +4183,7 @@ impl Game {
                 continue;
             };
             self.portals[k].taken += 1;
-            let n = (60.0 * self.mult * (1.0 + self.portals[k].taken as f32 * 0.1).min(2.5)).round();
+            let n = (60.0 * horde_scale(self.mult) * (1.0 + self.portals[k].taken as f32 * 0.1).min(2.5)).round();
             let at = (self.portals[k].p.x, self.portals[k].p.y);
             self.queue_army(at, n, 3.0, 0, 1.0, 2);
             self.show(
@@ -4891,7 +4944,7 @@ impl Game {
 
     /// Alien hives: spawn waves (bigger for every infected building), grow, infect, die.
     fn hives_tick(&mut self) {
-        let m = self.mult;
+        let m = horde_scale(self.mult);
         let mut waves = Vec::new();
         let mut msgs = Vec::new();
         for hi in 0..self.hives.len() {
@@ -5204,5 +5257,147 @@ mod tests {
         g.perks[0].ups = RIFLE_UPS.to_vec();
         let w = g.weapon(U::Rifle, 0);
         assert!(w.rocket && w.dmg > base.dmg * 3.0 && w.rad <= 2.5 && w.rad < def(S::Cannon).rad);
+    }
+}
+#[cfg(test)]
+mod horde_size_probe {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn horde_sizes() {
+        let fac: usize = std::env::var("PF").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        for m in [0.35f32, 1.0, 2.6, 5.0] {
+            let mut g = Game::new(crate::citygen::generate(3), fac, m, 7);
+            let mut row = format!("fac {} m {:4.2}:", fac, m);
+            let t0 = std::time::Instant::now();
+            for min in 1..=9 {
+                for _ in 0..1200 {
+                    for &h in &g.hqs.clone() {
+                        g.structs[h].hp = 1e12;
+                    }
+                    g.tick();
+                }
+                let civ = g.civs.iter().filter(|c| c.st < C_DEAD).count();
+                row += &format!(" {}m={}k/c{}", min, g.swarm.len() / 1000, civ);
+            }
+            println!("{} ({:.0}s)", row, t0.elapsed().as_secs_f32());
+        }
+    }
+}
+
+#[cfg(test)]
+mod horde_tests {
+    use super::*;
+
+    fn mean_hq_dist(g: &Game) -> f32 {
+        let (mut s, mut n) = (0.0f64, 0.0f64);
+        for u in g.swarm.units() {
+            s += vec2(u.x, u.y).distance(g.world.hq) as f64 * u.n as f64;
+            n += u.n as f64;
+        }
+        (s / n.max(1.0)) as f32
+    }
+
+    /// Napalm on the ground hurts whatever stands in it or walks through it: a horde marching out
+    /// over a pool loses health (the flame bunker's) or dies (an airstrike's).
+    #[test]
+    fn napalm_burns_walkers() {
+        let run = |dps: f32| {
+            let mut g = Game::new(crate::citygen::generate(11), 2, 1.0, 5);
+            let at = g.random_cell(1500).unwrap();
+            g.army = 2;
+            g.queue(at, 300.0, 0.5);
+            g.tick();
+            if dps > 0.0 {
+                g.napalm.push(Napalm { p: vec2(at.0, at.1), r: 8.0, t: 30.0, dmg: dps * DT });
+            }
+            let k0 = g.kills;
+            for _ in 0..60 {
+                g.tick();
+            }
+            let hp: f32 = g.swarm.units().map(|u| u.hp * u.n as f32).sum();
+            (g.kills - k0, hp, g.swarm.len())
+        };
+        let (cold, flame, air) = (run(0.0), run(NAPALM_DPS), run(AIR_NAPALM_DPS));
+        println!("no fire {:?}, flame bunker {:?}, airstrike {:?}", cold, flame, air);
+        assert!(flame.1 < cold.1 * 0.9, "a flame bunker's napalm burns the orcs going through it");
+        assert!(air.0 > cold.0 + 100, "an airstrike's napalm kills them");
+    }
+
+    /// With Napalm bombs, each airstrike bomb leaves a pool that burns for 10 s.
+    #[test]
+    fn airstrike_napalm() {
+        let mut g = Game::new(crate::citygen::generate(11), 0, 1.0, 5);
+        let at = g.random_cell(800).map(|p| vec2(p.0, p.1)).unwrap();
+        g.strikes.push(Strike::Air { from: at - vec2(10.0, 0.0), dir: vec2(1.0, 0.0), pos: 0.0, len: 40.0, bombs: vec![(at, 10.0, false)], line: (at, at), napalm: true });
+        for _ in 0..5 {
+            g.tick();
+        }
+        assert_eq!(g.napalm.len(), 1);
+        for _ in 0..((AIR_NAPALM_LIFE - 1.0) / DT) as usize {
+            g.tick();
+        }
+        assert_eq!(g.napalm.len(), 1, "still burning");
+        for _ in 0..(2.0 / DT) as usize {
+            g.tick();
+        }
+        assert!(g.napalm.is_empty(), "burnt out after 10 s");
+    }
+
+    /// No cell a building's walls cover, even partly, is open ground for the horde.
+    #[test]
+    fn buildings_cover_their_edge_cells() {
+        let g = Game::new(crate::citygen::generate(11), 0, 1.0, 5);
+        let mut checked = 0;
+        for b in &g.world.buildings {
+            let n = b.poly.len();
+            for i in 0..n {
+                let (a, e) = (b.poly[i], b.poly[(i + 1) % n]);
+                // (just inside the wall, whichever way round the outline runs)
+                let inward = (e - a).perp().normalize_or_zero() * if crate::world::poly_area(&b.poly) > 0.0 { 1.0 } else { -1.0 };
+                for k in 0..8 {
+                    let p = a + (e - a) * ((k as f32 + 0.5) / 8.0) + inward * 0.35;
+                    let c = p.y as usize * W + p.x as usize;
+                    let t = g.world.terrain[c];
+                    if t == T_ROAD || t == T_WATER || t == T_RUNWAY {
+                        continue;
+                    }
+                    assert!(g.obj[c] != FREE, "edge cell of a building at {:?} is open: terrain {} bid {} poly {:?}", p, t, g.world.bid[c], b.poly);
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 1000);
+    }
+
+    /// Zombies head for the HQ more the fewer civilians are left out on the map.
+    #[test]
+    fn zombies_press_when_civilians_run_out() {
+        let run = |gone: f32| {
+            let mut g = Game::new(crate::citygen::generate(11), 0, 1.0, 5);
+            let n = g.civs.len();
+            for c in g.civs.iter_mut().take((n as f32 * gone) as usize) {
+                c.st = C_GONE;
+            }
+            g.stress_n(20000.0);
+            for _ in 0..100 {
+                g.tick();
+            }
+            let d0 = mean_hq_dist(&g);
+            for _ in 0..500 {
+                g.tick();
+            }
+            assert!(!g.rush, "no rush yet");
+            println!("gone {} pull {} d0 {} d1 {} n {}", gone, g.pull, d0, mean_hq_dist(&g), g.swarm.len());
+            d0 - mean_hq_dist(&g)
+        };
+        let (calm, angry) = (run(0.0), run(0.7));
+        assert!(angry > calm + 20.0, "closed in {} vs {}", angry, calm);
+    }
+
+    /// The hordes grow much faster than the threat.
+    #[test]
+    fn hordes_scale_with_threat() {
+        assert!(horde_scale(5.0) > 12.0 && horde_scale(0.35) < 0.2);
     }
 }

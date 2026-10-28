@@ -78,6 +78,10 @@ pub const DEPOT_AMMO: f32 = 2000.0;
 pub const FLAME_SPRAY: f32 = 1.0;
 pub const NAPALM_LIFE: f32 = 1.6;
 pub const NAPALM_DPS: f32 = 14.0;
+/// How long the napalm an airstrike bomb leaves burns (with Napalm bombs), how wide and how hard.
+pub const AIR_NAPALM_LIFE: f32 = 10.0;
+pub const AIR_NAPALM_R: f32 = 8.0;
+pub const AIR_NAPALM_DPS: f32 = 40.0;
 /// Seconds a railgun charges before it fires.
 pub const RAIL_CHARGE: f32 = 1.2;
 /// Scrap an ammo plant burns each second (for 6 ammo, or 10 with Shell presses).
@@ -342,10 +346,12 @@ pub enum R {
     Mounts,
     /// a solid wall (with gates across the streets) around the base zone
     Perimeter,
+    Napalm,
 }
-pub const RESEARCH: [R; 8] = [R::Rescue, R::Carpet, R::Nuke, R::Armour, R::Presses, R::Barrels, R::Mounts, R::Perimeter];
-/// Lab topics that aren't tied to an ability (those show on the ability panel instead).
-pub const LAB_ONLY: [R; 4] = [R::Armour, R::Presses, R::Barrels, R::Mounts];
+/// (new topics go at the end: co-op commands send their index)
+pub const RESEARCH: [R; 9] = [R::Rescue, R::Carpet, R::Nuke, R::Armour, R::Presses, R::Barrels, R::Mounts, R::Perimeter, R::Napalm];
+/// Lab topics that aren't the ability panel's one upgrade for an ability.
+pub const LAB_ONLY: [R; 5] = [R::Armour, R::Presses, R::Barrels, R::Mounts, R::Napalm];
 pub struct RDef {
     pub name: &'static str,
     pub tip: &'static str,
@@ -361,6 +367,7 @@ pub fn rdef(r: R) -> &'static RDef {
     static ARMOUR: RDef = RDef { name: "Reinforced armour", tip: "Walls and turrets get 75% more health", cost: 700.0, civs: 150 };
     static PRESSES: RDef = RDef { name: "Shell presses", tip: "Ammo plants make 10 ammo a second instead of 6 from the same scrap", cost: 800.0, civs: 180 };
     static BARRELS: RDef = RDef { name: "Long barrels", tip: "Turrets reach 25% further", cost: 1000.0, civs: 220 };
+    static NAPALM: RDef = RDef { name: "Napalm bombs", tip: "Every airstrike bomb leaves a pool of burning napalm that hurts anything passing through it for 10 s", cost: 1100.0, civs: 260 };
     static MOUNTS: RDef = RDef { name: "Turret mounts", tip: "A turret can be built on top of a bunker, where it gets the rooftop range bonus (+60%)", cost: 600.0, civs: 140 };
     static PERIMETER: RDef = RDef { name: "Perimeter wall", tip: "A solid wall rings the base zone, with gates across every street so civilians and troops can still get in. It follows the zone out when an outpost pushes it", cost: 500.0, civs: 120 };
     match r {
@@ -372,6 +379,7 @@ pub fn rdef(r: R) -> &'static RDef {
         R::Presses => &PRESSES,
         R::Barrels => &BARRELS,
         R::Mounts => &MOUNTS,
+        R::Napalm => &NAPALM,
     }
 }
 /// Campaign-only turret upgrades, two for each kind of turret, bought with research points.

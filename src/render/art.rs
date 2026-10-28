@@ -1093,49 +1093,6 @@ pub fn scaffold(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, f: f32
     strut(mb, ring[3], base, ring[2], zb, 0.05, pole);
 }
 
-/// A war-drum orc: a hulking orange brute about three cells across, a big drum slung in front that
-/// it pounds with both arms on every beat (`beat` 0..1). Returns the top of its head.
-pub fn drummer(mb: &mut MB, p: Vec2, hd: f32, beat: f32, t: f32) -> f32 {
-    let skin = rgb(214, 104, 34);
-    let dark = rgb(120, 50, 10);
-    let hide = rgb(92, 64, 40);
-    let fwd = vec2(libm::cosf(hd), libm::sinf(hd));
-    let side = vec2(-fwd.y, fwd.x);
-    // a slight bob with the march
-    let bob = 0.12 * (t * 6.0).sin().abs();
-    // legs and a hide kilt
-    for s in [-1.0f32, 1.0] {
-        let q = p + side * 0.55 * s;
-        block(mb, &rect(q, -0.32, -0.32, 0.32, 0.32, hd), 0.0, 1.0, dark, dark);
-    }
-    loft(mb, &ngon(p, 1.05, 8, hd), &ngon(p, 0.85, 8, hd), 0.8, 1.4, None, hide);
-    // a barrel chest, hunched forward
-    let chest = p + fwd * 0.15;
-    loft(mb, &ngon(chest, 1.0, 10, hd), &ngon(chest + fwd * 0.2, 1.15, 10, hd), 1.3 + bob, 2.6 + bob, Some(skin), skin);
-    // shoulders and a small head with tusks
-    let head = chest + fwd * 0.45;
-    cyl(mb, head, 0.5, 2.6 + bob, 3.2 + bob, skin, mix(skin, dark, 0.3));
-    for s in [-1.0f32, 1.0] {
-        let tusk = head + fwd * 0.45 + side * 0.22 * s;
-        strut(mb, tusk, 2.75 + bob, tusk + fwd * 0.12, 3.05 + bob, 0.05, rgb(236, 228, 210));
-    }
-    // the drum, slung across the belly
-    let drum = p + fwd * 1.25;
-    cyl(mb, drum, 0.85, 1.1, 2.0, rgb(232, 214, 176), rgb(150, 70, 30));
-    band(mb, &ngon(drum, 0.85, 20, 0.0), 1.25, 1.35, rgb(60, 36, 20));
-    band(mb, &ngon(drum, 0.85, 20, 0.0), 1.75, 1.85, rgb(60, 36, 20));
-    // arms raised between beats, down on the skin when it lands
-    let lift = (beat * 1.4).min(1.0) * 0.9;
-    for s in [-1.0f32, 1.0] {
-        let sh = chest + side * 1.0 * s + fwd * 0.1;
-        let hand = drum + side * 0.35 * s + fwd * -0.1;
-        strut(mb, sh, 2.4 + bob, hand, 2.05 + lift, 0.2, skin);
-        // a bone drumstick
-        strut(mb, hand, 2.05 + lift, hand + fwd * 0.3, 1.95 + lift * 0.6, 0.06, rgb(236, 228, 210));
-    }
-    3.2 + bob
-}
-
 // ------------------------------------------------------------------------------------------ hives
 
 /// An alien hive: a clump of lumpy pods around a big central mound, chitin spires, glowing pores

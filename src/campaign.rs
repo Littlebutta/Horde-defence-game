@@ -121,7 +121,7 @@ pub enum Tech {
 pub const START_BUILDS: [S; 6] = [S::Wall, S::Gate, S::Bunker, S::Extractor, S::Pad, S::Rescue];
 
 /// The whole tree, in the order the campaign screen lists it. Saves store indices into it, so new entries go at the end.
-pub const TECH: [Tech; 42] = [
+pub const TECH: [Tech; 43] = [
     Tech::Build(S::Gun),
     Tech::Build(S::Cannon),
     Tech::Build(S::Flame),
@@ -164,6 +164,7 @@ pub const TECH: [Tech; 42] = [
     Tech::Up(Up::RifleRocket),
     Tech::Build(S::Custom),
     Tech::Research(R::Perimeter),
+    Tech::Research(R::Napalm),
 ];
 
 /// Turrets that shoot ammo: the first one unlocked brings the ammo plant with it.
@@ -239,7 +240,7 @@ impl Tech {
             Tech::Build(s) if shoots(s) || s == S::Helium => "Turrets",
             Tech::Build(_) | Tech::Unit(_) | Tech::Hq(_) => "Support",
             Tech::Up(u) if RIFLE_UPS.contains(&u) => "Support",
-            Tech::Ability(_) | Tech::Research(R::Rescue | R::Carpet | R::Nuke) => "Abilities",
+            Tech::Ability(_) | Tech::Research(R::Rescue | R::Carpet | R::Nuke | R::Napalm) => "Abilities",
             Tech::Research(R::Perimeter) => "Support",
             Tech::Research(_) => "Research",
             Tech::Up(_) => "Turret upgrades",
@@ -258,7 +259,7 @@ impl Tech {
             Tech::Unit(U::Tank) => Some(Tech::Research(R::Armour)),
             Tech::Ability(A::Gunship) => Some(Tech::Ability(A::Air)),
             Tech::Research(R::Rescue) => Some(Tech::Ability(A::Rescue)),
-            Tech::Research(R::Carpet) => Some(Tech::Ability(A::Air)),
+            Tech::Research(R::Carpet | R::Napalm) => Some(Tech::Ability(A::Air)),
             Tech::Research(R::Nuke) => Some(Tech::Build(S::Silo)),
             Tech::Research(R::Presses | R::Barrels | R::Mounts) => Some(Tech::Build(S::Gun)),
             _ => None,

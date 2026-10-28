@@ -1315,6 +1315,11 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
         mb.disc(d.p, DRUM_RAGE, rgba(255, 110, 30, 0.07 + 0.05 * (1.0 - f)));
         ring(&mut mb, d.p, DRUM_RAGE, 0.5, rgba(255, 140, 50, 0.5));
         ring(&mut mb, d.p, 3.0 + f * (DRUM_CALL - 3.0), 0.9 * (1.0 - f) + 0.2, Color::new(1.0, 0.55, 0.2, 0.55 * (1.0 - f)));
+        // the drummer itself: one big pixel among the orcs' small ones, swelling on every beat
+        let h = 1.5 + 0.35 * (1.0 - f) * (1.0 - f);
+        let (lo, hi) = (d.p - vec2(h, h), d.p + vec2(h, h));
+        mb.quad(vec2(lo.x - 0.3, lo.y - 0.3), vec2(hi.x + 0.3, lo.y - 0.3), vec2(hi.x + 0.3, hi.y + 0.3), vec2(lo.x - 0.3, hi.y + 0.3), rgb(90, 20, 0));
+        mb.quad(lo, vec2(hi.x, lo.y), hi, vec2(lo.x, hi.y), mix(rgb(230, 60, 10), rgb(255, 200, 120), 0.5 * (1.0 - f) * (1.0 - f)));
     }
     // explosions on the ground
     for b in &g.booms {
@@ -1515,9 +1520,9 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels, painter: bool
         if d.dead || !inview(d.p, 10.0) {
             continue;
         }
+        // (the drummer is drawn on the ground as a big pixel; only its health floats above it)
         mb.obj(d.p, 0.0);
-        let top = art::drummer(&mut mb, d.p, d.hd, d.beat / DRUM_BEAT, t);
-        bar(&mut mb, d.p + vec2(0.0, -3.0), top + 1.2, 6.0, d.hp / d.max, rgb(255, 140, 50));
+        bar(&mut mb, d.p + vec2(0.0, -3.0), 1.5, 6.0, d.hp / d.max, rgb(255, 140, 50));
     }
     // hives: a living mound of pods
     for h in &g.hives {
