@@ -23,8 +23,8 @@ static AMBIENCE: [&[u8]; 1] = [include_bytes!("../assets/sfx/ambience.mp3")];
 /// Devin's war drum, looped while a war-drum orc is on the map.
 static DRUM: &[u8] = include_bytes!("../assets/sfx/orc-wardrum.mp3");
 const DRUM_GAIN: f32 = 0.55;
-/// seconds the drum takes to fade in or out
-const DRUM_FADE: f32 = 0.8;
+/// seconds a loop (the drum, engines, rotors...) takes to fade in or out
+const LOOP_FADE: f32 = 0.8;
 
 /// The news broadcast, from Devin's recordings: an opener, a report about the army in the game
 /// (indexed like `FACTIONS`: zombies, aliens, orcs) and a closer, over the newsroom bed.
@@ -75,7 +75,8 @@ const BED_GAIN: f32 = 0.16;
 const BED_LEAD: f32 = 1.2;
 const BED_FADE: f32 = 1.5;
 
-/// The sound effects, by the name of the file Devin made them for.
+/// The sound effects: Devin's recordings first, then the ones made by tools/make_sfx.py for
+/// everything that had no sound of its own (assets/sfx/gen).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Snd {
     Cannon,
@@ -88,28 +89,120 @@ pub enum Snd {
     Nuke,
     Button,
     BaseAttacked,
+    Rifle,
+    Gunship,
+    Jet,
+    Launch,
+    Radio,
+    ZombieGroan,
+    ZombieRush,
+    BugDrop,
+    Hive,
+    OrcPortal,
+    OrcWarcry,
+    Death,
+    TankLost,
+    Place,
+    Sell,
+    Wrecked,
+    Collapse,
+    HqFallen,
+    LowAmmo,
+    Error,
+    Rescue,
+    Evac,
+    Win,
+    GameOver,
+    ResearchStart,
+    ResearchDone,
+    TechUnlock,
+    Inbound,
+    Join,
+    Leave,
 }
-const SNDS: usize = 10;
-static SFX: [&[u8]; SNDS] = [
-    include_bytes!("../assets/sfx/cannon-shell.wav"),
-    include_bytes!("../assets/sfx/artillery-shot.mp3"),
-    include_bytes!("../assets/sfx/artillery-explosion.mp3"),
-    include_bytes!("../assets/sfx/flame-bunker.mp3"),
-    include_bytes!("../assets/sfx/railgun.wav"),
-    include_bytes!("../assets/sfx/gun-turret.mp3"),
-    include_bytes!("../assets/sfx/helicopter-fire.mp3"),
-    include_bytes!("../assets/sfx/icbm-explosion.mp3"),
-    include_bytes!("../assets/sfx/button.mp3"),
-    include_bytes!("../assets/sfx/base-attacked.mp3"),
+const SNDS: usize = 40;
+/// One effect: the clip, at most `voices` copies at once with a new copy at least `gap_ms` after
+/// the last (so a hundred cannons firing together stay a rumble instead of a wall of noise), and
+/// `cut` seconds of it played (0: all of it), ending in a short fade.
+struct Fx {
+    bytes: &'static [u8],
+    voices: usize,
+    gap_ms: u64,
+    cut: f32,
+}
+const fn fx(bytes: &'static [u8], voices: usize, gap_ms: u64) -> Fx {
+    Fx { bytes, voices, gap_ms, cut: 0.0 }
+}
+macro_rules! gen {
+    ($name:literal) => {
+        include_bytes!(concat!("../assets/sfx/gen/", $name, ".wav"))
+    };
+}
+/// In the order of `Snd`. The gun turret plays once per shot, so its long ringing tail is cut to
+/// a crack that fits between shots.
+static SFX: [Fx; SNDS] = [
+    fx(include_bytes!("../assets/sfx/cannon-shell.wav"), 5, 70),
+    fx(include_bytes!("../assets/sfx/artillery-shot.mp3"), 3, 120),
+    fx(include_bytes!("../assets/sfx/artillery-explosion.mp3"), 5, 90),
+    fx(include_bytes!("../assets/sfx/flame-bunker.mp3"), 3, 250),
+    fx(include_bytes!("../assets/sfx/railgun.wav"), 3, 150),
+    Fx { cut: 0.2, ..fx(include_bytes!("../assets/sfx/gun-turret.mp3"), 10, 15) },
+    fx(include_bytes!("../assets/sfx/helicopter-fire.mp3"), 3, 200),
+    fx(include_bytes!("../assets/sfx/icbm-explosion.mp3"), 2, 300),
+    fx(include_bytes!("../assets/sfx/button.mp3"), 2, 40),
+    fx(include_bytes!("../assets/sfx/base-attacked.mp3"), 1, 20_000),
+    fx(gen!("rifle"), 6, 45),
+    fx(gen!("gunship"), 2, 1500),
+    fx(gen!("jet"), 2, 1500),
+    fx(gen!("launch"), 2, 1000),
+    fx(gen!("radio"), 1, 600),
+    fx(gen!("zombie-groan"), 2, 2000),
+    fx(gen!("zombie-rush"), 1, 4000),
+    fx(gen!("bug-drop"), 2, 800),
+    fx(gen!("hive"), 1, 2000),
+    fx(gen!("orc-portal"), 2, 1000),
+    fx(gen!("orc-warcry"), 2, 1500),
+    fx(gen!("death"), 3, 120),
+    fx(gen!("tank-lost"), 2, 300),
+    fx(gen!("place"), 3, 60),
+    fx(gen!("sell"), 2, 150),
+    fx(gen!("wrecked"), 3, 200),
+    fx(gen!("collapse"), 3, 500),
+    fx(gen!("hq-fallen"), 1, 3000),
+    fx(gen!("low-ammo"), 1, 3000),
+    fx(gen!("error"), 1, 250),
+    fx(gen!("rescue"), 2, 300),
+    fx(gen!("evac"), 2, 1000),
+    fx(gen!("win"), 1, 3000),
+    fx(gen!("game-over"), 1, 3000),
+    fx(gen!("research-start"), 1, 200),
+    fx(gen!("research-done"), 1, 500),
+    fx(gen!("tech-unlock"), 1, 300),
+    fx(gen!("inbound"), 1, 2500),
+    fx(gen!("join"), 1, 300),
+    fx(gen!("leave"), 1, 300),
 ];
-/// at most this many copies of one effect play at once, and a new copy waits this long after the
-/// last one, so a hundred cannons firing together stay a rumble instead of a wall of noise
-const VOICES: [usize; SNDS] = [5, 3, 5, 3, 3, 10, 3, 2, 2, 1];
-const GAP_MS: [u64; SNDS] = [70, 120, 90, 250, 150, 15, 200, 300, 40, 20_000];
-/// seconds of each clip that play (0: all of it), ending in a short fade. The gun turret plays
-/// once per shot, so its long ringing tail is cut to a crack that fits between shots.
-const CUT_S: [f32; SNDS] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.0];
 const CUT_FADE_S: f32 = 0.06;
+
+/// Sounds that loop for as long as something is on the map, each at a loudness the game sets
+/// every frame (`Music::set_loop`), eased in and out.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Lp {
+    /// Devin's war drum, while a war-drum orc is out
+    Drum,
+    /// tanks on the move
+    Engine,
+    /// gunships and helicopters in the air
+    Rotor,
+    /// extractors and ammo plants at work
+    Factory,
+    /// helium towers spraying
+    Helium,
+}
+const LOOPS: usize = 5;
+static LOOP_SRC: [&[u8]; LOOPS] = [DRUM, gen!("engine-loop"), gen!("rotor-loop"), gen!("factory-loop"), gen!("helium-loop")];
+/// each loop's loudness at full (before the effects volume)
+const LOOP_GAIN: [f32; LOOPS] = [DRUM_GAIN, 0.35, 0.4, 0.14, 0.16];
 
 /// seconds each music crossfade takes; the end of a track fades out while the next fades in
 const FADE: f32 = 6.0;
@@ -151,8 +244,8 @@ pub struct Music {
     news_vol: Arc<AtomicU32>,
     /// the battle ambience plays while this is set (a game is on screen)
     amb: Arc<AtomicBool>,
-    /// the war drum's loudness, 0..=1000 (0: not playing)
-    drum: Arc<AtomicU32>,
+    /// each loop's loudness (see `Lp`), 0..=1000 (0: not playing)
+    loops: Arc<[AtomicU32; LOOPS]>,
     tx: Option<mpsc::Sender<Cmd>>,
 }
 
@@ -163,14 +256,14 @@ impl Music {
             sfx_vol: Arc::new(AtomicU32::new(sfx.min(100))),
             news_vol: Arc::new(AtomicU32::new(news.min(100))),
             amb: Arc::new(AtomicBool::new(false)),
-            drum: Arc::new(AtomicU32::new(0)),
+            loops: Arc::new(std::array::from_fn(|_| AtomicU32::new(0))),
             tx: None,
         };
         // headless test runs and the city fetcher stay silent (PH_SOUND=1 turns sound back on)
         let quiet = ["PH_SHOT", "PH_FETCH", "PH_NETTEST"].iter().any(|k| std::env::var(k).is_ok()) && std::env::var("PH_SOUND").is_err();
         if !quiet {
             let (tx, rx) = mpsc::channel();
-            let (v, s, n, a, d) = (m.vol.clone(), m.sfx_vol.clone(), m.news_vol.clone(), m.amb.clone(), m.drum.clone());
+            let (v, s, n, a, d) = (m.vol.clone(), m.sfx_vol.clone(), m.news_vol.clone(), m.amb.clone(), m.loops.clone());
             if std::thread::Builder::new().name("audio".into()).spawn(move || player(v, s, n, a, d, rx)).is_ok() {
                 m.tx = Some(tx);
             }
@@ -189,9 +282,9 @@ impl Music {
     pub fn ambience(&self, on: bool) {
         self.amb.store(on, Ordering::Relaxed);
     }
-    /// The war drum loops at this loudness (0..1) while it's above 0.
-    pub fn drum(&self, gain: f32) {
-        self.drum.store((gain.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
+    /// A loop plays at this loudness (0..1) while it's above 0.
+    pub fn set_loop(&self, l: Lp, gain: f32) {
+        self.loops[l as usize].store((gain.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
     }
     pub fn play(&self, p: Play) {
         if let Some(tx) = &self.tx {
@@ -488,19 +581,19 @@ impl Source for Voice {
     }
 }
 
-fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, drum_gain: Arc<AtomicU32>, rx: mpsc::Receiver<Cmd>) {
+fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>, amb: Arc<AtomicBool>, loop_gain: Arc<[AtomicU32; LOOPS]>, rx: mpsc::Receiver<Cmd>) {
     // no audio device: no sound, the game carries on
     let Ok((_stream, handle)) = OutputStream::try_default() else { return };
     let mut rng = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
     let mut music = Playlist::new(&TRACKS, FADE);
     let mut ambience = Playlist::new(&AMBIENCE, AMB_FADE);
-    let clips: Vec<Option<Clip>> = SFX.iter().zip(CUT_S).map(|(b, cut)| decode(b, cut)).collect();
+    let clips: Vec<Option<Clip>> = SFX.iter().map(|f| decode(f.bytes, f.cut)).collect();
     let mut last_play = [Instant::now() - Duration::from_secs(1); SNDS];
     let mut keyed: Vec<(u64, Arc<AtomicBool>)> = Vec::new();
     let mut news: Option<News> = None;
-    // the war drum: one endless loop, eased in and out
-    let mut drum: Option<Sink> = None;
-    let mut drum_level = 0.0f32;
+    // the loops: each one endless, eased in and out
+    let mut loops: [Option<Sink>; LOOPS] = Default::default();
+    let mut loop_level = [0.0f32; LOOPS];
     let mut t = Instant::now();
     loop {
         let dt = t.elapsed().as_secs_f32().min(0.5);
@@ -517,21 +610,24 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>
         if news.as_mut().is_some_and(|n| !n.update(in_game, nv, dt)) {
             news = None;
         }
-        let want = if in_game { drum_gain.load(Ordering::Relaxed) as f32 / 1000.0 } else { 0.0 };
-        drum_level = if want > drum_level { (drum_level + dt / DRUM_FADE).min(want) } else { (drum_level - dt / DRUM_FADE).max(want) };
-        if drum_level > 0.0 && drum.is_none() {
-            drum = Decoder::new(Cursor::new(DRUM)).ok().and_then(|dec| {
-                let sink = Sink::try_new(&handle).ok()?;
-                sink.set_volume(0.0);
-                sink.append(dec.repeat_infinite());
-                Some(sink)
-            });
-        }
-        if drum_level <= 0.0 {
-            drum = None;
-        }
-        if let Some(d) = &drum {
-            d.set_volume(drum_level * sv * DRUM_GAIN);
+        for k in 0..LOOPS {
+            let want = if in_game { loop_gain[k].load(Ordering::Relaxed) as f32 / 1000.0 } else { 0.0 };
+            let lv = &mut loop_level[k];
+            *lv = if want > *lv { (*lv + dt / LOOP_FADE).min(want) } else { (*lv - dt / LOOP_FADE).max(want) };
+            if *lv > 0.0 && loops[k].is_none() {
+                loops[k] = Decoder::new(Cursor::new(LOOP_SRC[k])).ok().and_then(|dec| {
+                    let sink = Sink::try_new(&handle).ok()?;
+                    sink.set_volume(0.0);
+                    sink.append(dec.repeat_infinite());
+                    Some(sink)
+                });
+            }
+            if *lv <= 0.0 {
+                loops[k] = None;
+            }
+            if let Some(l) = &loops[k] {
+                l.set_volume(*lv * sv * LOOP_GAIN[k]);
+            }
         }
         // effects queued since the last step; wait for the next one for up to 50 ms
         let deadline = t + Duration::from_millis(50);
@@ -566,7 +662,7 @@ fn player(vol: Arc<AtomicU32>, sfx_vol: Arc<AtomicU32>, news_vol: Arc<AtomicU32>
             let Some(c) = &clips[k] else { continue };
             let now = Instant::now();
             let g = p.gain.clamp(0.0, 1.0) * sv * SFX_GAIN;
-            if g < 0.003 || c.playing.load(Ordering::Relaxed) >= VOICES[k] || now - last_play[k] < Duration::from_millis(GAP_MS[k]) {
+            if g < 0.003 || c.playing.load(Ordering::Relaxed) >= SFX[k].voices || now - last_play[k] < Duration::from_millis(SFX[k].gap_ms) {
                 continue;
             }
             last_play[k] = now;
@@ -608,7 +704,7 @@ mod tests {
     }
     #[test]
     fn stopped_voice_fades_out() {
-        let c = decode(SFX[Snd::Flame as usize], 0.0).unwrap();
+        let c = decode(SFX[Snd::Flame as usize].bytes, 0.0).unwrap();
         let stopped = Arc::new(AtomicBool::new(false));
         c.playing.fetch_add(1, Ordering::Relaxed);
         let mut v = Voice { data: c.data.clone(), i: 0, rate: c.rate, gl: 1.0, gr: 1.0, playing: c.playing.clone(), stopped: stopped.clone(), fade: 1.0 };
@@ -622,6 +718,12 @@ mod tests {
         assert_eq!(c.playing.load(Ordering::Relaxed), 0);
     }
     #[test]
+    fn loops_decode() {
+        for b in LOOP_SRC {
+            assert!(length(b) > 1.0);
+        }
+    }
+    #[test]
     fn news_decodes() {
         let all = OPENERS.iter().chain(REPORTS.iter().flatten()).chain(CLOSERS.iter()).chain(ARRIVALS.iter().flatten());
         for b in all {
@@ -632,12 +734,13 @@ mod tests {
     }
     #[test]
     fn effects_decode() {
-        for b in SFX {
-            let c = decode(b, 0.0).expect("decodes");
+        for f in &SFX {
+            let c = decode(f.bytes, 0.0).expect("decodes");
             assert!(c.data.len() > 4_000);
         }
+        assert_eq!(Snd::Leave as usize + 1, SNDS);
         // the gun turret is cut to a short crack that ends in silence
-        let c = decode(SFX[Snd::Gun as usize], CUT_S[Snd::Gun as usize]).unwrap();
+        let c = decode(SFX[Snd::Gun as usize].bytes, SFX[Snd::Gun as usize].cut).unwrap();
         assert!(c.data.len() / 2 <= (0.21 * c.rate as f32) as usize);
         assert!(c.data[c.data.len() - 2..].iter().all(|v| v.abs() < 0.05));
     }

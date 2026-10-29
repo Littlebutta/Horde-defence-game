@@ -299,6 +299,52 @@ pub enum Sfx {
     BaseAttacked,
     /// a rocket rifleman fired
     Rocket,
+    /// a squad's rifles (one cue per squad per volley)
+    Rifle,
+    /// a gunship called in
+    Gunship,
+    /// a B-2 coming over, a couple of seconds before its first bomb
+    Jet,
+    /// an ICBM leaving its silo
+    Launch,
+    /// player `.0` called in an ability: the radio says it's on its way
+    Radio(u8),
+    /// a new zombie outbreak
+    Outbreak,
+    /// the zombies rush the HQ
+    Rush,
+    /// an alien drop lands
+    BugDrop,
+    /// an alien hive takes root
+    Hive,
+    /// an orc portal opens
+    Portal,
+    /// orcs charging in (a regroup charge, or out of a portal)
+    Warcry,
+    /// one of our soldiers fell
+    Death,
+    /// one of our tanks was destroyed
+    TankLost,
+    /// a structure bought and going up
+    Place,
+    /// a structure sold
+    Sell,
+    /// a structure destroyed by the horde
+    Wrecked,
+    /// a city building came down
+    Collapse,
+    /// an HQ fell while another still stands
+    HqFallen,
+    /// troops picked up or freed a civilian
+    Rescue,
+    /// an extraction flight took off
+    Evac,
+    /// player `.0` started a research topic
+    ResearchStart(u8),
+    /// player `.0`'s research finished
+    ResearchDone(u8),
+    /// a new wave is on its way
+    Inbound,
 }
 /// seconds between two base-under-attack alarms
 const ALARM_GAP: f32 = 30.0;
@@ -524,6 +570,8 @@ pub struct Game {
     pub hq_hit: (f32, u8),
     /// game time a rifle rocket last raised its sound
     rocket_snd: f32,
+    /// a structure is being sold (`kill_struct` then makes no wreck sound)
+    selling: bool,
     pub portals: Vec<Portal>,
     pub drummers: Vec<Drummer>,
     /// the war drums' pulls on the orcs, after the regroups' in the rally list (see `regroup`)
@@ -659,6 +707,7 @@ impl Game {
             alarm_at: -ALARM_GAP,
             hq_hit: (f32::NEG_INFINITY, 0),
             rocket_snd: -1.0,
+            selling: false,
             portals: Vec::new(),
             drummers: Vec::new(),
             drum_rallies: Vec::new(),
@@ -1434,6 +1483,7 @@ impl Game {
         let d = def(t);
         let i = self.add_struct_on(t, (c.x - d.w as f32 / 2.0) as i32, (c.y - d.h as f32 / 2.0) as i32, -1, b as i32);
         self.construct(i);
+        self.sfx.push((Sfx::Place, c));
         true
     }
     pub fn has_up(&self, o: usize, u: Up) -> bool {
@@ -1493,6 +1543,7 @@ impl Game {
         self.scrap -= cost;
         let i = self.add_struct(t, x, y, -1);
         self.construct(i);
+        self.sfx.push((Sfx::Place, c));
         true
     }
     /// Buys and places a turret on a rooftop.
@@ -1510,6 +1561,7 @@ impl Game {
             b as i32,
         );
         self.construct(i);
+        self.sfx.push((Sfx::Place, p));
         true
     }
 
@@ -1642,8 +1694,12 @@ impl Game {
         });
         let Some((i, s)) = hit else { return false };
         let refund = self.design_of(i).map_or(def(s.t).cost, |d| d.spec.cost) * 0.5;
+        let c = s.center();
         self.gain_scrap(refund);
+        self.selling = true;
         self.kill_struct(i);
+        self.selling = false;
+        self.sfx.push((Sfx::Sell, c));
         true
     }
 
@@ -1656,6 +1712,10 @@ impl Game {
             return;
         }
         self.structs[i].dead = true;
+        // (not for what a new game clears away before it starts)
+        if !self.selling && self.ticks > 0 && self.structs[i].t != S::Hq {
+            self.sfx.push((Sfx::Wrecked, self.structs[i].center()));
+        }
         let s = &self.structs[i];
         if !s.up() {
             for yy in s.y..s.y + s.h {
@@ -1688,6 +1748,7 @@ impl Game {
                 self.over = true;
             } else {
                 self.show("An HQ has fallen. Hold out at the others.", 6.0);
+                self.sfx.push((Sfx::HqFallen, self.structs[i].center()));
                 if i == self.hq_idx {
                     self.hq_idx = left[0];
                     self.world.hq = self.structs[left[0]].center();
@@ -1809,6 +1870,11 @@ impl Game {
             return;
         }
         bb.alive = false;
+        if self.ticks > 0 {
+            let c = vec2((bb.x0 + bb.x1) / 2.0, (bb.y0 + bb.y1) / 2.0);
+            self.sfx.push((Sfx::Collapse, c));
+        }
+        let bb = &self.world.buildings[b];
         let (x0, y0, x1, y1) = (
             bb.x0.max(0.0) as usize,
             bb.y0.max(0.0) as usize,
@@ -1920,17 +1986,22 @@ impl Game {
                 if self.out_t <= 0.0 {
                     self.outbreaks += 1;
                     let n = (ZOMBIE_OUTBREAK * OUTBREAK_GROWTH.powi(self.outbreaks as i32) * horde_scale(m)).round();
-                    for _ in 0..2 {
+                    for k in 0..2 {
                         if let Some(p) = self.random_cell(1500) {
                             self.queue(p, n / 2.0, 3.0);
+                            if k == 0 {
+                                self.sfx.push((Sfx::Outbreak, vec2(p.0, p.1)));
+                            }
                         }
                     }
+                    self.sfx.push((Sfx::Inbound, self.world.hq));
                     self.show(format!("New outbreak: {} infected", n as u64), 4.0);
                     self.out_t = 70.0;
                 }
                 let out = self.zombie_mood();
                 if !self.rush_forever && out < 0.08 && self.time > 60.0 {
                     self.rush_forever = true;
+                    self.sfx.push((Sfx::Rush, self.world.hq));
                     self.show("No one left to eat: the dead swarm your HQ for good", 4.0);
                 }
                 if !self.rush_forever {
@@ -1948,6 +2019,7 @@ impl Game {
                             self.rush = true;
                             self.rush_left = 40.0 + 40.0 * (1.0 - out);
                             self.rushes += 1;
+                            self.sfx.push((Sfx::Rush, self.world.hq));
                             if self.rushes >= 4 {
                                 self.rush_forever = true;
                                 self.show("The dead swarm your HQ for good", 4.0);
@@ -1978,6 +2050,7 @@ impl Game {
                             life: 0.8,
                             kind: 2,
                         });
+                        self.sfx.push((Sfx::BugDrop, vec2(p.0, p.1)));
                     }
                     self.drop_t = 3.0;
                 }
@@ -2008,6 +2081,7 @@ impl Game {
                                 "A hive has taken root. Only abilities and troops can kill it",
                                 4.0,
                             );
+                            self.sfx.push((Sfx::Hive, p));
                         }
                     }
                 }
@@ -2029,6 +2103,10 @@ impl Game {
                                 taken: 0,
                             });
                             self.queue(p, size / np as f32, 15.0);
+                            self.sfx.push((Sfx::Portal, vec2(p.0, p.1)));
+                            if j == 0 {
+                                self.sfx.push((Sfx::Warcry, vec2(p.0, p.1)));
+                            }
                             // from the second wave on, a war-drum orc leads one of them
                             if k >= 1 && j == 0 {
                                 let before = self.drummers.len();
@@ -2048,6 +2126,7 @@ impl Game {
                         4.0,
                     );
                     self.portal_t = 70.0;
+                    self.sfx.push((Sfx::Inbound, self.world.hq));
                 }
                 for p in &mut self.portals {
                     p.t -= DT;
@@ -2343,6 +2422,7 @@ impl Game {
                     self.perks[o].research.busy = None;
                     self.complete_research(o, r);
                     self.show(format!("Research complete: {}", rdef(r).name), 3.0);
+                    self.sfx.push((Sfx::ResearchDone(o as u8), self.world.hq));
                 } else {
                     self.perks[o].research.busy = Some((r, t));
                 }
@@ -2438,6 +2518,10 @@ impl Game {
     /// as one mob at full rage. Each loss away from a regroup already running starts one.
     fn regroup(&mut self) {
         for r in &mut self.regroups {
+            // the charge: a war cry
+            if r.t < REGROUP_BACK && r.t + DT >= REGROUP_BACK {
+                self.sfx.push((Sfx::Warcry, r.to));
+            }
             r.t += DT;
         }
         self.regroups.retain(|r| r.t < REGROUP_BACK + REGROUP_CHARGE + REGROUP_REST);
@@ -3048,6 +3132,7 @@ impl Game {
                     return true;
                 }
                 let home = self.structs[i].center();
+                self.sfx.push((Sfx::Gunship, p));
                 self.gunships.push(Gunship {
                     pad: Some(i),
                     home,
@@ -3390,12 +3475,14 @@ impl Game {
                 self.scrap -= rdef(r).cost;
                 self.complete_research(o, r);
                 self.show("Perimeter wall going up: gates across every street", 3.0);
+                self.sfx.push((Sfx::ResearchDone(o as u8), self.world.hq));
             }
             return;
         }
         if self.can_research(o, r) {
             self.scrap -= rdef(r).cost;
             self.perks[o].research.busy = Some((r, 30.0));
+            self.sfx.push((Sfx::ResearchStart(o as u8), self.world.hq));
             self.show(format!("Researching {} (30 s)", rdef(r).name), 2.5);
         }
     }
@@ -3476,6 +3563,7 @@ impl Game {
                 });
             }
             A::Gunship => {
+                self.sfx.push((Sfx::Gunship, to));
                 let home = self.hq_near(to);
                 self.gunships.push(Gunship {
                     pad: None,
@@ -3504,6 +3592,7 @@ impl Game {
                     .map(|(i, s)| (i, s.center()));
                 let Some((si, from)) = silo else { return false };
                 self.structs[si].cd = adef(A::Icbm).cd;
+                self.sfx.push((Sfx::Launch, from));
                 self.strikes.push(Strike::Icbm {
                     from,
                     to,
@@ -3522,6 +3611,7 @@ impl Game {
             }
         }
         self.pay(a);
+        self.sfx.push((Sfx::Radio(o as u8), to));
         true
     }
 
@@ -3541,6 +3631,13 @@ impl Game {
             Strike::Air {
                 pos, len, bombs, napalm, ..
             } => {
+                // the B-2 is heard coming a couple of seconds before its first bomb
+                if let Some(b) = bombs.first() {
+                    let roar = b.1 - 170.0 * 2.2;
+                    if *pos < roar && *pos + 170.0 * DT >= roar {
+                        self.sfx.push((Sfx::Jet, b.0));
+                    }
+                }
                 *pos += 170.0 * DT;
                 for b in bombs.iter_mut() {
                     if !b.2 && *pos >= b.1 {
@@ -3741,6 +3838,7 @@ impl Game {
                 dur: 5.0,
             });
             self.structs[pi].cd = PAD_COOLDOWN;
+            self.sfx.push((Sfx::Evac, c));
             self.show(
                 format!(
                     "Extraction flight: {} civilian{} out (+{} scrap, +{} ammo)",
@@ -4030,6 +4128,7 @@ impl Game {
                 }
                 if freed {
                     self.civs[i].st = C_ROAM;
+                    self.sfx.push((Sfx::Rescue, p));
                     self.show("Troops freed a captured civilian", 2.0);
                     continue;
                 }
@@ -4342,6 +4441,7 @@ impl Game {
                                     cv.st = C_ESCORT;
                                     cv.sq = si;
                                     cv.esc = mi;
+                                    self.sfx.push((Sfx::Rescue, m.p));
                                     m.carry += 1;
                                     claimed += 1;
                                     if m.carry >= cap {
@@ -4591,6 +4691,9 @@ impl Game {
         for (n, &k) in order.iter().enumerate() {
             if n < lost {
                 self.groups[gi].m[k].alive = false;
+                if n == 0 {
+                    self.sfx.push((Sfx::Death, vec2((x0 + x1) / 2.0, (y0 + y1) / 2.0)));
+                }
                 continue;
             }
             // somewhere on the floor of the ruin that isn't still standing
@@ -4754,6 +4857,7 @@ impl Game {
                         m.hp -= (v.min(30)) as f32 * atk * DT;
                         if m.hp <= 0.0 {
                             m.alive = false;
+                            self.sfx.push((if kind == U::Tank { Sfx::TankLost } else { Sfx::Death }, m.p));
                             self.groups[gi].m[mi] = m;
                             continue;
                         }
@@ -4834,6 +4938,11 @@ impl Game {
             } else {
                 self.rev_src(RevKey::Group(gi))
             };
+            if kind == U::Rifle && !w.rocket {
+                if let Some(((a, _), _)) = shots.first() {
+                    self.sfx.push((Sfx::Rifle, *a));
+                }
+            }
             for ((a, az), t) in shots {
                 self.blast(t, w.rad, w.dmg, w.bdmg, src, w.dmg);
                 self.ammo -= d.ammo;

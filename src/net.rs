@@ -239,6 +239,8 @@ pub const LOGI_FULL: &str = "Logistics full: upgrade the HQ to field more turret
 
 /// Carries out one command from player `p` (what they build is theirs and gets their upgrades).
 /// Returns a line to show the player who gave it, if any.
+/// the one thing `apply` says back that isn't a refusal
+pub const SOLD: &str = "Sold for half price";
 pub fn apply(g: &mut Game, p: usize, c: Cmd) -> Option<&'static str> {
     g.actor = p.min(g.perks.len() - 1);
     let r = apply_as(g, c);
@@ -268,7 +270,7 @@ fn apply_as(g: &mut Game, c: Cmd) -> Option<&'static str> {
             let full = !g.logi_room(g.actor, 1);
             (!g.place_mount(t, b as usize)).then_some(if full { LOGI_FULL } else { "Can't put a turret on that bunker" })
         }
-        Cmd::Sell(p) => g.sell_at(p).then_some("Sold for half price"),
+        Cmd::Sell(p) => g.sell_at(p).then_some(SOLD),
         Cmd::Deploy(u, p) => {
             let full = !g.logi_room(g.actor, 1);
             (!g.deploy(u, p)).then_some(if full { LOGI_FULL } else { "Can't deploy there" })

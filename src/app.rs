@@ -131,6 +131,12 @@ pub struct App {
     music_vol: u32,
     /// effects volume 0..=100, saved in settings
     sfx_vol: u32,
+    /// the low ammo warning has sounded (until the store fills up again)
+    low_ammo_cue: bool,
+    /// the end of the match (the win or game over sting) has sounded
+    end_cue: bool,
+    /// players in the co-op session last frame (0: none), for the join and leave chimes
+    coop_players: usize,
     /// news broadcast volume 0..=100, saved in settings
     news_vol: u32,
     /// a match left running behind the menu (alone only): Resume or Abandon picks it up again
@@ -392,6 +398,9 @@ impl App {
             bulletin_played: None,
             music: music::Music::start(st.music, st.sfx, st.news),
             sfx_vol: st.sfx,
+            low_ammo_cue: false,
+            end_cue: false,
+            coop_players: 0,
             news_vol: st.news,
             suspended: false,
             esc_free: false,
@@ -590,8 +599,17 @@ impl App {
         }
         let notes = match self.sess.as_mut() {
             Some(s) => s.pump(),
-            None => return,
+            None => {
+                self.coop_players = 0;
+                return;
+            }
         };
+        // a chime when a co-op player joins, a lower one when one leaves
+        let n = self.sess.as_ref().map_or(0, |s| s.players.len());
+        if self.coop_players > 0 && n != self.coop_players {
+            self.cue(if n > self.coop_players { music::Snd::Join } else { music::Snd::Leave }, 0.45);
+        }
+        self.coop_players = n;
         for n in notes {
             match n {
                 net::Note::Started { desc, fac, diff, seed, camp } => {
@@ -612,6 +630,7 @@ impl App {
                     self.camp = None;
                 }
                 net::Note::Closed(why) => {
+                    self.cue(music::Snd::Leave, 0.45);
                     if let Some(mut s) = self.sess.take() {
                         s.leave();
                     }
@@ -790,9 +809,17 @@ impl App {
         }
         let m = net::apply(g, 0, c);
         if let Some(m) = m {
-            self.msg = (m.into(), 1.5);
+            self.said(m);
         }
         m
+    }
+    /// What the game said back to one of this player's orders, with an error buzz when it was
+    /// refused.
+    fn said(&mut self, m: &str) {
+        self.msg = (m.into(), 1.5);
+        if m != net::SOLD {
+            self.cue(music::Snd::Error, 0.25);
+        }
     }
 
     /// Where the menu column goes, and in co-op the players panel beside it. The column sits on the
@@ -1022,7 +1049,19 @@ impl App {
             return false;
         }
         if !self.hub_votes() || a.kind() == 0 {
-            return Self::do_act(c, self.me(), a);
+            let me = self.me();
+            let had = |c: &Campaign| (c.crew(me).tech.len(), c.points(me), c.crew(me).money);
+            let before = had(c);
+            let go = Self::do_act(c, me, a);
+            // an unlock sparkles, a purchase clunks, and one that couldn't be paid for buzzes
+            let done = had(c) != before;
+            match a {
+                HubAct::Tech(_) | HubAct::ResearchPart(_) if done => self.cue(music::Snd::TechUnlock, 0.5),
+                HubAct::Recruit(_) | HubAct::BuyPart(_) | HubAct::Hunt(_) if done => self.cue(music::Snd::Place, 0.4),
+                HubAct::Tech(_) | HubAct::ResearchPart(_) | HubAct::Recruit(_) | HubAct::BuyPart(_) => self.cue(music::Snd::Error, 0.25),
+                _ => {}
+            }
+            return go;
         }
         self.cast(0, a);
         false
@@ -1122,21 +1161,15 @@ impl App {
         if cues.is_empty() || self.sfx_vol == 0 {
             return;
         }
-        // half the view's width in map cells. Effects fade out quickly past the edge of the view,
-        // and as the camera pulls back: full up close, silent from about 1100 cells out.
-        let r = (screen_width() / 2.0 / self.cam.scale()).max(10.0);
-        let zoom = ((1100.0 - self.cam.dist) / 800.0).clamp(0.0, 1.0);
-        let zoom = zoom * zoom;
+        let zoom = self.zoom_gain();
         for (s, p) in cues {
-            let off = p - self.cam.t;
-            let near = (1.0 - (off.length() - r).max(0.0) / (0.6 * r)).clamp(0.0, 1.0);
+            let (near, pan) = self.hearing(p);
             // a flame burst is keyed by its bunker so its end can cut the sound
             let key = (((p.x * 4.0) as i64 as u64) << 32 | ((p.y * 4.0) as i64 as u32 as u64)) | 1;
             if s == Sfx::FlameStop {
                 self.music.stop(key);
                 continue;
             }
-            let pan = (off.dot(self.cam.right()) / r).clamp(-1.0, 1.0);
             let jitter = rand::gen_range(0.93, 1.07);
             if let Sfx::Custom(v) = s {
                 // garage turrets: the game's own guns, pitched and filtered per barrel
@@ -1161,6 +1194,11 @@ impl App {
                 self.music.play_toned(music::Play { snd, gain, pan, speed: v.pitch * jitter, key: if v.base == 4 { key } else { 0 } }, v.tone);
                 continue;
             }
+            // the cues of one player in co-op (their radio, their research) only they hear
+            let me = self.me() as u8;
+            if matches!(s, Sfx::Radio(o) | Sfx::ResearchStart(o) | Sfx::ResearchDone(o) if o != me) {
+                continue;
+            }
             let (snd, gain, speed) = match s {
                 Sfx::Cannon => (music::Snd::Cannon, 0.55, jitter),
                 Sfx::Flame => (music::Snd::Flame, 0.3, jitter),
@@ -1173,18 +1211,102 @@ impl App {
                 Sfx::HeliGun => (music::Snd::HeliGun, 0.35, jitter),
                 Sfx::Rocket => (music::Snd::Cannon, 0.3, 1.45 * jitter),
                 Sfx::BaseAttacked => (music::Snd::BaseAttacked, 0.8, 1.0),
+                Sfx::Rifle => (music::Snd::Rifle, 0.13, jitter),
+                Sfx::Gunship => (music::Snd::Gunship, 0.5, 1.0),
+                Sfx::Jet => (music::Snd::Jet, 0.6, jitter),
+                Sfx::Launch => (music::Snd::Launch, 0.7, 1.0),
+                Sfx::Radio(_) => (music::Snd::Radio, 0.35, 1.0),
+                Sfx::Outbreak => (music::Snd::ZombieGroan, 0.5, jitter),
+                Sfx::Rush => (music::Snd::ZombieRush, 0.55, 1.0),
+                Sfx::BugDrop => (music::Snd::BugDrop, 0.4, jitter),
+                Sfx::Hive => (music::Snd::Hive, 0.45, jitter),
+                Sfx::Portal => (music::Snd::OrcPortal, 0.5, jitter),
+                Sfx::Warcry => (music::Snd::OrcWarcry, 0.4, jitter),
+                Sfx::Death => (music::Snd::Death, 0.22, jitter),
+                Sfx::TankLost => (music::Snd::TankLost, 0.55, jitter),
+                Sfx::Place => (music::Snd::Place, 0.35, jitter),
+                Sfx::Sell => (music::Snd::Sell, 0.35, 1.0),
+                Sfx::Wrecked => (music::Snd::Wrecked, 0.45, jitter),
+                Sfx::Collapse => (music::Snd::Collapse, 0.4, jitter),
+                Sfx::HqFallen => (music::Snd::HqFallen, 0.85, 1.0),
+                Sfx::Rescue => (music::Snd::Rescue, 0.25, jitter),
+                Sfx::Evac => (music::Snd::Evac, 0.4, 1.0),
+                Sfx::ResearchStart(_) => (music::Snd::ResearchStart, 0.3, 1.0),
+                Sfx::ResearchDone(_) => (music::Snd::ResearchDone, 0.45, 1.0),
+                Sfx::Inbound => (music::Snd::Inbound, 0.4, 1.0),
                 Sfx::FlameStop | Sfx::Custom(_) => continue,
             };
-            // a nuke is heard anywhere on the map, and the alarm wherever you're looking
+            // a nuke is heard anywhere on the map, the alarm and the radio wherever you're
+            // looking; a new wave a little way off; the player's own building at any zoom
+            let global = matches!(s, Sfx::BaseAttacked | Sfx::Radio(_) | Sfx::ResearchStart(_) | Sfx::ResearchDone(_) | Sfx::Inbound | Sfx::Rush | Sfx::HqFallen);
             let gain = match s {
                 Sfx::Nuke => gain * near.max(0.7),
-                Sfx::BaseAttacked => gain,
+                _ if global => gain,
+                Sfx::Launch | Sfx::Outbreak | Sfx::Portal | Sfx::Hive => gain * near.max(0.5),
+                Sfx::Gunship | Sfx::Jet => gain * near.max(0.4),
+                Sfx::Place | Sfx::Sell => gain * near,
                 _ => gain * near * near * zoom,
             };
-            let pan = if s == Sfx::BaseAttacked { 0.0 } else { pan };
+            let pan = if global { 0.0 } else { pan };
             let key = if s == Sfx::Flame { key } else { 0 };
             self.music.play(music::Play { snd, gain, pan, speed, key });
         }
+    }
+    /// How well a sound at `p` is heard (0..1) and where (-1 left .. 1 right). Half the view's
+    /// width in map cells around its centre is full volume, fading out quickly past the edge.
+    fn hearing(&self, p: Vec2) -> (f32, f32) {
+        let r = (screen_width() / 2.0 / self.cam.scale()).max(10.0);
+        let off = p - self.cam.t;
+        let near = (1.0 - (off.length() - r).max(0.0) / (0.6 * r)).clamp(0.0, 1.0);
+        (near, (off.dot(self.cam.right()) / r).clamp(-1.0, 1.0))
+    }
+    /// Battle sounds fade as the camera pulls back: full up close, silent from about 1100 cells out.
+    fn zoom_gain(&self) -> f32 {
+        let zoom = ((1100.0 - self.cam.dist) / 800.0).clamp(0.0, 1.0);
+        zoom * zoom
+    }
+    /// The loops under the battle (tank engines, rotors, factories, helium sprayers), each as
+    /// loud as its closest source to the view, and the cues the app raises itself: the low ammo
+    /// warning and the end-of-match sting.
+    fn loops_and_cues(&mut self, g: &Game) {
+        let zoom = self.zoom_gain();
+        let on = !g.over && !self.paused_now();
+        let loud = |ps: &mut dyn Iterator<Item = Vec2>| -> f32 {
+            if !on {
+                return 0.0;
+            }
+            let n = ps.map(|p| self.hearing(p).0).fold(0.0, f32::max);
+            n * n * zoom
+        };
+        let tanks = loud(&mut g.groups.iter().filter(|gr| !gr.dead && gr.kind == U::Tank && gr.state == GState::Move).filter_map(|gr| gr.m.iter().find(|m| m.alive).map(|m| m.p)));
+        let rotors = loud(&mut g.gunships.iter().map(|s| s.p).chain(g.helis.iter().map(|h| h.from + (h.to - h.from) * (h.t / h.dur.max(0.01)))));
+        let works = |t: S| g.structs.iter().filter(move |s| !s.dead && !s.pending && s.t == t).map(|s| s.center());
+        let factory = loud(&mut works(S::Extractor).chain(works(S::Plant)));
+        // a helium tower only hisses while something is in its field
+        let helium = loud(&mut g.structs.iter().filter(|s| !s.dead && !s.pending && s.t == S::Helium && self.hearing(s.center()).0 > 0.0).filter(|s| g.find_target(s.center(), g.turret_range(S::Helium, s.up(), s.owner as usize)).is_some()).map(|s| s.center()));
+        self.music.set_loop(music::Lp::Engine, tanks);
+        self.music.set_loop(music::Lp::Rotor, rotors);
+        self.music.set_loop(music::Lp::Factory, factory);
+        self.music.set_loop(music::Lp::Helium, helium);
+        // low ammo: below a tenth of the store while something needs it, once until it's refilled
+        let needs = g.structs.iter().any(|s| !s.dead && def(s.t).ammo > 0.0) || g.groups.iter().any(|gr| !gr.dead && gr.kind == U::Tank);
+        let low = g.ammo_cap * 0.1;
+        if !self.low_ammo_cue && needs && g.ammo < low && !g.over {
+            self.low_ammo_cue = true;
+            self.cue(music::Snd::LowAmmo, 0.35);
+        } else if g.ammo > low * 2.0 {
+            self.low_ammo_cue = false;
+        }
+        if g.over && !self.end_cue {
+            self.end_cue = true;
+            self.cue(if g.won { music::Snd::Win } else { music::Snd::GameOver }, 0.6);
+        } else if !g.over {
+            self.end_cue = false;
+        }
+    }
+    /// An effect that isn't anywhere on the map (a warning, a menu sound), in the middle.
+    pub(super) fn cue(&self, snd: music::Snd, gain: f32) {
+        self.music.play(music::Play { snd, gain, pan: 0.0, speed: 1.0, key: 0 });
     }
     fn set_sfx(&mut self, v: u32) {
         self.sfx_vol = v;
@@ -2405,7 +2527,8 @@ impl App {
         self.play_sfx(&mut g);
         // the war drum, louder the closer the view is to the nearest drummer
         let near = g.drummers.iter().filter(|d| !d.dead).map(|d| d.p.distance(self.cam.t)).fold(f32::MAX, f32::min);
-        self.music.drum(if near < f32::MAX && !g.over { (1.0 - near / 700.0).clamp(0.3, 1.0) } else { 0.0 });
+        self.music.set_loop(music::Lp::Drum, if near < f32::MAX && !g.over { (1.0 - near / 700.0).clamp(0.3, 1.0) } else { 0.0 });
+        self.loops_and_cues(&g);
         if let (Some(n), None, false) = (self.news.as_mut(), &self.placing, g.over) {
             if let Some(army) = n.broadcast(g.time, dt) {
                 self.music.news(army);
@@ -2447,7 +2570,7 @@ impl App {
                 }
             }
             if let Some(m) = said.last() {
-                self.msg = (m.to_string(), 1.5);
+                self.said(m);
             }
             if n > 0 {
                 sc.update_units(&g);
