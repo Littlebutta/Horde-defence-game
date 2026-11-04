@@ -553,6 +553,61 @@ def leave():
     return out
 
 
+
+def gatling_shot():
+    """one round from a rotary barrel: a dull pop more than a crack, so a stream of them doesn't grate"""
+    d = 0.09
+    crack = hp(noise(d), 2500) * decay(d, 0.003) * 0.35
+    body = bp(noise(d), 180, 1800) * decay(d, 0.022)
+    thump = osc(glide(130, 70, d), d) * decay(d, 0.02) * 0.7
+    return lp(crack + body + thump, 5000)
+
+
+def gatling(rate):
+    """0.4 s of a rotary gun firing `rate` rounds a second over its motor's whir; played back to
+    back while it keeps firing"""
+    d, span = 0.46, 0.4
+    out = np.zeros(int(d * SR))
+    n = int(round(span * rate))
+    for k in range(n):
+        at(out, gatling_shot(), k * span / n + rng.uniform(0, 0.004), rng.uniform(0.75, 1.0))
+    t = t_(d)
+    motor = 55 + rate * 9
+    whir = lp(osc(motor, d, "saw") + 0.5 * osc(motor * 2, d, "saw"), 900) * 0.08
+    rattle = bp(noise(d), 1500, 4000) * (0.5 + 0.5 * np.sin(2 * np.pi * rate * t)) * 0.05
+    return out + (whir + rattle) * np.interp(t, [0, 0.02, span, d], [0.6, 1, 1, 0])
+
+
+def gatling_spinup():
+    """the barrels winding up: a motor whine climbing, the barrels' clatter speeding up"""
+    d = 0.9
+    t = t_(d)
+    f = glide(90, 520, d, 0.7)
+    whine = lp(osc(f, d, "saw") + 0.4 * osc(f * 2, d, "saw"), 1600) * 0.5
+    clat = np.zeros(len(t))
+    s = 0.0
+    while s < d - 0.02:
+        r = 8 + 50 * (s / d) ** 0.8
+        at(clat, bp(noise(0.02), 1800, 4500) * decay(0.02, 0.004), s, 0.35)
+        s += 1.0 / r
+    return (whine + clat) * np.interp(t, [0, 0.08, 0.75, d], [0, 0.8, 1, 0.6])
+
+
+def gatling_spindown():
+    """and winding down once it stops firing"""
+    d = 1.2
+    t = t_(d)
+    f = glide(520, 70, d, 0.6)
+    whine = lp(osc(f, d, "saw") + 0.4 * osc(f * 2, d, "saw"), 1400) * 0.5
+    clat = np.zeros(len(t))
+    s = 0.0
+    while s < d - 0.05:
+        r = 50 * (1 - s / d) ** 1.3 + 4
+        at(clat, bp(noise(0.02), 1800, 4500) * decay(0.02, 0.004), s, 0.3 * (1 - s / d))
+        s += 1.0 / r
+    return (whine + clat) * np.interp(t, [0, 0.03, d], [0, 1, 0]) ** 1.2
+
+
 CLIPS = {
     "rifle": rifle,
     "helium-loop": helium_loop,
@@ -588,8 +643,17 @@ CLIPS = {
     "inbound": inbound,
     "join": join,
     "leave": leave,
+    "gatling-slow": lambda: gatling(10),
+    "gatling-mid": lambda: gatling(18),
+    "gatling-fast": lambda: gatling(30),
+    "gatling-spinup": gatling_spinup,
+    "gatling-spindown": gatling_spindown,
 }
 
 if __name__ == "__main__":
+    import sys
+
+    # python tools/make_sfx.py gatling  (remakes only the clips whose name has "gatling" in it)
     for name, make in CLIPS.items():
-        save(name, make())
+        if len(sys.argv) < 2 or any(a in name for a in sys.argv[1:]):
+            save(name, make())

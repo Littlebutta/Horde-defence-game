@@ -119,8 +119,13 @@ pub enum Snd {
     Inbound,
     Join,
     Leave,
+    GatlingSlow,
+    GatlingMid,
+    GatlingFast,
+    GatlingSpinUp,
+    GatlingSpinDown,
 }
-const SNDS: usize = 40;
+const SNDS: usize = 45;
 /// One effect: the clip, at most `voices` copies at once with a new copy at least `gap_ms` after
 /// the last (so a hundred cannons firing together stay a rumble instead of a wall of noise), and
 /// `cut` seconds of it played (0: all of it), ending in a short fade.
@@ -181,6 +186,12 @@ static SFX: [Fx; SNDS] = [
     fx(gen!("inbound"), 1, 2500),
     fx(gen!("join"), 1, 300),
     fx(gen!("leave"), 1, 300),
+    // a rotary turret's bursts play back to back (every GATLING_BURST), so a few can run at once
+    fx(gen!("gatling-slow"), 4, 60),
+    fx(gen!("gatling-mid"), 4, 60),
+    fx(gen!("gatling-fast"), 4, 60),
+    fx(gen!("gatling-spinup"), 2, 200),
+    fx(gen!("gatling-spindown"), 2, 200),
 ];
 const CUT_FADE_S: f32 = 0.06;
 
@@ -738,7 +749,7 @@ mod tests {
             let c = decode(f.bytes, 0.0).expect("decodes");
             assert!(c.data.len() > 4_000);
         }
-        assert_eq!(Snd::Leave as usize + 1, SNDS);
+        assert_eq!(Snd::GatlingSpinDown as usize + 1, SNDS);
         // the gun turret is cut to a short crack that ends in silence
         let c = decode(SFX[Snd::Gun as usize].bytes, SFX[Snd::Gun as usize].cut).unwrap();
         assert!(c.data.len() / 2 <= (0.21 * c.rate as f32) as usize);

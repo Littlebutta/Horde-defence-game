@@ -1234,6 +1234,9 @@ impl App {
                 Sfx::ResearchStart(_) => (music::Snd::ResearchStart, 0.3, 1.0),
                 Sfx::ResearchDone(_) => (music::Snd::ResearchDone, 0.45, 1.0),
                 Sfx::Inbound => (music::Snd::Inbound, 0.4, 1.0),
+                // rotary turrets: well under the other guns, as they never stop
+                Sfx::Gatling(l) => ([music::Snd::GatlingSlow, music::Snd::GatlingMid, music::Snd::GatlingFast][l.min(2) as usize], 0.11, 0.97 + 0.06 * rand::gen_range(0.0, 1.0)),
+                Sfx::GatlingSpin(up) => (if up { music::Snd::GatlingSpinUp } else { music::Snd::GatlingSpinDown }, 0.12, jitter),
                 Sfx::FlameStop | Sfx::Custom(_) => continue,
             };
             // a nuke is heard anywhere on the map, the alarm and the radio wherever you're

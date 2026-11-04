@@ -95,6 +95,8 @@ pub struct Chill {
 const MINE_LIFE: f32 = 45.0;
 const SHIELD_BACK: f32 = 8.0;
 const WALK_SPEED: f32 = 3.0;
+/// seconds of fire in each rotary turret sound (the gatling clips are made this long)
+const GATLING_BURST: f32 = 0.4;
 
 fn ang_diff(a: f32, b: f32) -> f32 {
     let mut d = (a - b) % std::f32::consts::TAU;
@@ -399,7 +401,12 @@ impl Game {
             }
             return;
         }
-        if self.time - self.structs[i].last_fire > 0.7 {
+        let idle = self.time - self.structs[i].last_fire;
+        if idle > 0.7 {
+            // the barrels wind down once it stops firing
+            if idle - DT <= 0.7 && cu.spin > 2.0 {
+                self.sfx.push((Sfx::GatlingSpin(false), cu.pos));
+            }
             cu.spin = (cu.spin - DT * 2.5).max(1.0);
         }
         self.structs[i].cd -= DT;
@@ -439,6 +446,9 @@ impl Game {
         let reload = sp.reload * (1.0 - link * 0.7) / cu.spin;
         self.structs[i].cd = reload;
         if sp.spin > 1.0 {
+            if cu.spin < 1.5 {
+                self.sfx.push((Sfx::GatlingSpin(true), cu.pos));
+            }
             cu.spin = (cu.spin + 0.35).min(sp.spin);
         }
         if sp.charge > 0.0 {
@@ -762,7 +772,11 @@ impl Game {
     fn shot(&mut self, i: usize, cu: &mut Custom, sp: &Spec, tg: Vec2, range: f32, hit: Hit) {
         let m = self.muzzle(cu, tg);
         let az = self.struct_base(i) + sp.height + 0.9;
-        self.voice(i, sp, m);
+        if sp.spin > 1.0 {
+            self.gatling(i, cu, sp, m);
+        } else {
+            self.voice(i, sp, m);
+        }
         match sp.fire {
             Fire::Bullet => {
                 let p = self.scatter(m, tg, sp.spread);
@@ -1121,6 +1135,17 @@ impl Game {
         if self.time - self.structs[i].snd >= gap {
             self.structs[i].snd = self.time;
             self.sfx.push((Sfx::Custom(sp.voice), at));
+        }
+    }
+
+    /// A rotary barrel's sound: a 0.4 s stretch of fire, back to back while it keeps shooting,
+    /// faster the further it has spun up.
+    fn gatling(&mut self, i: usize, cu: &Custom, sp: &Spec, at: Vec2) {
+        if self.time - self.structs[i].snd >= GATLING_BURST {
+            self.structs[i].snd = self.time;
+            let f = (cu.spin - 1.0) / (sp.spin - 1.0).max(0.01);
+            let level = if f < 0.34 { 0 } else if f < 0.75 { 1 } else { 2 };
+            self.sfx.push((Sfx::Gatling(level), at));
         }
     }
 

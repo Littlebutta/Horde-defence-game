@@ -345,6 +345,10 @@ pub enum Sfx {
     ResearchDone(u8),
     /// a new wave is on its way
     Inbound,
+    /// 0.4 s of a rotary turret firing; 0 slow, 1 faster, 2 fully spun up
+    Gatling(u8),
+    /// a rotary turret's barrels winding up (true) or down (false)
+    GatlingSpin(bool),
 }
 /// seconds between two base-under-attack alarms
 const ALARM_GAP: f32 = 30.0;
