@@ -50,6 +50,12 @@ pub const SU_RESCUE: u8 = 1;
 pub const SU_LOUD: u8 = 2;
 pub const SU_CONVOY: u8 = 3;
 pub const SU_GUN: u8 = 4;
+/// Not upgrades, but sent the same way: buy one more convoy truck, and pack the safehouse up.
+pub const SU_TRUCK: u8 = 100;
+pub const SU_PACK: u8 = 101;
+/// What an extra convoy truck costs, and how many a safehouse can buy.
+pub const TRUCK_COST: f32 = 150.0;
+pub const TRUCK_EXTRA_MAX: u8 = 4;
 /// Truck guns: reach, seconds between shots, damage a shot.
 pub const TRUCK_GUN_R: f32 = 24.0;
 const TRUCK_GUN_RATE: f32 = 0.3;
@@ -79,6 +85,12 @@ pub struct Safehouse {
     /// civilians inside right now, and taken to the HQ so far
     pub held: u32,
     pub saved: u32,
+    /// extra convoy trucks bought
+    pub extra: u8,
+    /// money put into it so far (packing up gives it all back)
+    pub spent: f32,
+    /// the walls the Walls upgrade put up (taken down again when it packs up)
+    pub(super) walls: Vec<usize>,
 }
 impl Safehouse {
     pub fn has(&self, u: u8) -> bool {
@@ -86,6 +98,13 @@ impl Safehouse {
     }
     pub fn seek(&self) -> u32 {
         if self.has(SU_LOUD) { SAFE_SEEK * 2 } else { SAFE_SEEK }
+    }
+    /// Convoy trucks it keeps running (lost ones are replaced).
+    pub fn want_trucks(&self) -> usize {
+        1 + self.has(SU_CONVOY) as usize + self.extra as usize
+    }
+    fn truck_hp(&self) -> f32 {
+        if self.has(SU_CONVOY) { CONVOY_HP * 1.8 } else { CONVOY_HP }
     }
 }
 
@@ -327,6 +346,9 @@ impl Game {
             convoy_t: 2.0,
             held: 0,
             saved: 0,
+            extra: 0,
+            spent: SAFE_COST,
+            walls: Vec::new(),
         });
         self.trucks.push(Truck { sh: k, kind: TRUCK_SETUP, p: start, hd: 0.0, state: TR_OUT, load: 0, hp: SETUP_HP, max: SETUP_HP, dead: false, t: 0.0, cd: 0.0, aim: 0.0 });
         self.sfx.push((Sfx::Place, start));
@@ -336,12 +358,18 @@ impl Game {
 
     /// Buys upgrade `u` for safehouse `k`.
     pub fn safe_upgrade(&mut self, k: usize, u: u8) -> bool {
+        match u {
+            SU_TRUCK => return self.safe_buy_truck(k),
+            SU_PACK => return self.safe_pack(k),
+            _ => {}
+        }
         let Some(s) = self.safes.get(k) else { return false };
         let Some(&(_, _, cost)) = SAFE_UPS.get(u as usize) else { return false };
         if s.state != SH_READY || s.has(u) || self.scrap < cost {
             return false;
         }
         self.scrap -= cost;
+        self.safes[k].spent += cost;
         self.safes[k].ups |= 1 << u;
         match u {
             SU_WALLS => self.safe_walls(k),
@@ -357,6 +385,73 @@ impl Game {
             _ => {}
         }
         self.sfx.push((Sfx::Place, self.safes[k].c));
+        true
+    }
+
+    /// One more convoy truck for safehouse `k`, parked there straight away.
+    fn safe_buy_truck(&mut self, k: usize) -> bool {
+        let Some(s) = self.safes.get(k) else { return false };
+        if s.state != SH_READY || s.extra >= TRUCK_EXTRA_MAX || self.scrap < TRUCK_COST {
+            return false;
+        }
+        self.scrap -= TRUCK_COST;
+        let s = &mut self.safes[k];
+        s.spent += TRUCK_COST;
+        s.extra += 1;
+        let (at, hp) = (s.c, s.truck_hp());
+        self.trucks.push(Truck { sh: k, kind: TRUCK_CONVOY, p: at, hd: 0.0, state: TR_PARK, load: 0, hp, max: hp, dead: false, t: 0.0, cd: 0.0, aim: 0.0 });
+        self.sfx.push((Sfx::Place, at));
+        true
+    }
+
+    /// Packs safehouse `k` up: everything spent on it comes back, the people waiting there climb
+    /// into the trucks (as many as fit, the rest go back to the streets), the trucks drive to the
+    /// HQ and its walls come down.
+    fn safe_pack(&mut self, k: usize) -> bool {
+        let Some(s) = self.safes.get(k) else { return false };
+        if s.state == SH_LOST {
+            return false;
+        }
+        let refund = s.spent;
+        let seats = if s.has(SU_CONVOY) { CONVOY_SEATS_UP } else { CONVOY_SEATS };
+        self.safes[k].state = SH_LOST;
+        self.scrap += refund;
+        for ti in 0..self.trucks.len() {
+            let t = &mut self.trucks[ti];
+            if t.dead || t.sh != k {
+                continue;
+            }
+            t.kind = TRUCK_CONVOY;
+            t.state = TR_OUT;
+            t.t = 0.0;
+            let tp = t.p;
+            let mut load = t.load;
+            for cv in self.civs.iter_mut() {
+                if load >= seats {
+                    break;
+                }
+                if cv.st == C_SAFE && cv.pad == k && cv.p.distance(tp) < 40.0 {
+                    cv.st = C_RIDE;
+                    cv.esc = ti;
+                    load += 1;
+                }
+            }
+            self.trucks[ti].load = load;
+        }
+        for cv in self.civs.iter_mut().filter(|cv| cv.st == C_SAFE && cv.pad == k) {
+            cv.st = C_ROAM;
+        }
+        let walls = std::mem::take(&mut self.safes[k].walls);
+        self.selling = true;
+        for i in walls {
+            if self.structs.get(i).is_some_and(|s| !s.dead && matches!(s.t, S::Wall | S::Gate)) {
+                self.kill_struct(i);
+            }
+        }
+        self.selling = false;
+        self.rebuild_zone();
+        self.sfx.push((Sfx::Sell, self.safes[k].c));
+        self.show(&format!("Safehouse packed up: ${:.0} back, the trucks are heading home", refund), 4.0);
         true
     }
 
@@ -397,6 +492,7 @@ impl Game {
             if ok {
                 let i = self.add_struct(if road { S::Gate } else { S::Wall }, wx, wy, -1);
                 self.structs[i].owner = self.safes[k].own;
+                self.safes[k].walls.push(i);
             }
         }
     }
@@ -435,13 +531,13 @@ impl Game {
                 continue;
             }
             // a lost truck is replaced after a while
-            let want = if self.safes[k].has(SU_CONVOY) { 2 } else { 1 };
+            let want = self.safes[k].want_trucks();
             let have = self.trucks.iter().filter(|t| !t.dead && t.sh == k).count();
             if have < want {
                 self.safes[k].convoy_t -= DT;
                 if self.safes[k].convoy_t <= 0.0 {
                     self.safes[k].convoy_t = 30.0;
-                    let hp = if self.safes[k].has(SU_CONVOY) { CONVOY_HP * 1.8 } else { CONVOY_HP };
+                    let hp = self.safes[k].truck_hp();
                     let at = self.safes[k].c;
                     self.trucks.push(Truck { sh: k, kind: TRUCK_CONVOY, p: at, hd: 0.0, state: TR_PARK, load: 0, hp, max: hp, dead: false, t: 0.0, cd: 0.0, aim: 0.0 });
                 }
@@ -570,10 +666,18 @@ impl Game {
                     let nc = t.p.y as usize * W + t.p.x as usize;
                     if self.world.in_zone(t.p) || home[nc] <= 60 {
                         // inside the base: everyone off, to wait for a flight
-                        let mut n = 0;
+                        // they climb out around the truck in a few small huddles, not all on one spot
+                        let mut n = 0u32;
+                        let mut huddle = t.p;
                         for cv in self.civs.iter_mut().filter(|cv| cv.st == C_RIDE && cv.esc == ti) {
+                            if n % 4 == 0 {
+                                let a = self.rng.f() * std::f32::consts::TAU;
+                                let r = 2.0 + self.rng.f() * 3.0;
+                                huddle = Self::open_near(&obj, t.p, t.p + vec2(libm::cosf(a), libm::sinf(a)) * r);
+                            }
+                            let j = vec2(self.rng.f() - 0.5, self.rng.f() - 0.5) * 1.6;
                             cv.st = C_TO_PAD;
-                            cv.p = t.p;
+                            cv.p = Self::open_near(&obj, huddle, huddle + j);
                             n += 1;
                         }
                         self.rescued += n;
@@ -618,6 +722,12 @@ impl Game {
             }
             self.trucks[ti] = t;
         }
+    }
+
+    /// `want` if it's open ground on the map, otherwise `fallback`.
+    fn open_near(obj: &[i32], fallback: Vec2, want: Vec2) -> Vec2 {
+        let ok = want.x > 0.0 && want.y > 0.0 && want.x < W as f32 && want.y < H as f32 && obj[want.y as usize * W + want.x as usize] == FREE;
+        if ok { want } else { fallback }
     }
 
     /// Marks the ground inside every ready safehouse (the base zone is put back first).

@@ -296,7 +296,16 @@ pub static PARTS: &[Part] = &[
 /// so these are off the shelf; a saved build that has one gets the Optic block instead.
 pub fn retired(i: u16) -> bool {
     use Fam::*;
-    matches!(part(i).fam, Crowd | Far | Guard | LastLine | Lead | Scatter | Sweep | Split | Overwatch)
+    // (the crane arm went too: Devin found it goofy)
+    matches!(part(i).fam, Crowd | Far | Guard | LastLine | Lead | Scatter | Sweep | Split | Overwatch | Crane)
+}
+/// What a saved turret gets in place of a retired part.
+pub fn stand_in(i: u16) -> u16 {
+    let to = match part(i).fam {
+        Fam::Crane => "m.mast1",
+        _ => "h.optic1",
+    };
+    find(to).unwrap_or(i)
 }
 
 /// Parts a new campaign starts with in the garage, researched and bought.
@@ -844,28 +853,28 @@ fn apply(pt: &Part, s: &mut Spec) {
         Ring => {
             s.hp = k([280.0, 420.0, 600.0]);
             s.traverse = k([3.0, 3.4, 3.8]);
-            s.cap = k([13.0, 17.0, 22.0]);
+            s.cap = k([14.0, 19.0, 25.0]);
             s.height = 1.9;
         }
         Casemate => {
             s.hp = k([800.0, 1150.0, 1600.0]);
             s.traverse = 2.0;
             s.arc = 70f32.to_radians();
-            s.cap = k([18.0, 23.0, 28.0]);
+            s.cap = k([20.0, 26.0, 32.0]);
             s.dmg *= 1.1;
             s.height = 2.2;
         }
         Mast => {
             s.hp = k([170.0, 250.0, 0.0]);
             s.traverse = 2.0;
-            s.cap = k([10.0, 13.0, 0.0]);
+            s.cap = k([12.0, 15.0, 0.0]);
             s.range *= k([1.3, 1.45, 0.0]);
             s.height = k([6.0, 8.0, 0.0]);
         }
         Popup => {
             s.hp = k([420.0, 600.0, 0.0]);
             s.traverse = 3.2;
-            s.cap = k([17.0, 21.0, 0.0]);
+            s.cap = k([19.0, 24.0, 0.0]);
             s.rise = k([0.7, 0.45, 0.0]);
             s.height = 1.6;
         }
@@ -879,28 +888,28 @@ fn apply(pt: &Part, s: &mut Spec) {
         Gyro => {
             s.hp = k([440.0, 620.0, 0.0]);
             s.traverse = k([5.0, 6.5, 0.0]);
-            s.cap = k([19.0, 25.0, 0.0]);
+            s.cap = k([22.0, 29.0, 0.0]);
             s.fire_on_move = true;
             s.height = 2.0;
         }
         Twin => {
             s.hp = k([520.0, 760.0, 0.0]);
             s.traverse = k([3.0, 3.6, 0.0]);
-            s.cap = k([28.0, 36.0, 0.0]);
+            s.cap = k([30.0, 40.0, 0.0]);
             s.twin_mount = true;
             s.height = 2.0;
         }
         Fortress => {
             s.hp = 2800.0;
             s.traverse = 1.5;
-            s.cap = 34.0;
+            s.cap = 38.0;
             s.regen += 6.0;
             s.height = 2.6;
         }
         Walker => {
             s.hp = k([360.0, 520.0, 0.0]);
             s.traverse = 3.4;
-            s.cap = k([14.0, 18.0, 0.0]);
+            s.cap = k([21.0, 27.0, 0.0]);
             s.leash = k([60.0, 90.0, 0.0]);
             s.height = 3.2;
         }
@@ -971,7 +980,7 @@ fn apply(pt: &Part, s: &mut Spec) {
         Mech => {
             s.hp = 1400.0;
             s.traverse = 2.6;
-            s.cap = 30.0;
+            s.cap = 40.0;
             s.mech = 2.2;
             s.fire_on_move = true;
             s.height = 4.2;
@@ -1302,7 +1311,7 @@ impl Build {
         };
         for (k, slot) in SLOTS.iter().enumerate() {
             let Some(id) = f.get(k + 1) else { break };
-            b.parts[k] = find(id).filter(|i| part(*i).slot() == *slot).map(|i| if retired(i) { find("h.optic1").unwrap_or(i) } else { i });
+            b.parts[k] = find(id).filter(|i| part(*i).slot() == *slot).map(|i| if retired(i) { stand_in(i) } else { i });
         }
         for k in 0..3 {
             if let Some(h) = f.get(8 + k).filter(|h| h.len() == 6) {

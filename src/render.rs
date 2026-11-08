@@ -565,6 +565,13 @@ struct BLook {
     infected: bool,
 }
 
+/// A scene's building and ground meshes, baked off the main thread.
+pub struct Baked {
+    ground: Vec<Mesh>,
+    tiles: Vec<Tile>,
+    looks: Vec<BLook>,
+}
+
 struct Tile {
     solid: Vec<Mesh>,
     /// where each `solid` mesh's building stands (painter mode has one building per mesh)
@@ -681,15 +688,12 @@ fn infected_set(g: &Game) -> std::collections::HashSet<usize> {
 impl Scene {
     /// `painter`: the GPU's depth buffer doesn't work, draw solid things far to near instead.
     pub fn new(g: &Game, th: &Theme, painter: bool) -> Scene {
-        let units = [0, 1].map(|_| {
-            let t = Texture2D::from_rgba8(W as u16, H as u16, &vec![0u8; N * 4]);
-            t.set_filter(FilterMode::Nearest);
-            t
-        });
-        let glow = Texture2D::from_rgba8(CW as u16, CH as u16, &vec![0u8; CW * CH * 4]);
-        glow.set_filter(FilterMode::Linear);
-        let zone = Texture2D::from_rgba8(ZW as u16, ZH as u16, &vec![0u8; ZW * ZH * 4]);
-        zone.set_filter(FilterMode::Linear);
+        Scene::from_baked(Scene::bake(g, th, painter), painter, th.dark)
+    }
+
+    /// The slow, GPU-free part of building a scene (every building's mesh), so it can run on
+    /// another thread while the player keeps clicking the map.
+    pub fn bake(g: &Game, th: &Theme, painter: bool) -> Baked {
         let mut members = vec![Vec::new(); TW * TH];
         for (i, b) in g.world.buildings.iter().enumerate() {
             let tx = (b.c.x.max(0.0) as usize / TILE).min(TW - 1);
@@ -704,10 +708,27 @@ impl Scene {
                 Tile { solid, anchors, rubble, members: m }
             })
             .collect();
-        Scene {
+        Baked {
             ground: build_ground(&g.world, th),
             tiles,
             looks: (0..g.world.buildings.len()).map(|b| look(g, b, &inf)).collect(),
+        }
+    }
+
+    pub fn from_baked(bk: Baked, painter: bool, dark: bool) -> Scene {
+        let units = [0, 1].map(|_| {
+            let t = Texture2D::from_rgba8(W as u16, H as u16, &vec![0u8; N * 4]);
+            t.set_filter(FilterMode::Nearest);
+            t
+        });
+        let glow = Texture2D::from_rgba8(CW as u16, CH as u16, &vec![0u8; CW * CH * 4]);
+        glow.set_filter(FilterMode::Linear);
+        let zone = Texture2D::from_rgba8(ZW as u16, ZH as u16, &vec![0u8; ZW * ZH * 4]);
+        zone.set_filter(FilterMode::Linear);
+        Scene {
+            ground: bk.ground,
+            tiles: bk.tiles,
+            looks: bk.looks,
             units,
             cur: 0,
             units_tick: [0; 2],
@@ -725,7 +746,7 @@ impl Scene {
             bare: painter_material(false),
             depth: depth_material(),
             line_mat: glow_material(painter),
-            dark: th.dark,
+            dark,
             btimer: 0.0,
             ztimer: 0.0,
             need_zone: true,

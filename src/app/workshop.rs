@@ -569,7 +569,9 @@ impl App {
         let total = ids.len().div_ceil(per) as f32 * (th + 8.0);
         if self.hot(list) {
             let (_, wy) = mouse_wheel();
-            w.scroll -= wy.signum() * (th + 8.0);
+            if wy != 0.0 {
+                w.scroll -= wy.signum() * (th + 8.0);
+            }
         }
         w.scroll = w.scroll.clamp(0.0, (total - list.h).max(0.0));
         let mut hover: Option<u16> = None;
@@ -1150,7 +1152,9 @@ impl App {
         let total = self.library.builds.len() as f32 * lh;
         if self.hot(list) {
             let (_, wy) = mouse_wheel();
-            w.lib_scroll -= wy.signum() * lh * 1.5;
+            if wy != 0.0 {
+                w.lib_scroll -= wy.signum() * lh * 1.5;
+            }
         }
         w.lib_scroll = w.lib_scroll.clamp(0.0, (total - list.h).max(0.0));
         let mut load = None;

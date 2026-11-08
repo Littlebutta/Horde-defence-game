@@ -64,7 +64,9 @@ impl App {
         let max = (rows - inner.h).max(0.0);
         if self.hot(list) {
             let (_, wy) = mouse_wheel();
-            self.invite_scroll -= wy.signum() * ROW;
+            if wy != 0.0 {
+                self.invite_scroll -= wy.signum() * ROW;
+            }
         }
         self.invite_scroll = self.invite_scroll.clamp(0.0, max);
         if friends.is_empty() {

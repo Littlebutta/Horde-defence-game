@@ -234,7 +234,8 @@ pub(super) fn turret(mb: &mut MB, b: &Build, sp: &Spec, c: Vec2, base: f32, pose
             (c, base + 2.6)
         }
         Fam::Walker => {
-            let lift = base + 2.8 + (pose.walk * 6.0).sin().abs() * 0.25;
+            // high enough, with the knees tucked under the hull, that the barrel clears the legs
+            let lift = base + 3.6 + (pose.walk * 6.0).sin().abs() * 0.25;
             for k in 0..4 {
                 let a = k as f32 * std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_4;
                 let step = (pose.walk * 6.0 + k as f32 * 1.6).sin() * 0.5;
@@ -244,16 +245,16 @@ pub(super) fn turret(mb: &mut MB, b: &Build, sp: &Spec, c: Vec2, base: f32, pose
                 strut(
                     mb,
                     c + d * 0.8,
-                    lift - 0.4,
+                    lift - 0.5,
                     knee,
-                    lift + 0.8,
+                    lift - 0.15,
                     0.18,
                     mix(STEEL, body, 0.3),
                 );
                 strut(
                     mb,
                     knee,
-                    lift + 0.8,
+                    lift - 0.15,
                     foot,
                     base + 0.1,
                     0.15,
@@ -284,24 +285,43 @@ pub(super) fn turret(mb: &mut MB, b: &Build, sp: &Spec, c: Vec2, base: f32, pose
             (c, z1 + 0.3)
         }
     };
-    // accessories: a light or a fitting each, never more
+    let stripe = [3usize, 4].iter().find_map(|k| fam(*k).and_then(stripe));
+    let twin = mount == Fam::Twin;
+    let heads: Vec<(Vec2, f32)> = if twin {
+        let s = vec2(-pose.aim.sin(), pose.aim.cos());
+        vec![(hc + s * 1.2, pose.aim), (hc - s * 1.2, pose.aim2)]
+    } else {
+        vec![(hc, pose.aim)]
+    };
+    let scale = if twin { 0.75 } else { 1.0 };
+    // accessories: a light or a fitting each, never more, bolted onto the head (each onto its
+    // own head on a twin mount) so nothing sinks into the mount or floats beside it
     let mut top = hz;
+    let hf = fam(1).unwrap_or(Fam::Iron);
+    let (hw, ht) = match hf {
+        Fam::Gang => (1.5, 0.9),
+        Fam::Battery => (1.75, 1.125),
+        Fam::Crowd | Fam::Scatter | Fam::Overwatch => (1.15, 1.15),
+        Fam::Guard | Fam::Split | Fam::Sweep => (1.1, 0.9),
+        _ => (1.0, 0.9),
+    };
+    let (hw, ht) = (hw * scale, ht * scale);
     for k in [5usize, 6] {
         let Some(f) = fam(k) else { continue };
-        let back = hc - vec2(pose.aim.cos(), pose.aim.sin()) * 1.2;
-        let sidev = vec2(-pose.aim.sin(), pose.aim.cos()) * if k == 5 { 0.9 } else { -0.9 };
+        let (hp, a) = if twin { heads[k - 5] } else { heads[0] };
+        let fwd = vec2(a.cos(), a.sin());
+        let sgn = if twin { if k == 5 { 1.0 } else { -1.0 } } else if k == 5 { 1.0 } else { -1.0 };
+        let sidev = vec2(-fwd.y, fwd.x) * sgn;
+        let roof = hz + ht;
+        // a spot on the head's roof, towards the back on this accessory's side
+        let back = hp - fwd * 0.55 * scale + sidev * (hw * 0.45);
         match f {
             Fam::Plates => {
-                if mount != Fam::Walker && mount != Fam::Mast {
-                    // a second set goes on above the first
-                    let z = if k == 6 && fam(5) == Some(Fam::Plates) { 0.6 } else { 0.0 };
-                    band(
-                        mb,
-                        &chamfer(c, 2.65, 2.65, 1.0, 0.0),
-                        base + 0.6 + z,
-                        base + 1.1 + z,
-                        mix(STEEL_DARK, body, 0.2),
-                    );
+                // an armour slab hung on this side of the head (a second set doubles it)
+                let off = hw + 0.12 * scale;
+                for sd in if twin { vec![1.0f32, -1.0] } else { vec![sgn] } {
+                    let sv = vec2(-fwd.y, fwd.x) * sd;
+                    block(mb, &rect(hp + sv * off - fwd * 0.1 * scale, -1.05 * scale, -0.12 * scale, 0.95 * scale, 0.12 * scale, a), hz + 0.08, hz + ht * 0.8, mix(STEEL_DARK, body, 0.2), STEEL_DARK);
                 }
             }
             Fam::Shield => ring_flat(
@@ -313,43 +333,36 @@ pub(super) fn turret(mb: &mut MB, b: &Build, sp: &Spec, c: Vec2, base: f32, pose
                 rgba(120, 200, 255, 0.55 + 0.25 * (pose.t * 3.0).sin().abs()),
             ),
             Fam::Spotter => {
-                strut(mb, back + sidev, hz, back + sidev, hz + 2.2, 0.06, STEEL);
-                lamp(mb, back + sidev, hz + 2.2, 0.16, rgb(250, 82, 82));
+                strut(mb, back, roof, back, roof + 1.6, 0.06, STEEL);
+                lamp(mb, back, roof + 1.6, 0.16, rgb(250, 82, 82));
             }
             Fam::Rangefinder | Fam::Stabiliser => {
-                lamp(mb, hc + sidev * 1.1, hz + 0.6, 0.2, rgb(255, 230, 140))
+                // a little sight box on the roof, near the front
+                let at = hp + fwd * 0.35 * scale + sidev * (hw * 0.45);
+                block(mb, &rect(at, -0.3 * scale, -0.18 * scale, 0.3 * scale, 0.18 * scale, a), roof, roof + 0.3 * scale, STEEL_DARK, STEEL_DARK);
+                lamp(mb, at + fwd * 0.3 * scale, roof + 0.15 * scale, 0.12 * scale, rgb(255, 230, 140));
             }
-            Fam::Repair => lamp(mb, back + sidev, hz, 0.2, rgb(64, 192, 87)),
+            Fam::Repair => lamp(mb, back, roof + 0.15, 0.2 * scale, rgb(64, 192, 87)),
+            Fam::Cooling => lamp(mb, back, roof + 0.15, 0.2 * scale, rgb(120, 220, 255)),
             Fam::Mines | Fam::Hopper | Fam::Recycler => block(
                 mb,
-                &rect(back + sidev, -0.4, -0.4, 0.4, 0.4, pose.aim),
-                hz,
-                hz + 0.5,
+                &rect(back, -0.35 * scale, -0.3 * scale, 0.35 * scale, 0.3 * scale, a),
+                roof,
+                roof + 0.4 * scale,
                 mix(gun, rgb(80, 90, 70), 0.5),
                 STEEL_DARK,
             ),
-            Fam::Ciws => beam(
-                mb,
-                hc + sidev * 1.3,
-                hc + sidev * 1.3 + vec2(pose.aim.cos(), pose.aim.sin()) * 1.2,
-                0.1,
-                hz + 0.3,
-                STEEL_DARK,
-            ),
-            Fam::Cooling => lamp(mb, back + sidev, hz, 0.2, rgb(120, 220, 255)),
+            Fam::Ciws => {
+                // a short bracket off the head's side, the gun on its end
+                let root = hp + sidev * hw;
+                let tip = hp + sidev * (hw + 0.35 * scale);
+                beam(mb, root, tip, 0.1 * scale, hz + ht * 0.5, STEEL_DARK);
+                beam(mb, tip, tip + fwd * 1.2 * scale, 0.1 * scale, hz + ht * 0.5, STEEL_DARK);
+            }
             _ => {}
         }
-        top = top.max(hz);
+        top = top.max(roof);
     }
-    let stripe = [3usize, 4].iter().find_map(|k| fam(*k).and_then(stripe));
-    let twin = mount == Fam::Twin;
-    let heads: Vec<(Vec2, f32)> = if twin {
-        let s = vec2(-pose.aim.sin(), pose.aim.cos());
-        vec![(hc + s * 1.2, pose.aim), (hc - s * 1.2, pose.aim2)]
-    } else {
-        vec![(hc, pose.aim)]
-    };
-    let scale = if twin { 0.75 } else { 1.0 };
     for (p, a) in heads {
         let t = head(
             mb,

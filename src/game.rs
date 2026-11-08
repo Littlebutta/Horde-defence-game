@@ -202,6 +202,7 @@ pub fn civ_here(st: u8) -> bool {
     st < C_DEAD || matches!(st, C_TO_PAD | C_AT_PAD | C_TO_IDLE | C_AT_HQ | C_SAFE | C_RIDE)
 }
 
+#[derive(Clone)]
 pub struct Civ {
     pub p: Vec2,
     pub st: u8,
@@ -4263,6 +4264,23 @@ impl Game {
         }
     }
 
+    /// After the HQ moved while choosing its spot: keeps the old game's civilians everywhere except
+    /// near the old and new HQ, where this game's freshly placed ones are used (so only the
+    /// neighbourhood around the HQ changes, not the whole city).
+    pub fn keep_civs_from(&mut self, old: &[Civ], old_hq: Vec2) {
+        const R: f32 = 150.0;
+        let new_hq = self.world.hq;
+        let near = |p: Vec2| p.distance(new_hq) < R || p.distance(old_hq) < R;
+        let obj = &self.obj;
+        let zone = &self.world.zone;
+        let mut out: Vec<Civ> = self.civs.iter().filter(|c| near(c.p)).cloned().collect();
+        out.extend(old.iter().filter(|c| {
+            let i = c.p.y as usize * W + c.p.x as usize;
+            c.st == C_ROAM && !near(c.p) && i < N && obj[i] == FREE && zone[i] != 1
+        }).cloned());
+        self.civs = out;
+    }
+
     /// Replaces the city's civilians with `n` new ones (the campaign sizes them to the city).
     pub fn set_civilians(&mut self, n: usize) {
         self.civs.clear();
@@ -5774,6 +5792,26 @@ mod tests {
         assert!(g.safes[0].saved > 0, "the convoy never brought anyone to the HQ");
         assert!(g.safe_upgrade(0, SU_WALLS));
         assert!(g.structs.iter().filter(|s| !s.dead && s.t.is_wall() && point_in(&sq, s.center())).count() > 10);
+        // an extra truck, then packing up gives back everything spent and takes the walls down
+        g.scrap += 1000.0;
+        let trucks = g.trucks.len();
+        assert!(g.safe_upgrade(0, SU_TRUCK));
+        assert_eq!(g.trucks.len(), trucks + 1);
+        let before = g.scrap;
+        let spent = g.safes[0].spent;
+        assert_eq!(spent, SAFE_COST + SAFE_UPS[SU_WALLS as usize].2 + TRUCK_COST);
+        assert!(g.safe_upgrade(0, SU_PACK));
+        assert_eq!(g.scrap, before + spent);
+        assert_eq!(g.safes[0].state, SH_LOST);
+        assert!(!g.structs.iter().any(|s| !s.dead && s.t.is_wall() && point_in(&sq, s.center())), "walls left after packing up");
+        assert!(!g.civs.iter().any(|c| c.st == C_SAFE));
+        for _ in 0..3000 {
+            g.tick();
+            if g.trucks.is_empty() {
+                break;
+            }
+        }
+        assert!(g.trucks.is_empty(), "the trucks never got home");
     }
 
     /// Cells reachable on open ground from the HQ, over `obj`.

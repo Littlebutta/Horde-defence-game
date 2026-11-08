@@ -264,7 +264,7 @@ pub struct App {
     place_at: Option<Vec2>,
     /// the game for a newly picked HQ spot, being built on another thread so the click doesn't
     /// stall a frame
-    place_job: Option<std::sync::mpsc::Receiver<Game>>,
+    place_job: Option<std::sync::mpsc::Receiver<(Game, render::Baked)>>,
     place_go: bool,
     /// headless tests start right away with the suggested HQ (`PH_PLACE=1` shows the choice)
     auto_place: bool,
@@ -2192,19 +2192,27 @@ impl App {
     }
     /// The rest of setting up a new game once `Game::new` is done: co-op HQs, the campaign's
     /// tech and loadout.
-    fn finish_game(&self, mut g: Game) -> Game {
+    fn finish_game(&self, g: Game) -> Game {
         let camp = if self.in_camp { self.camp.as_ref() } else { None };
         let spots = self.hq_spots();
         // co-op: an HQ for every player
         let players = match &self.sess {
-            Some(s) if s.in_game || !s.is_host() => s.game_players,
-            Some(s) => s.players.len(),
+            Some(s) if s.in_game || !s.is_host() => Some(s.game_players),
+            Some(s) => Some(s.players.len()),
+            None => None,
+        };
+        Self::finish_with(g, camp, &spots, players)
+    }
+    /// `finish_game` without the app, so it can run on another thread (`players`: None alone).
+    fn finish_with(mut g: Game, camp: Option<&campaign::Campaign>, spots: &[Option<Vec2>], players: Option<usize>) -> Game {
+        let players = match players {
+            Some(n) => n,
             None => {
                 g.relax_fields();
                 1
             }
         };
-        g.add_player_hqs_at(players, &spots);
+        g.add_player_hqs_at(players, spots);
         if let Some(c) = camp {
             c.apply(&mut g);
         }
@@ -2212,13 +2220,19 @@ impl App {
     }
 
     fn show(&mut self, g: Game, recentre: bool) {
+        self.show_baked(g, recentre, None);
+    }
+    fn show_baked(&mut self, g: Game, recentre: bool, bk: Option<render::Baked>) {
         if recentre {
             self.cam = Orbit { t: self.my_hq(&g), dist: 0.0, yaw: 0.0, pitch: 0.95 };
             self.cam.set_scale((screen_height() / 260.0).max(1.5));
         }
         let aa = self.aa;
         let painter = *self.depth.get_or_insert_with(|| pick_depth(aa)) == render::DepthMode::Painter;
-        self.scene = Some(Scene::new(&g, self.theme(), painter));
+        self.scene = Some(match bk {
+            Some(bk) => Scene::from_baked(bk, painter, self.theme().dark),
+            None => Scene::new(&g, self.theme(), painter),
+        });
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
         let mut n = News::new(g.fac, seed);
         if let Some(x) = std::env::var("PH_NEWS").ok().and_then(|v| v.parse().ok()) {
@@ -2299,8 +2313,21 @@ impl App {
         if self.sess.is_none() {
             let (d, fac, mult) = self.game_args(d);
             let (tx, rx) = std::sync::mpsc::channel();
+            let camp = if self.in_camp { self.camp.clone() } else { None };
+            let spots = self.hq_spots();
+            // only the people around the old and new spots are placed afresh
+            let old = self.game.as_ref().map(|g| (g.civs.clone(), g.world.hq));
+            let th = self.theme();
+            let aa = self.aa;
+            let painter = *self.depth.get_or_insert_with(|| pick_depth(aa)) == render::DepthMode::Painter;
             std::thread::spawn(move || {
-                let _ = tx.send(Game::new(d, fac, mult, seed));
+                let g = Self::finish_with(Game::new(d, fac, mult, seed), camp.as_ref(), &spots, None);
+                let mut g = g;
+                if let Some((civs, hq)) = old {
+                    g.keep_civs_from(&civs, hq);
+                }
+                let bk = render::Scene::bake(&g, th, painter);
+                let _ = tx.send((g, bk));
             });
             self.place_job = Some(rx);
             return;
@@ -2322,10 +2349,9 @@ impl App {
                 Err(_) => (None, true),
             }
         };
-        if let Some(g) = got {
+        if let Some((g, bk)) = got {
             self.place_job = None;
-            let g = self.finish_game(g);
-            self.show(g, false);
+            self.show_baked(g, false, Some(bk));
         } else if gone {
             self.place_job = None;
         }
@@ -3876,10 +3902,33 @@ impl App {
         let ups = s.ups;
         let bw = 156.0;
         let w = 24.0 + SAFE_UPS.len() as f32 * (bw + 6.0) - 6.0;
-        let r = Rect::new(area.x + 12.0, bar.y - 76.0, w.max(300.0), 64.0);
+        let (extra, spent, live) = (s.extra, s.spent, s.state != SH_LOST);
+        let r = Rect::new(area.x + 12.0, bar.y - 110.0, w.max(300.0), 98.0);
         self.panel(r);
         self.ui_rects.push(r);
         text(&self.fonts.mono, &head, r.x + 12.0, r.y + 20.0, 12.5, rgb(116, 192, 252));
+        // a second row: more trucks, and packing the whole thing up
+        let b = Rect::new(r.x + 12.0, r.y + 62.0, bw, 28.0);
+        let full = extra >= TRUCK_EXTRA_MAX;
+        let label = if full { "Trucks: max".to_string() } else { format!("+1 truck ${:.0}", TRUCK_COST) };
+        let can = ready && !full && g.scrap >= TRUCK_COST;
+        let clicked = self.button(b, &label, can, false);
+        if self.hot(b) {
+            self.tip = Some(format!("Another convoy truck for this safehouse ({} bought, up to {})", extra, TRUCK_EXTRA_MAX));
+        }
+        if clicked && can {
+            self.act(g, Cmd::SafeUp(k as u32, SU_TRUCK));
+        }
+        let b = Rect::new(r.x + 12.0 + bw + 6.0, r.y + 62.0, bw, 28.0);
+        let clicked = self.button(b, &format!("Pack up +${:.0}", spent), live, false);
+        if self.hot(b) {
+            self.tip = Some("Pack up and drive back to the HQ: everything spent on it is refunded, the people waiting ride along".to_string());
+        }
+        if clicked && live {
+            self.act(g, Cmd::SafeUp(k as u32, SU_PACK));
+            self.sel_safe = None;
+            return;
+        }
         for (u, (name, what, cost)) in SAFE_UPS.iter().enumerate() {
             let b = Rect::new(r.x + 12.0 + u as f32 * (bw + 6.0), r.y + 28.0, bw, 28.0);
             let have = ups & (1 << u) != 0;
