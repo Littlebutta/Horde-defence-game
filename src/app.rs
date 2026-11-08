@@ -37,6 +37,18 @@ enum Tool {
     Safe,
 }
 
+/// The build bar's tabs.
+const BAR_TABS: [&str; 4] = ["Defence", "Economy", "Rescue", "Troops"];
+/// Which build bar tab a tool sits in.
+fn tab_of(t: Tool) -> usize {
+    match t {
+        Tool::Build(S::Extractor | S::Plant | S::ScrapDepot | S::AmmoDepot | S::Lab) => 1,
+        Tool::Build(S::Pad | S::Rescue | S::Outpost) | Tool::Safe => 2,
+        Tool::Unit(_) => 3,
+        _ => 0,
+    }
+}
+
 /// The safehouse's line on the build bar.
 const SAFE_TIP: &str = "Click corners around one or more whole buildings out in the city, then click the first corner again. A slow truck drives out and sets up a safehouse: civilians nearby run to it, turrets go up inside at base price with no helicopter, and armoured trucks bring the people there to the HQ. Click it later for walls and other upgrades. No hostiles may be close when you send the truck.";
 
@@ -60,7 +72,7 @@ impl HubAct {
     fn code(self) -> u32 {
         match self {
             HubAct::Tech(t) => campaign::TECH.iter().position(|x| *x == t).unwrap_or(0) as u32,
-            HubAct::Recruit(u) => 1000 + (u == U::Tank) as u32,
+            HubAct::Recruit(u) => 1000 + match u { U::Rifle => 0, U::Tank => 1, U::Sniper => 2 },
             HubAct::City(i) => 2000 + i as u32,
             HubAct::Go => 3000,
             HubAct::Hunt(a) => 4000 + a as u32,
@@ -73,6 +85,7 @@ impl HubAct {
             0..=999 => HubAct::Tech(*campaign::TECH.get(v as usize)?),
             1000 => HubAct::Recruit(U::Rifle),
             1001 => HubAct::Recruit(U::Tank),
+            1002 => HubAct::Recruit(U::Sniper),
             2000..=2999 => HubAct::City((v - 2000) as usize),
             3000 => HubAct::Go,
             4000..=4002 => HubAct::Hunt((v - 4000) as usize),
@@ -206,6 +219,17 @@ pub struct App {
     sel_struct: Option<usize>,
     /// a selected safehouse (its upgrades show)
     sel_safe: Option<usize>,
+    /// the build bar tab showing (`BAR_TABS`)
+    bar_tab: usize,
+    /// more troops and aimable structures added to the selection with Shift
+    more_groups: Vec<usize>,
+    more_structs: Vec<usize>,
+    /// Ctrl+number: saved selections (troops, structures), and the last recall (key, time)
+    ctrl_groups: Vec<(Vec<usize>, Vec<usize>)>,
+    last_recall: (usize, f32),
+    /// where the right button went down with troops selected (they move there on release;
+    /// dragging points sniper teams)
+    rmove: Option<(Vec2, Vec2)>,
     /// the corners of the safehouse border being drawn
     safe_pts: Vec<Vec2>,
     /// height of the build bar, so panels above it can sit clear
@@ -445,6 +469,12 @@ impl App {
             cam: Orbit { t: vec2(W as f32 / 2.0, H as f32 / 2.0), dist: 400.0, yaw: 0.0, pitch: 0.95 },
             tool: Tool::None,
             sel_safe: None,
+            bar_tab: 0,
+            more_groups: Vec::new(),
+            more_structs: Vec::new(),
+            ctrl_groups: vec![(Vec::new(), Vec::new()); 10],
+            last_recall: (99, -9.0),
+            rmove: None,
             safe_pts: Vec::new(),
             press: None,
             panning: false,
@@ -2589,6 +2619,14 @@ impl App {
                 self.sel_struct = None;
             }
         }
+        self.more_groups.retain(|&i| i < g.groups.len() && !g.groups[i].dead);
+        self.more_structs.retain(|&i| i < g.structs.len() && !g.structs[i].dead);
+        if self.selected.is_none() && !self.more_groups.is_empty() {
+            self.selected = Some(self.more_groups.remove(0));
+        }
+        if self.sel_struct.is_none() && !self.more_structs.is_empty() {
+            self.sel_struct = Some(self.more_structs.remove(0));
+        }
 
         // camera
         let (sw, sh) = (screen_width(), screen_height());
@@ -2626,6 +2664,8 @@ impl App {
                 scale: self.cam.scale(),
                 selected: self.selected,
                 sel_struct: self.sel_struct,
+                more_groups: self.more_groups.clone(),
+                more_structs: self.more_structs.clone(),
                 time: self.clock,
                 eye: cam.position.truncate(),
             },
@@ -2940,11 +2980,14 @@ impl App {
                 // rooftop spot for turrets
                 if d.turret && !d.ground && self.press.is_none() {
                     if let Some((b, p)) = g.roof_at(mw) {
-                        let q = p;
-                        let can = g.can_place_roof(t, b, p);
+                        let fit = g.roof_fit(t, b, p);
+                        let q = fit.map_or(p, |f| f.0);
+                        let can = fit.is_some();
                         let cost = g.cost_for(self.me(), t, p);
                         let afford = g.scrap >= cost;
-                        ghost(q.x - d.w as f32 / 2.0, q.y - d.h as f32 / 2.0, d.w as f32, d.h as f32, g.world.buildings[b].h, can && afford);
+                        sc.use_solid();
+                        render::ghost_turned(q, d.w as f32, d.h as f32, fit.map_or(0.0, |f| f.1), g.world.buildings[b].h, can && afford);
+                        gl_use_material(flat);
                         let hb = g.world.buildings[b].h;
                         let range = g.turret_range_on(t, hb, self.me());
                         let dead = dead_zone(hb, range);
@@ -3137,6 +3180,25 @@ impl App {
                 Some((s, if ok { WHITE } else { rgb(255, 140, 140) }))
             }
             Tool::None | Tool::Custom(_) => {
+                // sniper teams: the line they watch, and where a right-drag will point them
+                let snipers: Vec<usize> = self.selected.into_iter().chain(self.more_groups.iter().copied()).filter(|&gi| gi < g.groups.len() && g.groups[gi].kind == U::Sniper).collect();
+                for &gi in &snipers {
+                    let gr = &g.groups[gi];
+                    let live: Vec<Vec2> = gr.m.iter().filter(|m| m.alive).map(|m| m.p).collect();
+                    if live.is_empty() {
+                        continue;
+                    }
+                    let c = live.iter().fold(Vec2::ZERO, |a, p| a + *p) / live.len() as f32;
+                    let range = g.weapon(U::Sniper, gr.own as usize).range;
+                    Self::cone_marks(c, range, 1.5, gr.face, SNIPER_CONE, rgba(255, 212, 59, 0.7));
+                }
+                if let (Some((s0, w0)), false) = (self.rmove, snipers.is_empty()) {
+                    if (self.px_mouse() - s0).length() > 8.0 {
+                        let range = udef(U::Sniper).range;
+                        Self::cone_marks(w0, range, 1.5, (mw - w0).to_angle(), SNIPER_CONE, rgba(255, 255, 255, 0.5));
+                        return Some(("Let go to point the snipers this way".into(), WHITE));
+                    }
+                }
                 let i = self.sel_struct?;
                 let s = &g.structs[i];
                 match s.t {
@@ -3257,36 +3319,69 @@ impl App {
         }
 
         // ---- build bar, centred along the bottom; wraps to two rows when the HUD is too narrow
-        let items: Vec<Tool> = BUILD_ORDER
+        // one tab of it at a time (Tab flips through them); the bar keeps the width of the
+        // biggest tab so it doesn't jump about
+        let all: Vec<Tool> = BUILD_ORDER
             .iter()
             .filter(|s| !(g.campaign && **s == S::Lab) && g.build_ok(self.me(), **s))
             .map(|s| Tool::Build(*s))
             .chain(g.safe_ok(self.me()).then_some(Tool::Safe))
-            .chain([U::Rifle, U::Tank].into_iter().filter(|u| g.unit_ok(self.me(), *u)).map(Tool::Unit))
+            .chain([U::Rifle, U::Sniper, U::Tank].into_iter().filter(|u| g.unit_ok(self.me(), *u)).map(Tool::Unit))
             .chain(self.custom_tools(g).into_iter().map(|c| Tool::Custom(c.0)))
             .collect();
+        let counts: Vec<usize> = (0..BAR_TABS.len()).map(|t| all.iter().filter(|it| tab_of(**it) == t).count()).collect();
+        if counts[self.bar_tab.min(BAR_TABS.len() - 1)] == 0 {
+            self.bar_tab = counts.iter().position(|&c| c > 0).unwrap_or(0);
+        }
+        let items: Vec<Tool> = all.iter().copied().filter(|it| tab_of(*it) == self.bar_tab).collect();
         let customs = self.custom_tools(g);
         let (gap, ch) = (6.0, 60.0);
         let room = area.w - 24.0 - 16.0;
         let mut bw = 100.0f32;
-        let n = items.len().max(1);
-        if n as f32 * (bw + gap) - gap > room {
-            bw = ((room + gap) / n as f32 - gap).max(98.0);
+        let most = counts.iter().copied().max().unwrap_or(1).max(1);
+        if most as f32 * (bw + gap) - gap > room {
+            bw = ((room + gap) / most as f32 - gap).max(98.0);
         }
-        // as many rows as it takes, with the items shared evenly between them
-        let nrows = n.div_ceil((((room + gap) / (bw + gap)).floor() as usize).clamp(1, n));
-        let per_row = n.div_ceil(nrows);
-        let bar_w = per_row as f32 * (bw + gap) - gap + 16.0;
-        let bar_h = nrows as f32 * (ch + gap) - gap + 16.0;
+        let fit_row = (((room + gap) / (bw + gap)).floor() as usize).clamp(1, most);
+        let nrows_max = most.div_ceil(fit_row);
+        let per_row = most.div_ceil(nrows_max);
+        let n = items.len().max(1);
+        let nrows = n.div_ceil(per_row);
+        let tab_h = 30.0;
+        let bar_w = (per_row as f32 * (bw + gap) - gap + 16.0).max(BAR_TABS.len() as f32 * 112.0 + 16.0);
+        let bar_h = tab_h + nrows_max as f32 * (ch + gap) - gap + 16.0;
         let bar = Rect::new(area.x + (area.w - bar_w) / 2.0, area.bottom() - bar_h - 12.0, bar_w, bar_h);
         self.panel(bar);
         self.bar_h = area.bottom() - bar.y;
+        // the tabs along its top
+        for (t, name) in BAR_TABS.iter().enumerate() {
+            if counts[t] == 0 {
+                continue;
+            }
+            let tr = Rect::new(bar.x + 8.0 + t as f32 * 112.0, bar.y + 6.0, 106.0, tab_h - 6.0);
+            let on = t == self.bar_tab;
+            let hot = self.hot(tr);
+            rrect(tr, 6.0, if on { mix(p.panel2, p.accent, 0.3) } else if hot { mix(p.panel2, p.text, 0.08) } else { alpha(p.panel2, 0.6) });
+            if on {
+                draw_rectangle(tr.x + 8.0, tr.bottom() - 2.0, tr.w - 16.0, 2.0, p.accent);
+            }
+            let label = format!("{} {}", name, counts[t]);
+            let tw = text_w(&self.fonts.head, &label, 13.0);
+            text(&self.fonts.head, &label, tr.x + (tr.w - tw) / 2.0, tr.y + 17.0, 13.0, if on { p.text } else { p.dim });
+            self.ui_rects.push(tr);
+            if hot {
+                self.tip = Some(format!("{} [Tab flips through the tabs]", name));
+                if self.pressed(true) {
+                    self.bar_tab = t;
+                }
+            }
+        }
         for (i, it) in items.iter().enumerate() {
             let (ri, ci) = (i / per_row, i % per_row);
             // the last row is centred
             let in_row = if ri + 1 == nrows { n - ri * per_row } else { per_row };
-            let off = (per_row - in_row) as f32 * (bw + gap) / 2.0;
-            let r = Rect::new(bar.x + 8.0 + off + ci as f32 * (bw + gap), bar.y + 8.0 + ri as f32 * (ch + gap), bw, ch);
+            let off = (per_row - in_row) as f32 * (bw + gap) / 2.0 + (bar_w - 16.0 - (per_row as f32 * (bw + gap) - gap)) / 2.0;
+            let r = Rect::new(bar.x + 8.0 + off + ci as f32 * (bw + gap), bar.y + tab_h + 6.0 + ri as f32 * (ch + gap), bw, ch);
             let (key, name, cost, col, tip, ok) = match it {
                 Tool::Build(s) => {
                     let d = def(*s);
@@ -3341,6 +3436,7 @@ impl App {
                 Tool::Build(S::Flame) => "Flame",
                 Tool::Build(S::Helium) => "Helium",
                 Tool::Unit(U::Rifle) => "Rifles",
+                Tool::Unit(U::Sniper) => "Snipers",
                 _ => name,
             };
             let nm = fit(&self.fonts.head, nm, r.w - 20.0, 14.0);
@@ -3447,13 +3543,22 @@ impl App {
         if let Some(gi) = self.selected {
             let gr = &g.groups[gi];
             let n = gr.m.iter().filter(|m| m.alive).count();
-            let s = format!(
-                "{} · {} alive{} · right-click to move{}",
-                udef(gr.kind).name,
-                n,
-                if gr.state == GState::Garrison { " · garrisoned" } else { "" },
-                if gr.kind == U::Rifle { " (click a building to garrison)" } else { "" }
-            );
+            let extra = self.more_groups.len() + self.more_structs.len() + self.sel_struct.is_some() as usize;
+            let s = if extra > 0 {
+                format!("{} selected · right-click sends them all · Ctrl+1-9 saves the group", extra + 1)
+            } else {
+                format!(
+                    "{} · {} alive{} · right-click to move{}",
+                    udef(gr.kind).name,
+                    n,
+                    if gr.state == GState::Garrison { " · garrisoned" } else { "" },
+                    match gr.kind {
+                        U::Rifle => " (click a building to garrison)",
+                        U::Sniper => ", hold and drag to point them",
+                        U::Tank => "",
+                    }
+                )
+            };
             let r = Rect::new(area.x + 12.0, bar.y - 46.0, text_w(&self.fonts.mono, &s, 13.0) + 32.0, 34.0);
             self.panel(r);
             draw_circle(r.x + 14.0, r.y + 17.0, 3.5, udef(gr.kind).col);
@@ -3738,6 +3843,16 @@ impl App {
     }
 
     /// The selected turret's card over the build bar: what it is and its targeting buttons.
+    /// Where the k-th of several groups sent to one spot goes, round it.
+    fn spread(k: usize) -> Vec2 {
+        if k == 0 {
+            return Vec2::ZERO;
+        }
+        let ring = 1 + (k - 1) / 6;
+        let a = (k - 1) as f32 / 6.0 * std::f32::consts::TAU + ring as f32 * 0.4;
+        vec2(a.cos(), a.sin()) * 9.0 * ring as f32
+    }
+
     /// Sends the safehouse border drawn so far.
     fn finish_safe(&mut self, g: &mut Game) {
         let mut pts = [Vec2::ZERO; SAFE_PTS];
@@ -3759,7 +3874,7 @@ impl App {
         };
         let ready = s.state == SH_READY;
         let ups = s.ups;
-        let bw = 150.0;
+        let bw = 156.0;
         let w = 24.0 + SAFE_UPS.len() as f32 * (bw + 6.0) - 6.0;
         let r = Rect::new(area.x + 12.0, bar.y - 76.0, w.max(300.0), 64.0);
         self.panel(r);
@@ -3832,9 +3947,56 @@ impl App {
             return;
         }
         let ui = self.over_ui();
+        // control groups: Ctrl+number saves what's selected, the number alone picks it again
+        // (twice quickly: the camera goes there); an empty number is still a build key
+        let ctrl = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl);
+        let digits = [KeyCode::Key0, KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4, KeyCode::Key5, KeyCode::Key6, KeyCode::Key7, KeyCode::Key8, KeyCode::Key9];
+        let mut recalled = false;
+        for (k, key) in digits.into_iter().enumerate() {
+            if !is_key_pressed(key) || self.placing.is_some() {
+                continue;
+            }
+            if ctrl {
+                let gs: Vec<usize> = self.selected.into_iter().chain(self.more_groups.iter().copied()).collect();
+                let ss: Vec<usize> = self.sel_struct.into_iter().chain(self.more_structs.iter().copied()).collect();
+                if !gs.is_empty() || !ss.is_empty() {
+                    self.msg = (format!("Group {} saved: press {} to pick it again", k, k), 2.0);
+                }
+                self.ctrl_groups[k] = (gs, ss);
+                recalled = true;
+            } else {
+                let (gs, ss) = self.ctrl_groups[k].clone();
+                let gs: Vec<usize> = gs.into_iter().filter(|&i| i < g.groups.len() && !g.groups[i].dead).collect();
+                let ss: Vec<usize> = ss.into_iter().filter(|&i| i < g.structs.len() && !g.structs[i].dead).collect();
+                if gs.is_empty() && ss.is_empty() {
+                    continue;
+                }
+                self.tool = Tool::None;
+                self.sel_safe = None;
+                self.selected = gs.first().copied();
+                self.more_groups = gs.iter().skip(1).copied().collect();
+                self.sel_struct = ss.first().copied();
+                self.more_structs = ss.iter().skip(1).copied().collect();
+                if self.last_recall.0 == k && self.clock - self.last_recall.1 < 0.45 {
+                    let pts: Vec<Vec2> = gs.iter().flat_map(|&i| g.groups[i].m.iter().filter(|m| m.alive).map(|m| m.p)).chain(ss.iter().map(|&i| g.structs[i].center())).collect();
+                    if !pts.is_empty() {
+                        self.cam.t = pts.iter().fold(Vec2::ZERO, |a, p| a + *p) / pts.len() as f32;
+                    }
+                }
+                self.last_recall = (k, self.clock);
+                recalled = true;
+            }
+        }
+        if is_key_pressed(KeyCode::Tab) && self.placing.is_none() {
+            self.bar_tab = (self.bar_tab + 1) % BAR_TABS.len();
+        }
         // keyboard
+        let tool_before = self.tool;
         while let Some(ch) = get_char_pressed() {
             let ch = ch.to_ascii_lowercase();
+            if recalled && ch.is_ascii_digit() || ch == '\t' {
+                continue;
+            }
             if let Some(s) = BUILD_ORDER.iter().find(|s| def(**s).key == ch && !(g.campaign && **s == S::Lab) && g.build_ok(self.me(), **s) && self.placing.is_none()) {
                 self.tool = if self.tool == Tool::Build(*s) {
                     Tool::None
@@ -3844,7 +4006,7 @@ impl App {
             } else if self.placing.is_some() && !"tkmfh".contains(ch) {
             } else if ch == '[' && g.safe_ok(self.me()) {
                 self.tool = if self.tool == Tool::Safe { Tool::None } else { Tool::Safe };
-            } else if let Some(u) = [U::Rifle, U::Tank].iter().find(|u| udef(**u).key == ch && g.unit_ok(self.me(), **u)) {
+            } else if let Some(u) = [U::Rifle, U::Tank, U::Sniper].iter().find(|u| udef(**u).key == ch && g.unit_ok(self.me(), **u)) {
                 self.tool = Tool::Unit(*u);
             } else if let Some(a) = ABILITIES.iter().find(|a| adef(**a).key == ch) {
                 if g.can_use(self.me(), *a) {
@@ -3867,6 +4029,10 @@ impl App {
                 }
             }
         }
+        // a hotkey for something on another tab brings that tab up
+        if self.tool != tool_before && self.tool != Tool::None {
+            self.bar_tab = tab_of(self.tool);
+        }
         if is_key_pressed(KeyCode::Escape) {
             // with nothing to drop, Esc opens the menu (alone only: in co-op the menu ends the match)
             let idle = self.tool == Tool::None && self.selected.is_none() && self.sel_struct.is_none();
@@ -3878,7 +4044,10 @@ impl App {
             self.selected = None;
             self.sel_struct = None;
             self.sel_safe = None;
+            self.more_groups.clear();
+            self.more_structs.clear();
             self.press = None;
+            self.rmove = None;
         }
         // drawing a safehouse border: Backspace takes the last corner back, Enter closes it
         if self.tool != Tool::Safe {
@@ -3975,10 +4144,32 @@ impl App {
             } else if self.tool != Tool::None {
                 self.tool = Tool::None;
                 self.press = None;
-            } else if let Some(si) = self.sel_struct.filter(|si| matches!(g.structs[*si].t, S::Artillery | S::Helipad | S::Sniper) || g.is_mech(*si)) {
-                self.act(g, Cmd::Aim(si as u32, mw));
-            } else if let Some(gi) = self.selected {
-                self.act(g, Cmd::Order(gi as u32, mw));
+            } else {
+                // structures aim at once; troops go when the button comes up (a drag points snipers)
+                let aimable = |si: &usize| matches!(g.structs[*si].t, S::Artillery | S::Helipad | S::Sniper) || g.is_mech(*si);
+                let ss: Vec<usize> = self.sel_struct.into_iter().chain(self.more_structs.iter().copied()).filter(aimable).collect();
+                for si in ss {
+                    self.act(g, Cmd::Aim(si as u32, mw));
+                }
+                if self.selected.is_some() {
+                    self.rmove = Some((self.px_mouse(), mw));
+                }
+            }
+        }
+        if is_mouse_button_released(MouseButton::Right) {
+            if let Some((s0, w0)) = self.rmove.take() {
+                let drag = (self.px_mouse() - s0).length() > 8.0;
+                let gs: Vec<usize> = self.selected.into_iter().chain(self.more_groups.iter().copied()).collect();
+                let n = gs.len();
+                for (k, gi) in gs.into_iter().enumerate() {
+                    // several groups spread round the spot instead of piling onto it
+                    let off = if n > 1 { Self::spread(k) } else { Vec2::ZERO };
+                    self.act(g, Cmd::Order(gi as u32, w0 + off));
+                    if g.groups.get(gi).is_some_and(|gr| gr.kind == U::Sniper) {
+                        let look = if drag { mw } else { w0 + off + (w0 - self.my_hq(g)).normalize_or_zero() * 20.0 };
+                        self.act(g, Cmd::Face(gi as u32, look));
+                    }
+                }
             }
         }
         if is_mouse_button_pressed(MouseButton::Left) && !ui {
@@ -4038,16 +4229,47 @@ impl App {
                     }
                 }
                 Tool::None => {
-                    self.selected = g.group_at(mw);
-                    self.sel_struct = None;
-                    self.sel_safe = None;
-                    if self.selected.is_none() {
-                        self.sel_struct = g
-                            .struct_at(mw)
-                            .filter(|i| matches!(g.structs[*i].t, S::Artillery | S::Helipad) || Game::has_prio(g.structs[*i].t));
-                    }
-                    if self.selected.is_none() && self.sel_struct.is_none() {
-                        self.sel_safe = g.safe_under(mw);
+                    let hit_g = g.group_at(mw);
+                    let hit_s = if hit_g.is_none() {
+                        g.struct_at(mw).filter(|i| matches!(g.structs[*i].t, S::Artillery | S::Helipad) || Game::has_prio(g.structs[*i].t))
+                    } else {
+                        None
+                    };
+                    let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+                    if shift && (hit_g.is_some() || hit_s.is_some()) {
+                        // Shift adds to the selection (or takes back out what's already in it)
+                        self.sel_safe = None;
+                        if let Some(gi) = hit_g {
+                            if self.selected == Some(gi) {
+                                self.selected = None;
+                            } else if let Some(k) = self.more_groups.iter().position(|&x| x == gi) {
+                                self.more_groups.remove(k);
+                            } else if self.selected.is_none() {
+                                self.selected = Some(gi);
+                            } else {
+                                self.more_groups.push(gi);
+                            }
+                        }
+                        if let Some(si) = hit_s {
+                            if self.sel_struct == Some(si) {
+                                self.sel_struct = None;
+                            } else if let Some(k) = self.more_structs.iter().position(|&x| x == si) {
+                                self.more_structs.remove(k);
+                            } else if self.sel_struct.is_none() {
+                                self.sel_struct = Some(si);
+                            } else {
+                                self.more_structs.push(si);
+                            }
+                        }
+                    } else if !shift {
+                        self.selected = hit_g;
+                        self.sel_struct = hit_s;
+                        self.more_groups.clear();
+                        self.more_structs.clear();
+                        self.sel_safe = None;
+                        if self.selected.is_none() && self.sel_struct.is_none() {
+                            self.sel_safe = g.safe_under(mw);
+                        }
                     }
                 }
                 Tool::Build(t) => {

@@ -61,6 +61,8 @@ pub enum Cmd {
     Safe { n: u8, pts: [Vec2; crate::game::SAFE_PTS] },
     /// buy upgrade `u` for safehouse `k`
     SafeUp(u32, u8),
+    /// point a sniper team the way of a spot
+    Face(u32, Vec2),
 }
 
 impl Cmd {
@@ -70,7 +72,7 @@ impl Cmd {
 }
 
 const ALL_S: [S; 22] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue, S::ScrapDepot, S::AmmoDepot, S::Bunker, S::Custom, S::Gate, S::Sniper];
-const ALL_U: [U; 2] = [U::Rifle, U::Tank];
+const ALL_U: [U; 3] = [U::Rifle, U::Tank, U::Sniper];
 
 fn s_id(t: S) -> u32 {
     ALL_S.iter().position(|x| *x == t).unwrap() as u32
@@ -165,6 +167,11 @@ impl Wr {
                 self.u32(k);
                 self.u32(u as u32);
             }
+            Cmd::Face(g, p) => {
+                self.u32(28);
+                self.u32(g);
+                self.v2(p);
+            }
             Cmd::Design { parts, paint } => {
                 self.u32(24);
                 for p in parts {
@@ -229,6 +236,7 @@ impl Rd<'_> {
                 Cmd::Safe { n: n as u8, pts }
             }
             27 => Cmd::SafeUp(self.u32()?, self.u32()?.min(255) as u8),
+            28 => Cmd::Face(self.u32()?, self.v2()?),
             _ => return None,
         })
     }
@@ -340,6 +348,10 @@ fn apply_as(g: &mut Game, c: Cmd) -> Option<&'static str> {
         Cmd::Prio(i, p) => (!g.set_prio(i as usize, p)).then_some("Can't change that turret's targeting"),
         Cmd::Safe { n, pts } => g.place_safe(&pts[..n as usize]).err(),
         Cmd::SafeUp(k, u) => (!g.safe_upgrade(k as usize, u)).then_some("Can't buy that upgrade"),
+        Cmd::Face(gi, p) => {
+            g.face(gi as usize, p);
+            None
+        }
         Cmd::Design { parts, paint } => {
             let b = crate::garage::Build { name: String::new(), parts: parts.map(|p| ((p as usize) < crate::garage::PARTS.len()).then_some(p)), paint };
             (!g.pick_design(&b)).then_some("That turret uses parts you haven't got")

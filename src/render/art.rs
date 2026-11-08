@@ -21,14 +21,25 @@ pub fn ngon(c: Vec2, r: f32, n: usize, a0: f32) -> Vec<Vec2> {
     (0..n).map(|k| c + vec2((a0 + k as f32 / n as f32 * std::f32::consts::TAU).cos(), (a0 + k as f32 / n as f32 * std::f32::consts::TAU).sin()) * r).collect()
 }
 
+thread_local! {
+    /// The turn of the structure being drawn (rooftop turrets set square to their building):
+    /// shapes drawn unturned (`a` = 0) take it.
+    pub static TURN: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+fn turned(a: f32) -> f32 {
+    if a == 0.0 { TURN.with(|t| t.get()) } else { a }
+}
+
 /// A rectangle with its corners cut off, half-size `hw` x `hh`, turned by `a`.
 pub fn chamfer(c: Vec2, hw: f32, hh: f32, cut: f32, a: f32) -> Vec<Vec2> {
+    let a = turned(a);
     let k = cut.min(hw * 0.9).min(hh * 0.9);
     [vec2(hw, -hh + k), vec2(hw, hh - k), vec2(hw - k, hh), vec2(-hw + k, hh), vec2(-hw, hh - k), vec2(-hw, -hh + k), vec2(-hw + k, -hh), vec2(hw - k, -hh)].iter().map(|v| c + rot(*v, a)).collect()
 }
 
 /// A rectangle from local corners (`x0`, `y0`) to (`x1`, `y1`), turned by `a` around `c`.
 pub fn rect(c: Vec2, x0: f32, y0: f32, x1: f32, y1: f32, a: f32) -> Vec<Vec2> {
+    let a = turned(a);
     [vec2(x0, y0), vec2(x1, y0), vec2(x1, y1), vec2(x0, y1)].iter().map(|v| c + rot(*v, a)).collect()
 }
 

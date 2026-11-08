@@ -19,9 +19,9 @@ pub const SAFE_CLEAR: f32 = 40.0;
 pub const SAFE_BUILD: f32 = 8.0;
 /// Civilians this close (field cost, about 10 a cell) run for a safehouse; loudspeakers double it.
 pub const SAFE_SEEK: u32 = 700;
-/// Cells a second: the setup truck crawls, the convoy trucks are a little quicker.
-pub const SETUP_SPEED: f32 = 4.5;
-pub const CONVOY_SPEED: f32 = 7.0;
+/// Cells a second: about as quick as a tank (Devin: the first, crawling speed was too slow).
+pub const SETUP_SPEED: f32 = 14.0;
+pub const CONVOY_SPEED: f32 = 18.0;
 pub const CONVOY_SEATS: u8 = 8;
 pub const CONVOY_SEATS_UP: u8 = 12;
 pub const SETUP_HP: f32 = 400.0;
@@ -38,16 +38,22 @@ pub const SH_READY: u8 = 2;
 pub const SH_LOST: u8 = 3;
 
 /// The upgrades a safehouse can buy: (name, what it does, price).
-pub const SAFE_UPS: [(&str, &str, f32); 4] = [
+pub const SAFE_UPS: [(&str, &str, f32); 5] = [
     ("Walls", "A wall all along the border, with gates where streets cross it for your trucks and troops", 250.0),
     ("Rescue team", "Every 40 s six soldiers go out to the nearest civilians and walk them back here", 200.0),
     ("Loudspeakers", "Civilians twice as far away hear the call and run here", 150.0),
     ("Armoured convoy", "A second truck, 12 seats a trip, and much tougher armour", 300.0),
+    ("Truck guns", "Every truck gets a small turret on its roof that shoots hostiles close by", 200.0),
 ];
 pub const SU_WALLS: u8 = 0;
 pub const SU_RESCUE: u8 = 1;
 pub const SU_LOUD: u8 = 2;
 pub const SU_CONVOY: u8 = 3;
+pub const SU_GUN: u8 = 4;
+/// Truck guns: reach, seconds between shots, damage a shot.
+pub const TRUCK_GUN_R: f32 = 24.0;
+const TRUCK_GUN_RATE: f32 = 0.3;
+const TRUCK_GUN_DMG: f32 = 12.0;
 
 /// Civilians waiting inside a safehouse (`Civ::pad` is the safehouse), and riding a truck to the
 /// HQ (`Civ::esc` is the truck).
@@ -102,6 +108,9 @@ pub struct Truck {
     pub dead: bool,
     /// seconds parked with someone aboard
     pub t: f32,
+    /// truck guns: seconds to the next shot, and where the gun points
+    pub cd: f32,
+    pub aim: f32,
 }
 
 /// Whether segments ab and cd cross (touching ends don't count).
@@ -319,7 +328,7 @@ impl Game {
             held: 0,
             saved: 0,
         });
-        self.trucks.push(Truck { sh: k, kind: TRUCK_SETUP, p: start, hd: 0.0, state: TR_OUT, load: 0, hp: SETUP_HP, max: SETUP_HP, dead: false, t: 0.0 });
+        self.trucks.push(Truck { sh: k, kind: TRUCK_SETUP, p: start, hd: 0.0, state: TR_OUT, load: 0, hp: SETUP_HP, max: SETUP_HP, dead: false, t: 0.0, cd: 0.0, aim: 0.0 });
         self.sfx.push((Sfx::Place, start));
         self.show("The safehouse truck is on its way", 3.0);
         Ok(())
@@ -343,7 +352,7 @@ impl Game {
                     t.max = CONVOY_HP * 1.8;
                     t.hp = t.max;
                 }
-                self.trucks.push(Truck { sh: k, kind: TRUCK_CONVOY, p: at, hd: 0.0, state: TR_PARK, load: 0, hp: CONVOY_HP * 1.8, max: CONVOY_HP * 1.8, dead: false, t: 0.0 });
+                self.trucks.push(Truck { sh: k, kind: TRUCK_CONVOY, p: at, hd: 0.0, state: TR_PARK, load: 0, hp: CONVOY_HP * 1.8, max: CONVOY_HP * 1.8, dead: false, t: 0.0, cd: 0.0, aim: 0.0 });
             }
             _ => {}
         }
@@ -434,7 +443,7 @@ impl Game {
                     self.safes[k].convoy_t = 30.0;
                     let hp = if self.safes[k].has(SU_CONVOY) { CONVOY_HP * 1.8 } else { CONVOY_HP };
                     let at = self.safes[k].c;
-                    self.trucks.push(Truck { sh: k, kind: TRUCK_CONVOY, p: at, hd: 0.0, state: TR_PARK, load: 0, hp, max: hp, dead: false, t: 0.0 });
+                    self.trucks.push(Truck { sh: k, kind: TRUCK_CONVOY, p: at, hd: 0.0, state: TR_PARK, load: 0, hp, max: hp, dead: false, t: 0.0, cd: 0.0, aim: 0.0 });
                 }
             }
             if self.safes[k].has(SU_RESCUE) {
@@ -469,7 +478,7 @@ impl Game {
             }
             let k = self.trucks[ti].sh;
             let field = self.safes[k].field.clone();
-            let mut t = std::mem::replace(&mut self.trucks[ti], Truck { sh: 0, kind: 0, p: Vec2::ZERO, hd: 0.0, state: 0, load: 0, hp: 0.0, max: 0.0, dead: true, t: 0.0 });
+            let mut t = std::mem::replace(&mut self.trucks[ti], Truck { sh: 0, kind: 0, p: Vec2::ZERO, hd: 0.0, state: 0, load: 0, hp: 0.0, max: 0.0, dead: true, t: 0.0, cd: 0.0, aim: 0.0 });
             let before = t.p;
             let c = t.p.y as usize * W + t.p.x as usize;
             // the horde claws at it
@@ -501,6 +510,20 @@ impl Game {
                 }
                 self.trucks[ti] = t;
                 continue;
+            }
+            // truck guns: shoot whatever is closest
+            if self.safes[k].has(SU_GUN) && t.kind == TRUCK_CONVOY {
+                t.cd -= DT;
+                if t.cd <= 0.0 {
+                    t.cd = TRUCK_GUN_RATE;
+                    if let Some(b) = self.find_target(t.p, TRUCK_GUN_R) {
+                        t.aim = (b - t.p).to_angle();
+                        self.swarm.add_damage(b.x, b.y, 1.2, TRUCK_GUN_DMG, 0);
+                        self.damage_hives(b, 1.2, TRUCK_GUN_DMG);
+                        self.tracers.push(Tracer { a: t.p, az: 2.4, b, t: 0.07, kind: 0 });
+                        self.sfx.push((Sfx::Rifle, t.p));
+                    }
+                }
             }
             match (t.kind, t.state) {
                 (TRUCK_SETUP, _) => {

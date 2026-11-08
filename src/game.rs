@@ -59,6 +59,8 @@ pub struct Structure {
     pub auto: bool,
     /// turrets: what the player told it to shoot first (`PRIOS`; 0: its own default)
     pub prio: u8,
+    /// rooftop turrets: turned this far to sit square on the building
+    pub rot: f32,
 }
 /// The targeting a player can set on a turret (`Structure::prio`). Each still looks for the spot
 /// that catches the most of the horde within the part of its range the choice picks.
@@ -118,6 +120,7 @@ pub fn muster_time(u: U) -> f32 {
     match u {
         U::Rifle => 1.5,
         U::Tank => 3.5,
+        U::Sniper => 2.0,
     }
 }
 /// How many rifle squads one building or bunker holds at a time.
@@ -137,6 +140,8 @@ pub struct Group {
     pub job: u64,
     /// co-op: the player it belongs to (their upgrades, their logistics)
     pub own: u8,
+    /// sniper teams: the way they face (they only shoot within `SNIPER_CONE` of it)
+    pub face: f32,
     /// seconds on the move without anyone getting anywhere, and how often it looked for a new way
     stuck: f32,
     retries: u8,
@@ -186,6 +191,8 @@ pub const C_AT_HQ: u8 = 15;
 const HQ_SEEK: u32 = 1500;
 /// The same for the zone around an outpost (from the edge of its zone, about 75 cells).
 const OUTPOST_SEEK: u32 = 750;
+/// Trucks and buildings that don't fight back draw the horde from this many cells further off.
+pub const LURE_R: f32 = 10.0;
 /// Scrap and ammo paid per civilian flown out.
 pub const EVAC_SCRAP: f32 = 30.0;
 pub const EVAC_AMMO: f32 = 10.0;
@@ -1261,6 +1268,16 @@ impl Game {
                     }
                 }
             }
+            // every army goes for the trucks and the buildings that don't fight back: they draw
+            // the horde from further off than anything else (a ring round each counts as reached)
+            let soft = |s: &Structure| !s.dead && !s.pending && !s.up() && !def(s.t).turret && !s.t.is_wall() && !matches!(s.t, S::Bunker | S::Hq);
+            for s in self.structs.iter().filter(|s| soft(s)) {
+                let r = (s.w.max(s.h) as f32) / 2.0 + LURE_R;
+                fill_disc(s.center(), r, |c| src.push(c as u32));
+            }
+            for t in self.trucks.iter().filter(|t| !t.dead) {
+                fill_disc(t.p, LURE_R, |c| src.push(c as u32));
+            }
             if src.is_empty() {
                 self.hunt = None;
             } else {
@@ -1371,30 +1388,71 @@ impl Game {
         ((self.world.buildings[b].cells / 70) as usize).clamp(1, 6)
     }
     pub fn can_place_roof(&self, t: S, b: usize, p: Vec2) -> bool {
+        self.roof_fit(t, b, p).is_some()
+    }
+    /// Where a turret clicked onto a roof at `p` actually goes: its centre and how far it is
+    /// turned. It turns square to the building's walls, and shifts a few cells inward, when that
+    /// is what it takes for the whole base to stand on the roof.
+    pub fn roof_fit(&self, t: S, b: usize, p: Vec2) -> Option<(Vec2, f32)> {
         let bb = &self.world.buildings[b];
         if !bb.alive || self.world.irradiated_at(p) || self.hive_blocks(p) {
-            return false;
+            return None;
         }
-        // the whole base has to stand on this roof
+        let others: Vec<Vec2> = self.structs.iter().filter(|s| !s.dead && s.roof == b as i32).map(|s| s.center()).collect();
+        if others.len() >= self.roof_slots(b) {
+            return None;
+        }
         let d = def(t);
-        let (x0, y0) = ((p.x - d.w as f32 / 2.0) as i32, (p.y - d.h as f32 / 2.0) as i32);
-        for y in y0..y0 + d.h {
-            for x in x0..x0 + d.w {
-                if x < 0 || y < 0 || x >= W as i32 || y >= H as i32 || self.world.bid[y as usize * W + x as usize] != b as i32 {
-                    return false;
+        let (w, h) = (d.w as f32, d.h as f32);
+        // the building's walls run at this angle (its longest side), folded into 0..90 degrees
+        let q = std::f32::consts::FRAC_PI_2;
+        let n = bb.poly.len();
+        let wall = (0..n)
+            .map(|k| bb.poly[(k + 1) % n] - bb.poly[k])
+            .max_by(|a, b| a.length_squared().total_cmp(&b.length_squared()))
+            .map_or(0.0, |e| e.y.atan2(e.x).rem_euclid(q));
+        let angs = if wall.abs() < 0.02 || (q - wall).abs() < 0.02 { vec![0.0] } else { vec![0.0, wall] };
+        let fits = |c: Vec2, a: f32| {
+            let (ca, sa) = (a.cos(), a.sin());
+            let mut pts: Vec<Vec2> = Vec::new();
+            for j in 0..d.h {
+                for i in 0..d.w {
+                    pts.push(vec2(i as f32 + 0.5 - w / 2.0, j as f32 + 0.5 - h / 2.0));
+                }
+            }
+            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                pts.push(vec2(sx * (w / 2.0 - 0.15), sy * (h / 2.0 - 0.15)));
+            }
+            pts.iter().all(|v| {
+                let r = c + vec2(v.x * ca - v.y * sa, v.x * sa + v.y * ca);
+                r.x >= 0.0 && r.y >= 0.0 && r.x < W as f32 && r.y < H as f32 && self.world.bid[r.y as usize * W + r.x as usize] == b as i32
+            })
+        };
+        let (x0, y0) = ((p.x - w / 2.0) as i32, (p.y - h / 2.0) as i32);
+        // the clicked spot first, then ever further out, the side nearer the middle first
+        let mut offs: Vec<(i32, i32)> = Vec::new();
+        for oy in -3i32..=3 {
+            for ox in -3i32..=3 {
+                offs.push((ox, oy));
+            }
+        }
+        let toward = bb.c - p;
+        offs.sort_by(|a, b| {
+            let k = |o: &(i32, i32)| (o.0 * o.0 + o.1 * o.1) as f32 * 10.0 - (o.0 as f32 * toward.x + o.1 as f32 * toward.y).signum();
+            k(a).total_cmp(&k(b))
+        });
+        for (ox, oy) in offs {
+            let c = vec2((x0 + ox) as f32 + w / 2.0, (y0 + oy) as f32 + h / 2.0);
+            if others.iter().any(|o| o.distance(c) < 5.0) {
+                continue;
+            }
+            for &a in &angs {
+                if fits(c, a) {
+                    return Some((c, a));
                 }
             }
         }
-        let mut n = 0;
-        for s in &self.structs {
-            if !s.dead && s.roof == b as i32 {
-                n += 1;
-                if s.center().distance(p) < 5.0 {
-                    return false;
-                }
-            }
-        }
-        n < self.roof_slots(b)
+        None
     }
 
     pub fn add_struct(&mut self, t: S, x: i32, y: i32, roof: i32) -> usize {
@@ -1429,6 +1487,7 @@ impl Game {
             cu: None,
             auto: false,
             prio: 0,
+            rot: 0.0,
         };
         // walkers stand on their own legs: they never block the street
         let walker = t == S::Custom && self.cur_design(self.actor).is_some_and(|d| d.spec.leash > 0.0 || d.spec.mech > 0.0);
@@ -1650,16 +1709,18 @@ impl Game {
             return false;
         }
         let cost = self.cost_at(t, p);
-        if !d.turret || d.ground || self.scrap < cost || !self.can_place_roof(t, b, p) || !self.build_ok(self.actor, t) || !self.logi_room(self.actor, 1) {
+        let Some((p, rot)) = self.roof_fit(t, b, p) else { return false };
+        if !d.turret || d.ground || self.scrap < cost || !self.build_ok(self.actor, t) || !self.logi_room(self.actor, 1) {
             return false;
         }
         self.scrap -= cost;
         let i = self.add_struct(
             t,
-            (p.x - d.w as f32 / 2.0) as i32,
-            (p.y - d.h as f32 / 2.0) as i32,
+            (p.x - d.w as f32 / 2.0).round() as i32,
+            (p.y - d.h as f32 / 2.0).round() as i32,
             b as i32,
         );
+        self.structs[i].rot = rot;
         self.construct(i);
         self.sfx.push((Sfx::Place, p));
         true
@@ -1726,7 +1787,7 @@ impl Game {
                 let n = g.m.iter().filter(|m| m.alive).count() as u32;
                 match g.kind {
                     U::Rifle => n.div_ceil(6),
-                    U::Tank => n,
+                    U::Tank | U::Sniper => n,
                 }
             })
             .sum();
@@ -5057,9 +5118,23 @@ impl Game {
             dead: false,
             job,
             own: self.actor as u8,
+            face: (Self::cell_pos(tc) - self.hq_near(Self::cell_pos(tc))).to_angle(),
             stuck: 0.0,
             retries: 0,
         });
+        true
+    }
+    /// Points a sniper team at `p`: from now on it shoots down that line.
+    pub fn face(&mut self, gi: usize, p: Vec2) -> bool {
+        let Some(g) = self.groups.get_mut(gi) else { return false };
+        if g.dead || g.kind != U::Sniper {
+            return false;
+        }
+        let from = if g.state == GState::Hold { g.m.iter().filter(|m| m.alive).fold(Vec2::ZERO, |a, m| a + m.p) / g.m.iter().filter(|m| m.alive).count().max(1) as f32 } else { g.target };
+        if p.distance(from) < 1.0 {
+            return false;
+        }
+        g.face = (p - from).to_angle();
         true
     }
     /// What a click sends troops into: a bunker or a city building (rifle squads only).
@@ -5304,7 +5379,7 @@ impl Game {
                         if let Some(tf) = &tf {
                             let v = tf[m.p.y as usize * W + m.p.x as usize];
                             // riflemen close to their spot walk to their own place in the formation
-                            near = v <= 60 && kind == U::Rifle;
+                            near = v <= 60 && kind != U::Tank;
                             if !near {
                                 Self::step_on_field(&obj, &mut m.p, tf, d.spd, &mut self.rng);
                             }
@@ -5313,7 +5388,7 @@ impl Game {
                             }
                         }
                     }
-                    if near && kind == U::Rifle {
+                    if near && kind != U::Tank {
                         let to = target + Self::slot(mi);
                         if to.x > 1.0 && to.y > 1.0 && to.x < W as f32 - 1.0 && to.y < H as f32 - 1.0 && obj[to.y as usize * W + to.x as usize] == FREE {
                             Self::step_toward(&obj, &mut m.p, to, d.spd);
@@ -5333,10 +5408,26 @@ impl Game {
                     };
                     let tg = if kind == U::Tank {
                         self.cluster_target(origin, range, d.rad, &[])
+                    } else if kind == U::Sniper {
+                        // only down the line they were pointed, the thickest bit of it
+                        let face = self.groups[gi].face;
+                        let ok = move |p: Vec2| {
+                            let dd = p.distance(origin);
+                            let mut a = libm::atan2f(p.y - origin.y, p.x - origin.x) - face;
+                            while a > std::f32::consts::PI {
+                                a -= std::f32::consts::TAU;
+                            }
+                            while a < -std::f32::consts::PI {
+                                a += std::f32::consts::TAU;
+                            }
+                            dd > 1.5 && dd <= range && a.abs() <= SNIPER_CONE
+                        };
+                        let mut claimed = Vec::new();
+                        self.drummer_in_range(origin, range).filter(|p| ok(*p)).or_else(|| self.prio_target(origin, range, 1.0, 2, &[], &mut claimed, &ok))
                     } else {
                         self.find_target(origin, range)
                     };
-                    let tg = self.drummer_in_range(origin, range).or(tg);
+                    let tg = if kind == U::Sniper { tg } else { self.drummer_in_range(origin, range).or(tg) };
                     if let Some(t) = tg.or_else(|| self.hive_in_range(origin, range)) {
                         shots.push((muzzle, t));
                         m.aim = libm::atan2f(t.y - origin.y, t.x - origin.x);
@@ -5380,15 +5471,31 @@ impl Game {
                     self.sfx.push((Sfx::Rifle, *a));
                 }
             }
+            if kind == U::Sniper {
+                if let Some(((a, _), _)) = shots.first() {
+                    self.sfx.push((Sfx::Sniper, *a));
+                }
+            }
             for ((a, az), t) in shots {
                 self.blast(t, w.rad, w.dmg, w.bdmg, src, w.dmg);
+                if kind == U::Sniper {
+                    // the round carries on through the crowd behind
+                    let dir = (t - a).normalize_or_zero();
+                    for k in 1..=SNIPER_PIERCE / 2 {
+                        let p = t + dir * (k as f32 * 1.5);
+                        if p.x < 1.0 || p.y < 1.0 || p.x >= W as f32 - 1.0 || p.y >= H as f32 - 1.0 {
+                            break;
+                        }
+                        self.blast(p, 0.8, w.dmg * 0.6, 0.0, src, 0.0);
+                    }
+                }
                 self.ammo -= d.ammo;
                 self.tracers.push(Tracer {
                     a,
                     az,
                     b: t,
                     t: if w.rocket { 0.14 } else { 0.08 },
-                    kind: if kind == U::Tank { 4 } else if w.rocket { 7 } else { 3 },
+                    kind: if kind == U::Tank { 4 } else if w.rocket { 7 } else if kind == U::Sniper { 12 } else { 3 },
                 });
                 if w.rocket {
                     self.booms.push(Boom { p: t, r: w.rad, t: 0.3, life: 0.3, kind: 0 });

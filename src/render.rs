@@ -1211,6 +1211,9 @@ pub struct ViewInfo {
     pub selected: Option<usize>,
     /// a selected structure (artillery or heli pad being aimed)
     pub sel_struct: Option<usize>,
+    /// more troops and structures picked with Shift
+    pub more_groups: Vec<usize>,
+    pub more_structs: Vec<usize>,
     pub time: f32,
     /// the camera's ground position (painter mode draws far to near from it)
     pub eye: Vec2,
@@ -1290,7 +1293,7 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
             continue;
         }
         let d = udef(gr.kind);
-        let sel = v.selected == Some(gi);
+        let sel = v.selected == Some(gi) || v.more_groups.contains(&gi);
         for m in &gr.m {
             if !m.alive || !inview(m.p, 4.0) {
                 continue;
@@ -1300,6 +1303,13 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
             }
             match gr.kind {
                 U::Rifle => {
+                    mb.disc(m.p, 1.2, WHITE);
+                    mb.disc(m.p, 0.85, d.col);
+                }
+                U::Sniper => {
+                    // a marksman with his long rifle down the line he's watching
+                    let dir = vec2(gr.face.cos(), gr.face.sin());
+                    mb.line(&[m.p, m.p + dir * 2.6], 0.45, rgb(40, 44, 40));
                     mb.disc(m.p, 1.2, WHITE);
                     mb.disc(m.p, 0.85, d.col);
                 }
@@ -1436,7 +1446,7 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
             }
             S::Artillery => {
                 if let Some(tg) = s.target {
-                    let sel = v.sel_struct == Some(i);
+                    let sel = v.sel_struct == Some(i) || v.more_structs.contains(&i);
                     let col = if sel { rgba(255, 90, 70, 0.9) } else { rgba(255, 90, 70, 0.45) };
                     let r = def(S::Artillery).rad + 3.0 + tg.distance(c) * 0.012;
                     ring(&mut mb, tg, r, 0.6, col);
@@ -1523,10 +1533,12 @@ fn solid_dynamic(g: &Game, v: &ViewInfo, labels: &mut WorldLabels, painter: bool
         if (0.0..SCAFFOLD_SINK).contains(&since) {
             art::scaffold(&mut mb, d, c, w, h, base, 1.0, since / SCAFFOLD_SINK);
         }
-        if v.sel_struct == Some(i) {
+        if v.sel_struct == Some(i) || v.more_structs.contains(&i) {
             art::ring_flat(&mut mb, c, w.max(h) / 2.0 + 1.5, 0.5, base + 0.05, rgb(255, 212, 59));
         }
+        art::TURN.with(|r| r.set(s.rot));
         let top = art::structure(&mut mb, g, i, s, base, t, labels);
+        art::TURN.with(|r| r.set(0.0));
         if s.hp < s.max * 0.99 && !s.t.is_wall() {
             let f = s.hp / s.max;
             bar(&mut mb, c + vec2(0.0, -h / 2.0 - 2.0), top + 1.0, w.max(6.0), f, if f > 0.4 { rgb(64, 192, 87) } else { rgb(250, 82, 82) });
@@ -1780,7 +1792,8 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
             continue;
         }
         let armour = g.safes.get(tr.sh).is_some_and(|s| s.has(SU_CONVOY));
-        air::truck(&mut glow, tr.p, tr.hd, tr.kind == TRUCK_SETUP, armour, mk.min(1.6));
+        let gun = g.safes.get(tr.sh).is_some_and(|s| s.has(SU_GUN)).then_some(tr.aim);
+        air::truck(&mut glow, tr.p, tr.hd, tr.kind == TRUCK_SETUP, armour, gun, mk.min(1.6));
         if tr.load > 0 {
             labels.items.push((p3(tr.p, 6.0), format!("{}", tr.load), rgb(116, 192, 252), 11.0));
         }
@@ -1828,6 +1841,16 @@ fn sky_clear(g: &Game) -> impl Fn(Vec2) -> f32 + '_ {
                 top * w * w * (3.0 - 2.0 * w)
             })
             .fold(0.0, f32::max)
+    }
+}
+
+/// A ghost turned by `a` around its centre `c` (rooftop turrets set square to the building).
+pub fn ghost_turned(c: Vec2, w: f32, h: f32, a: f32, z: f32, ok: bool) {
+    let col = if ok { rgba(64, 192, 87, 0.55) } else { rgba(250, 82, 82, 0.55) };
+    let mut mb = MB::default();
+    mb.prism(&art::rect(c, -w / 2.0, -h / 2.0, w / 2.0, h / 2.0, a), z, z + 1.5, col, col);
+    for m in mb.finish() {
+        draw_mesh(&m);
     }
 }
 

@@ -563,8 +563,9 @@ impl App {
             .collect();
         ids.sort_by_key(|i| (part(*i).tier, part(*i).fam as u8, part(*i).lvl));
         let per = 2;
-        let tw = (list.w - 8.0) / per as f32;
-        let th = 92.0;
+        // room for the scroll bar down the right edge
+        let tw = (list.w - 8.0 - 10.0) / per as f32;
+        let th = 80.0;
         let total = ids.len().div_ceil(per) as f32 * (th + 8.0);
         if self.hot(list) {
             let (_, wy) = mouse_wheel();
@@ -727,6 +728,23 @@ impl App {
                         );
                     }
                 }
+            }
+        }
+        // a scroll bar, and a nudge while there are more parts further down
+        if total > list.h + 1.0 {
+            let track = Rect::new(list.right() - 5.0, list.y, 4.0, list.h);
+            rrect(track, 2.0, alpha(p.text, 0.08));
+            let f = list.h / total;
+            let th2 = (track.h * f).max(24.0);
+            let y = track.y + (track.h - th2) * (w.scroll / (total - list.h)).clamp(0.0, 1.0);
+            rrect(Rect::new(track.x, y, track.w, th2), 2.0, alpha(p.accent, 0.8));
+            if w.scroll < total - list.h - 1.0 {
+                let more = (ids.len() as f32 - ((w.scroll + list.h) / (th + 8.0)).floor() * per as f32).max(0.0) as usize;
+                let s = format!("{} more below, scroll down", more);
+                let tw2 = text_w(&self.fonts.mono, &s, 11.0);
+                let hr = Rect::new(list.x + (list.w - 10.0 - tw2) / 2.0 - 10.0, list.bottom() - 22.0, tw2 + 20.0, 20.0);
+                rrect(hr, 6.0, alpha(p.panel2, 0.95));
+                text(&self.fonts.mono, &s, hr.x + 10.0, hr.y + 14.0, 11.0, p.accent);
             }
         }
         self.ui_rects.push(list);

@@ -44,12 +44,11 @@ impl S {
         matches!(self, S::Wall | S::Gate)
     }
 }
-pub const BUILD_ORDER: [S; 20] = [
+pub const BUILD_ORDER: [S; 19] = [
     S::Wall,
     S::Gate,
     S::Bunker,
     S::Gun,
-    S::Sniper,
     S::Cannon,
     S::Flame,
     S::Rail,
@@ -302,6 +301,8 @@ pub fn def(s: S) -> &'static Def {
 pub enum U {
     Rifle,
     Tank,
+    /// two marksmen who set up facing one way and pick off the horde down that line
+    Sniper,
 }
 pub struct UDef {
     pub key: char,
@@ -322,9 +323,11 @@ pub struct UDef {
 pub fn udef(u: U) -> &'static UDef {
     static RIFLE: UDef = UDef { key: '8', name: "Rifle squad", cost: 60.0, n: 6, hp: 30.0, spd: 14.0, range: 24.0, rate: 0.5, dmg: 9.0, rad: 1.0, ammo: 0.0, bdmg: 0.0, col: rgb(28, 126, 214), tip: "Six soldiers march from the HQ and hold where you click, spread out in a line. They need no ammo. Click a building or a bunker to garrison it (+60% range, three squads at most). Select units with left click, send them with right click." };
     static TANK: UDef = UDef { key: '9', name: "Tank", cost: 300.0, n: 1, hp: 600.0, spd: 18.0, range: 44.0, rate: 1.1, dmg: 45.0, rad: 3.5, ammo: 2.0, bdmg: 4.0, col: rgb(24, 100, 171), tip: "Drives from the HQ and shells the thickest part of the horde. Tough, but each shell costs 2 ammo. Left click to select, right click to move." };
+    static SNIPER: UDef = UDef { key: 'k', name: "Sniper team", cost: 120.0, n: 2, hp: 30.0, spd: 13.0, range: 90.0, rate: 0.7, dmg: 40.0, rad: 0.9, ammo: 0.0, bdmg: 0.0, col: rgb(130, 160, 110), tip: "Two marksmen. Select them and right-click where they should go; hold the right button and drag to point them the way to shoot. They only fire into a 50° cone that way, at long range and fairly quickly, each round going through a line of the horde. No ammo needed." };
     match u {
         U::Rifle => &RIFLE,
         U::Tank => &TANK,
+        U::Sniper => &SNIPER,
     }
 }
 

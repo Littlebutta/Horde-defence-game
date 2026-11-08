@@ -901,7 +901,7 @@ fn apply(pt: &Part, s: &mut Spec) {
             s.hp = k([360.0, 520.0, 0.0]);
             s.traverse = 3.4;
             s.cap = k([14.0, 18.0, 0.0]);
-            s.leash = k([22.0, 34.0, 0.0]);
+            s.leash = k([60.0, 90.0, 0.0]);
             s.height = 3.2;
         }
         // ---- heads: how it picks targets

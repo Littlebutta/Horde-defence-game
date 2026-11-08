@@ -167,7 +167,8 @@ pub const TECH: [Tech; 47] = [
     Tech::Research(R::Napalm),
     Tech::Up(Up::Muster1),
     Tech::Up(Up::Muster2),
-    Tech::Build(S::Sniper),
+    // (this slot held the sniper nest, now a unit: saves keep their index)
+    Tech::Unit(U::Sniper),
     Tech::Up(Up::Safehouse),
 ];
 
@@ -264,6 +265,7 @@ impl Tech {
             Tech::Build(S::Silo) => Some(Tech::Ability(A::Air)),
             Tech::Build(S::Helipad) => Some(Tech::Ability(A::Gunship)),
             Tech::Unit(U::Tank) => Some(Tech::Research(R::Armour)),
+            Tech::Unit(U::Sniper) => Some(Tech::Up(Up::RifleDrill)),
             Tech::Ability(A::Gunship) => Some(Tech::Ability(A::Air)),
             Tech::Research(R::Rescue) => Some(Tech::Ability(A::Rescue)),
             Tech::Research(R::Carpet | R::Napalm) => Some(Tech::Ability(A::Air)),
@@ -336,6 +338,7 @@ pub fn recruit_cost(u: U) -> u32 {
     match u {
         U::Rifle => 60,
         U::Tank => 200,
+        U::Sniper => 120,
     }
 }
 
@@ -936,7 +939,7 @@ impl Campaign {
         self.units.iter().partition(|(u, n)| {
             let cost = match u {
                 U::Rifle => n.div_ceil(6),
-                U::Tank => *n,
+                U::Tank | U::Sniper => *n,
             };
             used += cost;
             used <= room
@@ -1314,6 +1317,7 @@ pub fn from_text(t: &str) -> Campaign {
                 let u = match x.get(..1)? {
                     "r" => U::Rifle,
                     "t" => U::Tank,
+                    "s" => U::Sniper,
                     _ => return None,
                 };
                 Some((u, x[1..].parse().ok()?))
@@ -1338,7 +1342,7 @@ pub fn to_text(c: &Campaign) -> String {
         let k = if p == 0 { String::new() } else { p.to_string() };
         others += &format!("parts{}={}\nowned{}={}\n", k, ids(&cr.parts), k, ids(&cr.owned));
     }
-    let units = join(&mut c.units.iter().map(|(u, n)| format!("{}{}", if *u == U::Rifle { 'r' } else { 't' }, n)));
+    let units = join(&mut c.units.iter().map(|(u, n)| format!("{}{}", match u { U::Rifle => 'r', U::Tank => 't', U::Sniper => 's' }, n)));
     let cities = join(&mut c.cities.iter().map(|s| {
         let f = match s.fate {
             Fate::Open => "o",

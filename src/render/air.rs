@@ -315,7 +315,7 @@ pub fn tank(g: &mut Glow, p: Vec2, heading: f32, turret: f32, k: f32) {
 /// A safehouse truck in the tank's line art: a cab, a boxy load bed and six wheels. The setup
 /// truck carries a folded crane and crates; a convoy truck has an armoured box with vision slits
 /// (`armour`: the heavier plating of the Armoured convoy upgrade).
-pub fn truck(g: &mut Glow, p: Vec2, heading: f32, setup: bool, armour: bool, k: f32) {
+pub fn truck(g: &mut Glow, p: Vec2, heading: f32, setup: bool, armour: bool, gun: Option<f32>, k: f32) {
     let s = 1.15 * k;
     let w = 0.16;
     let col = if setup { AIR } else { rgb(116, 192, 252) };
@@ -365,6 +365,14 @@ pub fn truck(g: &mut Glow, p: Vec2, heading: f32, setup: bool, armour: bool, k: 
             }
         }
         g.circle(vec2(-0.8, 0.0), 0.4, w * 0.6, col);
+        // truck guns: a little turret on the roof, turned to its last target
+        if let Some(a) = gun {
+            g.flat(p + vec2(heading.cos(), heading.sin()) * -0.8 * s, 2.15, a, s);
+            let tur = mirrored(&[vec2(0.6, 0.0), vec2(0.45, 0.45), vec2(-0.55, 0.45), vec2(-0.6, 0.0)]);
+            g.fill(&tur, INK);
+            g.stroke(&tur, true, w, col);
+            g.stroke(&[vec2(0.5, 0.0), vec2(2.0, 0.0)], false, w * 1.2, col);
+        }
     }
 }
 
