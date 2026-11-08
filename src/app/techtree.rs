@@ -154,7 +154,7 @@ impl App {
         // the pages: the main tree, then one tree per kind of garage part
         let mut labels = vec![format!("Main tree {}/{}", c.crew(me).tech.len(), campaign::TECH.len())];
         for sl in SLOT_KINDS {
-            let all: Vec<u16> = (0..PARTS.len() as u16).filter(|i| part(*i).slot() == sl).collect();
+            let all: Vec<u16> = (0..PARTS.len() as u16).filter(|i| part(*i).slot() == sl && !garage::retired(*i)).collect();
             let known = all.iter().filter(|i| c.part_known(me, **i)).count();
             labels.push(format!("{} {}/{}", sl.plural(), known, all.len()));
         }

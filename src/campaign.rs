@@ -121,7 +121,7 @@ pub enum Tech {
 pub const START_BUILDS: [S; 6] = [S::Wall, S::Gate, S::Bunker, S::Extractor, S::Pad, S::Rescue];
 
 /// The whole tree, in the order the campaign screen lists it. Saves store indices into it, so new entries go at the end.
-pub const TECH: [Tech; 43] = [
+pub const TECH: [Tech; 45] = [
     Tech::Build(S::Gun),
     Tech::Build(S::Cannon),
     Tech::Build(S::Flame),
@@ -165,6 +165,8 @@ pub const TECH: [Tech; 43] = [
     Tech::Build(S::Custom),
     Tech::Research(R::Perimeter),
     Tech::Research(R::Napalm),
+    Tech::Up(Up::Muster1),
+    Tech::Up(Up::Muster2),
 ];
 
 /// Turrets that shoot ammo: the first one unlocked brings the ammo plant with it.
@@ -239,7 +241,7 @@ impl Tech {
         match self {
             Tech::Build(s) if shoots(s) || s == S::Helium => "Turrets",
             Tech::Build(_) | Tech::Unit(_) | Tech::Hq(_) => "Support",
-            Tech::Up(u) if RIFLE_UPS.contains(&u) => "Support",
+            Tech::Up(u) if RIFLE_UPS.contains(&u) || matches!(u, Up::Muster1 | Up::Muster2) => "Support",
             Tech::Ability(_) | Tech::Research(R::Rescue | R::Carpet | R::Nuke | R::Napalm) => "Abilities",
             Tech::Research(R::Perimeter) => "Support",
             Tech::Research(_) => "Research",
@@ -250,6 +252,8 @@ impl Tech {
     pub fn needs(self) -> Option<Tech> {
         match self {
             Tech::Up(u) if RIFLE_UPS.contains(&u) => up_after(u).map(Tech::Up),
+            Tech::Up(Up::Muster1) => Some(Tech::Up(Up::RifleDrill)),
+            Tech::Up(Up::Muster2) => Some(Tech::Up(Up::Muster1)),
             Tech::Up(u) => Some(Tech::Build(updef(u).on)),
             Tech::Hq(l) if l > 2 => Some(Tech::Hq(l - 1)),
             Tech::Build(S::Cannon | S::Flame | S::Custom) => Some(Tech::Build(S::Gun)),

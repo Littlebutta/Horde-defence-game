@@ -3326,7 +3326,25 @@ impl App {
             text(&self.fonts.mono, &s, r.x + 24.0, r.y + 22.0, 13.0, p.text);
         }
 
-        if let Some(si) = self.sel_struct {
+        // squads and tanks getting ready at the HQ, as little progress chips over the bar's right end
+        {
+            let me = self.me() as u8;
+            let mut x = area.right() - 12.0;
+            for m in g.musters.iter().filter(|m| m.own == me).take(8) {
+                let label = if m.kind == U::Tank { "Tank" } else { "Squad" };
+                let w = text_w(&self.fonts.mono, label, 11.0) + 22.0;
+                x -= w + 6.0;
+                let r = Rect::new(x, bar.y - 30.0, w, 22.0);
+                rrect(r, 5.0, alpha(p.panel, 0.92));
+                let f = (1.0 - m.t / m.dur.max(0.01)).clamp(0.0, 1.0);
+                rrect(Rect::new(r.x, r.bottom() - 3.0, r.w * f, 3.0), 1.5, p.accent);
+                draw_circle(r.x + 9.0, r.y + 10.0, 3.0, udef(m.kind).col);
+                text(&self.fonts.mono, label, r.x + 16.0, r.y + 15.0, 11.0, p.dim);
+            }
+        }
+        if let Some(si) = self.sel_struct.filter(|si| Game::has_prio(g.structs[*si].t)) {
+            self.prio_panel(g, si, area, bar);
+        } else if let Some(si) = self.sel_struct {
             let st = &g.structs[si];
             let (line, cease) = match st.t {
                 S::Artillery => (
@@ -3583,6 +3601,42 @@ impl App {
         }
     }
 
+    /// The selected turret's card over the build bar: what it is and its targeting buttons.
+    fn prio_panel(&mut self, g: &mut Game, si: usize, area: Rect, bar: Rect) {
+        let p = pal(self.dark);
+        let st = &g.structs[si];
+        let name = match st.t {
+            S::Custom => st.cu.as_ref().and_then(|c| g.designs.get(c.d as usize)).map(|d| d.build.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Custom turret".into()),
+            t => def(t).name.to_string(),
+        };
+        let cur = st.prio as usize;
+        let mine = st.owner as usize == self.me();
+        let bw = 118.0;
+        let w = 24.0 + PRIOS.len() as f32 * (bw + 6.0) + 6.0;
+        let r = Rect::new(area.x + 12.0, bar.y - 76.0, w.max(300.0), 64.0);
+        self.panel(r);
+        self.ui_rects.push(r);
+        let head = format!("{} · targeting{}", name, if mine { "" } else { " (a partner's turret)" });
+        text(&self.fonts.mono, &head, r.x + 12.0, r.y + 20.0, 12.5, p.dim);
+        for (k, label) in PRIOS.iter().enumerate() {
+            let b = Rect::new(r.x + 12.0 + k as f32 * (bw + 6.0), r.y + 28.0, bw, 28.0);
+            let on = k == cur;
+            let clicked = if on { self.button_primary(b, label, mine) } else { self.button(b, label, mine, false) };
+            if self.hot(b) {
+                self.tip = Some(match k {
+                    0 => "Its own targeting: what this kind of turret always does".into(),
+                    1 => "The nearest hostiles first, aiming into the thickest part of them".into(),
+                    2 => "The biggest crowd in range, to catch the most with every shot".into(),
+                    3 => "Whatever is closest to reaching the HQ, aiming into the thickest part of it".into(),
+                    _ => "The furthest hostiles in range, thinning a wave before it arrives".into(),
+                });
+            }
+            if clicked && !on {
+                self.act(g, Cmd::Prio(si as u32, k as u8));
+            }
+        }
+    }
+
     fn input(&mut self, g: &mut Game, sc: &mut Scene, mw: Vec2, dt: f32) {
         if self.settings_open {
             while get_char_pressed().is_some() {}
@@ -3716,7 +3770,7 @@ impl App {
             if self.tool != Tool::None {
                 self.tool = Tool::None;
                 self.press = None;
-            } else if let Some(si) = self.sel_struct {
+            } else if let Some(si) = self.sel_struct.filter(|si| matches!(g.structs[*si].t, S::Artillery | S::Helipad)) {
                 self.act(g, Cmd::Aim(si as u32, mw));
             } else if let Some(gi) = self.selected {
                 self.act(g, Cmd::Order(gi as u32, mw));
@@ -3774,7 +3828,7 @@ impl App {
                     if self.selected.is_none() {
                         self.sel_struct = g
                             .struct_at(mw)
-                            .filter(|i| matches!(g.structs[*i].t, S::Artillery | S::Helipad));
+                            .filter(|i| matches!(g.structs[*i].t, S::Artillery | S::Helipad) || Game::has_prio(g.structs[*i].t));
                     }
                 }
                 Tool::Build(t) => {

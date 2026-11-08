@@ -55,6 +55,8 @@ pub enum Cmd {
     UpgradeHq,
     /// the garage design this player builds next (part indices, 0xffff: empty slot; paint)
     Design { parts: [u16; 7], paint: [[u8; 3]; 3] },
+    /// a turret's targeting (`game::PRIOS`)
+    Prio(u32, u8),
 }
 
 impl Cmd {
@@ -142,6 +144,11 @@ impl Wr {
                 self.u32(b);
             }
             Cmd::UpgradeHq => self.u32(23),
+            Cmd::Prio(i, p) => {
+                self.u32(25);
+                self.u32(i);
+                self.u32(p as u32);
+            }
             Cmd::Design { parts, paint } => {
                 self.u32(24);
                 for p in parts {
@@ -193,6 +200,7 @@ impl Rd<'_> {
                 }
                 Cmd::Design { parts, paint }
             }
+            25 => Cmd::Prio(self.u32()?, self.u32()?.min(255) as u8),
             _ => return None,
         })
     }
@@ -234,6 +242,7 @@ pub fn plan(t: S, a: Vec2, b: Vec2) -> Vec<(i32, i32)> {
     v
 }
 
+pub const GARRISON_FULL: &str = "That building is full: three squads at most";
 pub const BAD_TARGET: &str = "Can't target that";
 pub const LOGI_FULL: &str = "Logistics full: upgrade the HQ to field more turrets and squads";
 
@@ -272,11 +281,17 @@ fn apply_as(g: &mut Game, c: Cmd) -> Option<&'static str> {
         }
         Cmd::Sell(p) => g.sell_at(p).then_some(SOLD),
         Cmd::Deploy(u, p) => {
+            if g.garrison_full(u, p, None, udef(u).n) {
+                return Some(GARRISON_FULL);
+            }
             let full = !g.logi_room(g.actor, 1);
             (!g.deploy(u, p)).then_some(if full { LOGI_FULL } else { "Can't deploy there" })
         }
         Cmd::UpgradeHq => (!g.upgrade_hq()).then_some("Can't upgrade the HQ yet"),
         Cmd::Order(gi, p) => {
+            if (gi as usize) < g.groups.len() && g.garrison_full(g.groups[gi as usize].kind, p, Some(gi as usize), g.groups[gi as usize].m.iter().filter(|m| m.alive).count()) {
+                return Some(GARRISON_FULL);
+            }
             let ok = (gi as usize) < g.groups.len() && g.order(gi as usize, p);
             (!ok).then_some("Can't send troops there")
         }
@@ -294,6 +309,7 @@ fn apply_as(g: &mut Game, c: Cmd) -> Option<&'static str> {
             g.cease(i as usize);
             None
         }
+        Cmd::Prio(i, p) => (!g.set_prio(i as usize, p)).then_some("Can't change that turret's targeting"),
         Cmd::Design { parts, paint } => {
             let b = crate::garage::Build { name: String::new(), parts: parts.map(|p| ((p as usize) < crate::garage::PARTS.len()).then_some(p)), paint };
             (!g.pick_design(&b)).then_some("That turret uses parts you haven't got")

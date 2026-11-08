@@ -352,6 +352,7 @@ pub(super) fn turret(mb: &mut MB, b: &Build, sp: &Spec, c: Vec2, base: f32, pose
             gun,
             stripe,
             pose,
+            sp.barrels,
         );
         top = top.max(t);
     }
@@ -372,6 +373,7 @@ fn head(
     gun: Color,
     stripe: Option<Color>,
     pose: Pose,
+    nb: u8,
 ) -> f32 {
     let fwd = vec2(aim.cos(), aim.sin());
     let side = vec2(-fwd.y, fwd.x);
@@ -401,6 +403,13 @@ fn head(
             loft(mb, &hex, &shrink(&hex, 0.25 * k), z, hz, Some(hc), hs);
         }
         Fam::Sweep => cyl(mb, c, 1.1 * k, z, hz, hc, hs),
+        Fam::Gang | Fam::Battery => {
+            let wide = if hf == Fam::Battery { 1.75 } else { 1.5 };
+            let tall = if hf == Fam::Battery { 1.25 } else { 1.0 };
+            let lo = chamfer(c - fwd * 0.1 * k, 1.2 * k, wide * k, 0.4 * k, aim);
+            let hi = chamfer(c - fwd * 0.2 * k, 1.0 * k, (wide - 0.25) * k, 0.3 * k, aim);
+            loft(mb, &lo, &hi, z, z + 0.9 * k * tall, Some(hc), hs);
+        }
         _ => {
             let lo = chamfer(c - fwd * 0.2 * k, 1.25 * k, 1.0 * k, 0.5 * k, aim);
             let hi = chamfer(c - fwd * 0.3 * k, 1.0 * k, 0.8 * k, 0.4 * k, aim);
@@ -444,178 +453,187 @@ fn head(
             STEEL,
         );
     }
-    // the barrel
-    let bz = z + 0.5 * k;
-    let m = c + fwd * 0.8 * k;
-    let gd = mix(gun, BLACK, 0.25);
-    let tip_glow = |mb: &mut MB, p: Vec2, zz: f32| {
-        if pose.flash > 0.0 {
-            lamp(mb, p, zz - 0.1, 0.2 * k, rgba(255, 220, 140, pose.flash));
-        }
+    // the barrels: one, or a row (or two rows) of them on a multi-barrel head
+    let offs: &[(f32, f32)] = match nb {
+        2 => &[(-0.35, 0.0), (0.35, 0.0)],
+        3 => &[(-0.6, 0.0), (0.0, 0.0), (0.6, 0.0)],
+        4 => &[(-0.35, -0.2), (0.35, -0.2), (-0.35, 0.25), (0.35, 0.25)],
+        6 => &[(-0.6, -0.2), (0.0, -0.2), (0.6, -0.2), (-0.6, 0.25), (0.0, 0.25), (0.6, 0.25)],
+        _ => &[(0.0, 0.0)],
     };
-    let len = match bf {
-        Fam::Rifle => {
-            beam(mb, m, m + fwd * 2.6 * k, 0.14 * k, bz, gd);
-            beam(mb, m + fwd * 2.4 * k, m + fwd * 2.8 * k, 0.2 * k, bz, gun);
-            2.8
-        }
-        Fam::Rotary => {
-            cyl(
-                mb,
-                m + fwd * 0.3 * k,
-                0.4 * k,
-                bz - 0.4 * k,
-                bz + 0.4 * k,
-                gun,
-                gd,
-            );
-            let spin = pose.t * 14.0 * pose.flash.max(0.1);
-            for j in 0..3 {
-                let a = spin + j as f32 * 2.09;
-                let off = side * a.cos() * 0.2 * k;
-                let zo = a.sin() * 0.2 * k;
-                beam(mb, m + off, m + off + fwd * 2.3 * k, 0.08 * k, bz + zo, gd);
+    for &(so, zo) in offs {
+        let bz = z + 0.5 * k + zo * k;
+        let m = c + fwd * 0.8 * k + side * so * k;
+        let gd = mix(gun, BLACK, 0.25);
+        let tip_glow = |mb: &mut MB, p: Vec2, zz: f32| {
+            if pose.flash > 0.0 {
+                lamp(mb, p, zz - 0.1, 0.2 * k, rgba(255, 220, 140, pose.flash));
             }
-            2.3
-        }
-        Fam::Shotgun => {
-            beam(mb, m, m + fwd * 1.6 * k, 0.26 * k, bz, gd);
-            beam(mb, m + fwd * 1.4 * k, m + fwd * 1.8 * k, 0.32 * k, bz, gun);
-            1.8
-        }
-        Fam::Howitzer => {
-            beam(mb, m, m + fwd * 3.4 * k, 0.24 * k, bz, gd);
-            beam(mb, m, m + fwd * 0.8 * k, 0.34 * k, bz, gun);
-            beam(mb, m + fwd * 3.2 * k, m + fwd * 3.8 * k, 0.33 * k, bz, gun);
-            3.8
-        }
-        Fam::Mortar => {
-            strut(mb, m, bz, m + fwd * 0.9 * k, bz + 1.6 * k, 0.32 * k, gd);
-            lamp(mb, m + fwd * 0.9 * k, bz + 1.6 * k, 0.3 * k, gun);
-            1.0
-        }
-        Fam::Rail => {
-            for s in [-0.25f32, 0.25] {
-                beam(
-                    mb,
-                    m + side * s * k,
-                    m + side * s * k + fwd * 3.8 * k,
-                    0.1 * k,
-                    bz,
-                    gd,
-                );
+        };
+        let len = match bf {
+            Fam::Rifle => {
+                beam(mb, m, m + fwd * 2.6 * k, 0.14 * k, bz, gd);
+                beam(mb, m + fwd * 2.4 * k, m + fwd * 2.8 * k, 0.2 * k, bz, gun);
+                2.8
             }
-            beam(
-                mb,
-                m,
-                m + fwd * 3.6 * k,
-                0.05 * k,
-                bz,
-                rgba(150, 240, 255, 0.6 + 0.4 * pose.flash),
-            );
-            3.8
-        }
-        Fam::Laser => {
-            beam(mb, m, m + fwd * 2.2 * k, 0.22 * k, bz, gd);
-            lamp(
-                mb,
-                m + fwd * 2.3 * k,
-                bz - 0.15 * k,
-                0.18 * k,
-                rgb(255, 80, 80),
-            );
-            2.4
-        }
-        Fam::Missile => {
-            let pod = rect(m + fwd * 0.6 * k, -0.6 * k, -0.7 * k, 0.9 * k, 0.7 * k, aim);
-            block(mb, &pod, bz - 0.4 * k, bz + 0.5 * k, gun, gd);
-            for j in 0..4 {
-                let p = m + fwd * 1.52 * k + side * ((j % 2) as f32 - 0.5) * 0.7 * k;
-                lamp(
-                    mb,
-                    p,
-                    bz + ((j / 2) as f32 - 0.5) * 0.4 * k,
-                    0.12 * k,
-                    rgb(30, 30, 34),
-                );
-            }
-            1.5
-        }
-        Fam::Flamer => {
-            cyl(
-                mb,
-                c - fwd * 0.9 * k - side * 0.6 * k,
-                0.35 * k,
-                z,
-                z + 0.9 * k,
-                rgb(240, 101, 46),
-                rgb(160, 60, 20),
-            );
-            beam(mb, m, m + fwd * 1.8 * k, 0.16 * k, bz, gd);
-            beam(mb, m + fwd * 1.6 * k, m + fwd * 2.0 * k, 0.24 * k, bz, gun);
-            2.0
-        }
-        Fam::Tesla => {
-            for j in 0..3 {
-                let zz = hz + j as f32 * 0.35 * k;
+            Fam::Rotary => {
                 cyl(
                     mb,
-                    c,
-                    (0.55 - j as f32 * 0.08) * k,
-                    zz,
-                    zz + 0.25 * k,
-                    mix(rgb(200, 150, 80), gun, 0.3),
-                    rgb(150, 100, 50),
-                );
-            }
-            dome(
-                mb,
-                c,
-                0.45 * k,
-                hz + 1.05 * k,
-                0.45 * k,
-                rgba(150, 200, 255, 0.85),
-            );
-            0.0
-        }
-        Fam::Flak => {
-            for s in [-0.3f32, 0.3] {
-                beam(
-                    mb,
-                    m + side * s * k,
-                    m + side * s * k + fwd * 1.9 * k,
-                    0.12 * k,
-                    bz,
+                    m + fwd * 0.3 * k,
+                    0.4 * k,
+                    bz - 0.4 * k,
+                    bz + 0.4 * k,
+                    gun,
                     gd,
                 );
+                let spin = pose.t * 14.0 * pose.flash.max(0.1);
+                for j in 0..3 {
+                    let a = spin + j as f32 * 2.09;
+                    let off = side * a.cos() * 0.2 * k;
+                    let zo = a.sin() * 0.2 * k;
+                    beam(mb, m + off, m + off + fwd * 2.3 * k, 0.08 * k, bz + zo, gd);
+                }
+                2.3
             }
-            1.9
+            Fam::Shotgun => {
+                beam(mb, m, m + fwd * 1.6 * k, 0.26 * k, bz, gd);
+                beam(mb, m + fwd * 1.4 * k, m + fwd * 1.8 * k, 0.32 * k, bz, gun);
+                1.8
+            }
+            Fam::Howitzer => {
+                beam(mb, m, m + fwd * 3.4 * k, 0.24 * k, bz, gd);
+                beam(mb, m, m + fwd * 0.8 * k, 0.34 * k, bz, gun);
+                beam(mb, m + fwd * 3.2 * k, m + fwd * 3.8 * k, 0.33 * k, bz, gun);
+                3.8
+            }
+            Fam::Mortar => {
+                strut(mb, m, bz, m + fwd * 0.9 * k, bz + 1.6 * k, 0.32 * k, gd);
+                lamp(mb, m + fwd * 0.9 * k, bz + 1.6 * k, 0.3 * k, gun);
+                1.0
+            }
+            Fam::Rail => {
+                for s in [-0.25f32, 0.25] {
+                    beam(
+                        mb,
+                        m + side * s * k,
+                        m + side * s * k + fwd * 3.8 * k,
+                        0.1 * k,
+                        bz,
+                        gd,
+                    );
+                }
+                beam(
+                    mb,
+                    m,
+                    m + fwd * 3.6 * k,
+                    0.05 * k,
+                    bz,
+                    rgba(150, 240, 255, 0.6 + 0.4 * pose.flash),
+                );
+                3.8
+            }
+            Fam::Laser => {
+                beam(mb, m, m + fwd * 2.2 * k, 0.22 * k, bz, gd);
+                lamp(
+                    mb,
+                    m + fwd * 2.3 * k,
+                    bz - 0.15 * k,
+                    0.18 * k,
+                    rgb(255, 80, 80),
+                );
+                2.4
+            }
+            Fam::Missile => {
+                let pod = rect(m + fwd * 0.6 * k, -0.6 * k, -0.7 * k, 0.9 * k, 0.7 * k, aim);
+                block(mb, &pod, bz - 0.4 * k, bz + 0.5 * k, gun, gd);
+                for j in 0..4 {
+                    let p = m + fwd * 1.52 * k + side * ((j % 2) as f32 - 0.5) * 0.7 * k;
+                    lamp(
+                        mb,
+                        p,
+                        bz + ((j / 2) as f32 - 0.5) * 0.4 * k,
+                        0.12 * k,
+                        rgb(30, 30, 34),
+                    );
+                }
+                1.5
+            }
+            Fam::Flamer => {
+                cyl(
+                    mb,
+                    c - fwd * 0.9 * k - side * 0.6 * k,
+                    0.35 * k,
+                    z,
+                    z + 0.9 * k,
+                    rgb(240, 101, 46),
+                    rgb(160, 60, 20),
+                );
+                beam(mb, m, m + fwd * 1.8 * k, 0.16 * k, bz, gd);
+                beam(mb, m + fwd * 1.6 * k, m + fwd * 2.0 * k, 0.24 * k, bz, gun);
+                2.0
+            }
+            Fam::Tesla => {
+                for j in 0..3 {
+                    let zz = hz + j as f32 * 0.35 * k;
+                    cyl(
+                        mb,
+                        c,
+                        (0.55 - j as f32 * 0.08) * k,
+                        zz,
+                        zz + 0.25 * k,
+                        mix(rgb(200, 150, 80), gun, 0.3),
+                        rgb(150, 100, 50),
+                    );
+                }
+                dome(
+                    mb,
+                    c,
+                    0.45 * k,
+                    hz + 1.05 * k,
+                    0.45 * k,
+                    rgba(150, 200, 255, 0.85),
+                );
+                0.0
+            }
+            Fam::Flak => {
+                for s in [-0.3f32, 0.3] {
+                    beam(
+                        mb,
+                        m + side * s * k,
+                        m + side * s * k + fwd * 1.9 * k,
+                        0.12 * k,
+                        bz,
+                        gd,
+                    );
+                }
+                1.9
+            }
+            Fam::Needle => {
+                beam(mb, m, m + fwd * 3.6 * k, 0.07 * k, bz, gd);
+                1.6
+            }
+            Fam::Sonic => {
+                let dish = ngon(m + fwd * 0.9 * k, 0.9 * k, 10, aim);
+                loft(
+                    mb,
+                    &shrink(&dish, 0.6 * k),
+                    &dish,
+                    bz - 0.4 * k,
+                    bz + 0.2 * k,
+                    Some(mix(gun, WHITE, 0.2)),
+                    gd,
+                );
+                1.0
+            }
+            _ => 2.0,
+        };
+        if let (Some(s), true) = (stripe, len > 1.2) {
+            let p = m + fwd * len * 0.55 * k;
+            beam(mb, p, p + fwd * 0.25 * k, 0.2 * k, bz, s);
         }
-        Fam::Needle => {
-            beam(mb, m, m + fwd * 3.6 * k, 0.07 * k, bz, gd);
-            1.6
+        if len > 0.5 {
+            tip_glow(mb, m + fwd * len * k, bz);
         }
-        Fam::Sonic => {
-            let dish = ngon(m + fwd * 0.9 * k, 0.9 * k, 10, aim);
-            loft(
-                mb,
-                &shrink(&dish, 0.6 * k),
-                &dish,
-                bz - 0.4 * k,
-                bz + 0.2 * k,
-                Some(mix(gun, WHITE, 0.2)),
-                gd,
-            );
-            1.0
-        }
-        _ => 2.0,
-    };
-    if let (Some(s), true) = (stripe, len > 1.2) {
-        let p = m + fwd * len * 0.55 * k;
-        beam(mb, p, p + fwd * 0.25 * k, 0.2 * k, bz, s);
-    }
-    if len > 0.5 {
-        tip_glow(mb, m + fwd * len * k, bz);
     }
     let _ = hc;
     hz + if bf == Fam::Tesla { 1.5 * k } else { 0.0 }
@@ -693,28 +711,19 @@ pub fn preview(
     let c = STAGE;
     let mut mb = MB::split(mat.is_none());
     mb.obj(c, 0.0);
-    // the turntable
-    mb.prism(
-        &art::ngon(c, 6.5, 40, 0.0),
-        -0.4,
-        0.0,
-        rgb(206, 210, 216),
-        rgb(160, 166, 175),
-    );
-    // the launch pad: a light concrete disc, an orange ring and blueprint ticks
-    art::ring_flat(&mut mb, c, 6.2, 0.15, 0.02, rgba(232, 128, 0, 0.75));
-    art::ring_flat(&mut mb, c, 3.4, 0.06, 0.02, rgba(26, 115, 232, 0.35));
-    for k in 0..12 {
-        let a = k as f32 / 12.0 * std::f32::consts::TAU;
-        mb.line(
-            &[
-                c + vec2(a.cos(), a.sin()) * 4.2,
-                c + vec2(a.cos(), a.sin()) * 5.6,
-            ],
-            0.08,
-            rgba(26, 60, 110, 0.22),
-        );
+    // a plain 3D grid under the turret (Devin: no hall, no map, just the grid), fading out
+    // with distance, and a faint ring where it stands
+    let step = 2.0;
+    let n: i32 = 16;
+    for k in -n..=n {
+        let o = k as f32 * step;
+        let fade = 1.0 - (k.abs() as f32 / n as f32);
+        let a = if k == 0 { 0.7 } else if k % 4 == 0 { 0.5 } else { 0.28 } * (0.3 + 0.7 * fade);
+        let half = n as f32 * step;
+        mb.line(&[c + vec2(o, -half), c + vec2(o, half)], 0.09, rgba(66, 180, 222, a));
+        mb.line(&[c + vec2(-half, o), c + vec2(half, o)], 0.09, rgba(66, 180, 222, a));
     }
+    art::ring_flat(&mut mb, c, 4.6, 0.08, 0.02, rgba(66, 180, 222, 0.35));
     mb.obj(c, 0.5);
     turret(&mut mb, b, sp, c, 0.0, pose);
     let (eye, target) = preview_eye(yaw, pitch, dist);

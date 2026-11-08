@@ -120,6 +120,11 @@ pub enum Fam {
     Shield,
     Recycler,
     Cooling,
+    // heads that carry more barrels (appended)
+    Gang,
+    Battery,
+    // the mech legs mount (appended)
+    Mech,
 }
 
 pub struct Part {
@@ -278,7 +283,21 @@ pub static PARTS: &[Part] = &[
     p("g.recyc", "Scrap recycler", Fam::Recycler, 4, 0),
     p("g.cool1", "Cooling jacket", Fam::Cooling, 2, 0),
     p("g.cool2", "Cryo radiator", Fam::Cooling, 3, 1),
+    // ---- multi-barrel heads (Devin replaced the targeting heads with these)
+    p("h.gang2", "Twin-barrel head", Fam::Gang, 2, 0),
+    p("h.gang3", "Triple-barrel head", Fam::Gang, 3, 1),
+    p("h.bat4", "Quad battery", Fam::Battery, 4, 0),
+    p("h.bat6", "Hex battery", Fam::Battery, 5, 1),
+    // ---- mech legs: a walking turret that takes orders like a tank
+    p("m.mech", "Mech legs", Fam::Mech, 5, 0),
 ];
+
+/// The heads that used to pick targets their own way. Targeting is now set per turret in a game,
+/// so these are off the shelf; a saved build that has one gets the Optic block instead.
+pub fn retired(i: u16) -> bool {
+    use Fam::*;
+    matches!(part(i).fam, Crowd | Far | Guard | LastLine | Lead | Scatter | Sweep | Split | Overwatch)
+}
 
 /// Parts a new campaign starts with in the garage, researched and bought.
 pub const STARTER: [&str; 9] = [
@@ -320,6 +339,9 @@ fn fam_after(f: Fam) -> Option<&'static str> {
         Split => "h.far1",
         Lead => "h.optic2",
         Overwatch => "h.lead2",
+        Gang => "h.optic2",
+        Battery => "h.gang3",
+        Mech => "m.walk2",
         // barrels
         Rotary => "b.rifle1",
         Needle => "b.rifle2",
@@ -357,6 +379,9 @@ fn fam_after(f: Fam) -> Option<&'static str> {
 /// family's first part the one its branch grows from.
 pub fn needs(i: u16) -> Option<u16> {
     let pt = part(i);
+    if retired(i) {
+        return None;
+    }
     if pt.lvl > 0 {
         return PARTS.iter().position(|q| q.fam == pt.fam && q.lvl + 1 == pt.lvl).map(|j| j as u16);
     }
@@ -375,7 +400,7 @@ pub struct TreeNode {
 /// One slot's parts as a tree, left to right, roots first. Also returns its (columns, rows).
 pub fn part_tree(slot: Slot) -> (Vec<TreeNode>, (usize, f32)) {
     fn kids(i: u16) -> Vec<u16> {
-        (0..PARTS.len() as u16).filter(|&j| needs(j) == Some(i)).collect()
+        (0..PARTS.len() as u16).filter(|&j| needs(j) == Some(i) && !retired(j)).collect()
     }
     fn place(i: u16, col: usize, row: &mut f32, out: &mut Vec<TreeNode>) -> f32 {
         let ks = kids(i);
@@ -392,7 +417,7 @@ pub fn part_tree(slot: Slot) -> (Vec<TreeNode>, (usize, f32)) {
     }
     let mut out = Vec::new();
     let mut rows = 0.0f32;
-    for i in (0..PARTS.len() as u16).filter(|&i| part(i).slot() == slot && needs(i).is_none()) {
+    for i in (0..PARTS.len() as u16).filter(|&i| part(i).slot() == slot && needs(i).is_none() && !retired(i)) {
         if rows > 0.0 {
             rows += 0.5;
         }
@@ -414,9 +439,9 @@ impl Fam {
         use Fam::*;
         match self {
             Sandbag | Pintle | Ring | Casemate | Mast | Popup | Crane | Gyro | Twin | Fortress
-            | Walker => Slot::Mount,
+            | Walker | Mech => Slot::Mount,
             Iron | Optic | Crowd | Far | Guard | LastLine | Lead | Scatter | Sweep | Split
-            | Overwatch => Slot::Head,
+            | Overwatch | Gang | Battery => Slot::Head,
             Rifle | Rotary | Shotgun | Howitzer | Mortar | Rail | Laser | Missile | Flamer
             | Tesla | Flak | Needle | Sonic => Slot::Barrel,
             Incendiary | Cryo | Cluster | Piercing | HighEx | TwinLink | Ricochet | Overcharge
@@ -488,6 +513,9 @@ impl Fam {
             Shield => "A shield that soaks up damage before the armour does. It comes back 8 s after the last hit.",
             Recycler => "Every hit earns back a little scrap for the hostiles it caught.",
             Cooling => "Reloads faster.",
+            Gang => "A wider head that carries two or three barrels side by side: each trigger pull fires every barrel, multiplying firepower and ammo use. Heavier barrels, a slower turn.",
+            Battery => "A great block of four or six barrels firing together: enormous firepower for the price, but it turns like a battleship, sprays more and eats ammo.",
+            Mech => "Two armoured legs that carry the turret wherever you send it, like a tank: select it and right-click to move. Slow, and it takes a long time to build.",
         }
     }
     /// Scrap price at tier 1 (see `Part::cost`).
@@ -510,6 +538,9 @@ impl Fam {
             Crowd | Far | Guard | LastLine | Scatter => 16.0,
             Lead | Sweep | Split => 18.0,
             Overwatch => 22.0,
+            Gang => 40.0,
+            Battery => 60.0,
+            Mech => 60.0,
             Rifle => 45.0,
             Rotary => 40.0,
             Shotgun => 40.0,
@@ -536,7 +567,11 @@ impl Fam {
     fn base_weight(self) -> f32 {
         match self.slot() {
             Slot::Mount => 0.0,
-            Slot::Head => 2.0,
+            Slot::Head => match self {
+                Fam::Gang => 3.0,
+                Fam::Battery => 4.0,
+                _ => 2.0,
+            },
             Slot::Barrel => match self {
                 Fam::Rifle | Fam::Needle | Fam::Shotgun => 3.0,
                 Fam::Rotary | Fam::Flamer | Fam::Tesla | Fam::Flak | Fam::Sonic => 4.0,
@@ -675,6 +710,10 @@ pub struct Spec {
     /// pop-up mount: seconds to rise (0: no vault)
     pub rise: f32,
     pub twin_mount: bool,
+    /// barrels on the head, all firing together each trigger pull
+    pub barrels: u8,
+    /// mech legs: it walks where it is ordered (and how fast, cells a second)
+    pub mech: f32,
     /// walker legs: how far from home it walks (0: stays put)
     pub leash: f32,
     pub fire_on_move: bool,
@@ -728,6 +767,8 @@ impl Spec {
             reach: 0.0,
             rise: 0.0,
             twin_mount: false,
+            barrels: 1,
+            mech: 0.0,
             leash: 0.0,
             fire_on_move: false,
             height: 1.8,
@@ -755,7 +796,7 @@ impl Spec {
             + 0.35 * self.cluster as f32
             + 0.5 * self.bounce as f32
             + self.twin_link as f32);
-        let shots = self.burst as f32 * if self.twin_mount { 2.0 } else { 1.0 };
+        let shots = self.burst as f32 * if self.twin_mount { 2.0 } else { 1.0 } * self.barrels as f32;
         let cycle = self.reload / self.spin.max(1.0).sqrt()
             + self.charge
             + self.burst_gap * (self.burst as f32 - 1.0);
@@ -766,6 +807,7 @@ impl Spec {
     pub fn ammo_rate(&self) -> f32 {
         let shots = self.burst as f32
             * if self.twin_mount { 2.0 } else { 1.0 }
+            * self.barrels as f32
             * (1 + self.twin_link) as f32;
         let cycle = self.reload / self.spin.max(1.0).sqrt()
             + self.charge
@@ -914,6 +956,25 @@ fn apply(pt: &Part, s: &mut Spec) {
             s.aim = Aim::Smart;
             s.traverse *= 1.5;
             s.range *= 1.1;
+        }
+        Gang => {
+            s.barrels = k([2.0, 3.0, 1.0]) as u8;
+            s.traverse *= k([0.75, 0.6, 1.0]);
+            s.spread += k([0.6, 0.9, 0.0]);
+        }
+        Battery => {
+            s.barrels = k([4.0, 6.0, 1.0]) as u8;
+            s.traverse *= k([0.45, 0.3, 1.0]);
+            s.reload *= k([1.1, 1.2, 1.0]);
+            s.spread += k([1.0, 1.4, 0.0]);
+        }
+        Mech => {
+            s.hp = 1400.0;
+            s.traverse = 2.6;
+            s.cap = 30.0;
+            s.mech = 2.2;
+            s.fire_on_move = true;
+            s.height = 4.2;
         }
         // ---- barrels: what it fires (sets the base numbers the rest scale)
         Rifle => {
@@ -1241,7 +1302,7 @@ impl Build {
         };
         for (k, slot) in SLOTS.iter().enumerate() {
             let Some(id) = f.get(k + 1) else { break };
-            b.parts[k] = find(id).filter(|i| part(*i).slot() == *slot);
+            b.parts[k] = find(id).filter(|i| part(*i).slot() == *slot).map(|i| if retired(i) { find("h.optic1").unwrap_or(i) } else { i });
         }
         for k in 0..3 {
             if let Some(h) = f.get(8 + k).filter(|h| h.len() == 6) {
@@ -1294,8 +1355,10 @@ pub fn spec_raw(b: &Build) -> Spec {
         let pt = part(i);
         // a twin cradle carries two heads and two barrels
         let n = if twin && (k == 1 || k == 2) { 2.0 } else { 1.0 };
-        s.cost += pt.cost() * n;
-        s.load += pt.weight() * n;
+        // every extra barrel on a multi-barrel head costs most of another barrel and half its weight
+        let extra = if k == 2 { (s.barrels.max(1) - 1) as f32 } else { 0.0 };
+        s.cost += pt.cost() * n * (1.0 + 0.6 * extra);
+        s.load += pt.weight() * n * (1.0 + 0.5 * extra);
     }
     if s.fire_on_move {
         s.spread *= 0.5;
@@ -1347,6 +1410,12 @@ pub fn stat_lines(s: &Spec) -> Vec<(&'static str, String)> {
         ("Ammo use", format!("{:.1}/s", s.ammo_rate())),
     ];
     let mut extra = |k: &'static str, val: String| v.push((k, val));
+    if s.barrels > 1 {
+        extra("Barrels", format!("x{}", s.barrels));
+    }
+    if s.mech > 0.0 {
+        extra("Walks", format!("{:.1}/s", s.mech));
+    }
     if s.burst > 1 {
         extra("Burst", format!("{} shots", s.burst));
     }
@@ -1639,6 +1708,6 @@ mod tests {
             }
             seen += nodes.len();
         }
-        assert_eq!(seen, PARTS.len());
+        assert_eq!(seen, (0..PARTS.len() as u16).filter(|i| !retired(*i)).count());
     }
 }

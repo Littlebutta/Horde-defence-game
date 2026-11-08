@@ -54,7 +54,12 @@ pub struct Structure {
     pub cu: Option<Box<Custom>>,
     /// a piece of the perimeter wall, laid (and taken down again) along the base zone's edge
     pub auto: bool,
+    /// turrets: what the player told it to shoot first (`PRIOS`; 0: its own default)
+    pub prio: u8,
 }
+/// The targeting a player can set on a turret (`Structure::prio`). Each still looks for the spot
+/// that catches the most of the horde within the part of its range the choice picks.
+pub const PRIOS: [&str; 5] = ["Default", "Nearest", "Biggest crowd", "Closest to HQ", "Furthest"];
 impl Structure {
     /// Up on a roof or a bunker: no footprint on the ground, and the rooftop range bonus.
     pub fn up(&self) -> bool {
@@ -89,6 +94,26 @@ pub enum GState {
     Hold,
     Garrison,
 }
+/// A squad or tank paid for and getting ready at the HQ: it leaves when `t` runs out.
+#[derive(Clone)]
+pub struct Muster {
+    pub kind: U,
+    pub at: Vec2,
+    pub t: f32,
+    pub dur: f32,
+    pub own: u8,
+    pub cost: f32,
+}
+/// Seconds a squad or a tank takes to get ready before it leaves the HQ (before upgrades).
+pub fn muster_time(u: U) -> f32 {
+    match u {
+        U::Rifle => 1.5,
+        U::Tank => 3.5,
+    }
+}
+/// How many rifle squads one building or bunker holds at a time.
+pub const GARRISON_SQUADS: usize = 3;
+
 pub struct Group {
     pub kind: U,
     pub m: Vec<Member>,
@@ -581,6 +606,8 @@ pub struct Game {
     /// the war drums' pulls on the orcs, after the regroups' in the rally list (see `regroup`)
     drum_rallies: Vec<Rally>,
     spawnq: Vec<SpawnQ>,
+    /// squads and tanks paid for, getting ready to leave the HQ
+    pub musters: Vec<Muster>,
     conv: Vec<Vec2>,
     pub scrap: f32,
     pub ammo: f32,
@@ -716,6 +743,7 @@ impl Game {
             drummers: Vec::new(),
             drum_rallies: Vec::new(),
             spawnq: Vec::new(),
+            musters: Vec::new(),
             conv: Vec::new(),
             scrap: 700.0,
             ammo: 400.0,
@@ -1357,6 +1385,7 @@ impl Game {
             owner: self.actor as u8,
             cu: None,
             auto: false,
+            prio: 0,
         };
         // walkers stand on their own legs: they never block the street
         let walker = t == S::Custom && self.cur_design(self.actor).is_some_and(|d| d.spec.leash > 0.0);
@@ -1632,7 +1661,8 @@ impl Game {
                 }
             })
             .sum();
-        turrets + troops
+        let musters = self.musters.iter().filter(|m| m.own == o8).count() as u32;
+        turrets + troops + musters
     }
     pub fn logi_cap(&self, o: usize) -> u32 {
         logi_cap(self.hq_level(o))
@@ -2325,6 +2355,7 @@ impl Game {
         lap(&mut self.prof[4]);
         self.squads_tick();
         lap(&mut self.prof[5]);
+        self.musters_tick();
         self.groups_tick();
         lap(&mut self.prof[6]);
         self.economy();
@@ -2874,8 +2905,25 @@ impl Game {
             let range = self.turret_range(t, up, o);
             // every other turret in reach of a war-drum orc goes for it
             let drum = if i % 2 == 0 { self.drummer_in_range(center, range) } else { None };
+            let prio = self.structs[i].prio;
             let tg = if let Some(p) = drum {
                 Some(p)
+            } else if prio > 0 {
+                let rad = if t == S::Gun { 1.0 } else { d.rad * self.rad_mult(t, o) };
+                let tg = if t == S::Gun {
+                    let p = self.prio_target(center, range, rad, prio, &[], &claimed, &|_| true);
+                    if let Some(p) = p {
+                        claimed.push(p.y as usize * W + p.x as usize);
+                    }
+                    p
+                } else {
+                    let p = self.prio_target(center, range, rad, prio, &shells, &[], &|_| true);
+                    if let Some(p) = p {
+                        shells.push((p, rad));
+                    }
+                    p
+                };
+                tg
             } else if t == S::Gun {
                 let cell = self.target_cell(center, range, &claimed, |_| false);
                 if let Some(k) = cell {
@@ -3021,6 +3069,98 @@ impl Game {
         }
         out.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         out
+    }
+
+    /// Where a turret set to targeting `prio` (see `PRIOS`, 1..) fires: the coarse cells the choice
+    /// favours (nearest, the crowd, closest to the HQ, furthest), then within those the spot whose
+    /// blast of `rad` catches the most hostiles, keeping clear of `taken` blasts and `claimed`
+    /// gun cells and of spots `ok` rules out.
+    pub(crate) fn prio_target(&self, c: Vec2, r: f32, rad: f32, prio: u8, taken: &[(Vec2, f32)], claimed: &[usize], ok: &dyn Fn(Vec2) -> bool) -> Option<Vec2> {
+        let crowd = |gi: usize| {
+            let (gx, gy) = ((gi % CW) as i32, (gi / CW) as i32);
+            let mut n = 0;
+            for oy in -1..=1 {
+                for ox in -1..=1 {
+                    let (x, y) = (gx + ox, gy + oy);
+                    if x >= 0 && y >= 0 && x < CW as i32 && y < CH as i32 {
+                        n += self.swarm.coarse_at(y as usize * CW + x as usize) * if ox == 0 && oy == 0 { 2 } else { 1 };
+                    }
+                }
+            }
+            n as f32
+        };
+        let mut cand: Vec<(f32, usize)> = self
+            .coarse_near(c, r)
+            .into_iter()
+            .map(|(d, gi)| {
+                let key = match prio {
+                    1 => d,
+                    2 => -crowd(gi),
+                    3 => {
+                        let k = (gi / CW * CG + 4) * W + gi % CW * CG + 4;
+                        self.hq_dist[k].min(INF) as f32
+                    }
+                    _ => -d,
+                };
+                (key, gi)
+            })
+            .collect();
+        cand.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let k = rad.round().clamp(1.0, 6.0) as i32;
+        let step = if rad >= 2.5 { 2 } else { 1 };
+        let mut looked = 0;
+        for &(_, gi) in &cand {
+            let (bx, by) = (((gi % CW) * CG) as i32, ((gi / CW) * CG) as i32);
+            let (mut best, mut bv) = (None, 0u32);
+            for y in (by..by + CG as i32).step_by(step) {
+                for x in (bx..bx + CG as i32).step_by(step) {
+                    if self.swarm.at(y as usize * W + x as usize) == 0 && step == 1 {
+                        continue;
+                    }
+                    let p = vec2(x as f32 + 0.5, y as f32 + 0.5);
+                    if p.distance(c) > r || !ok(p) || taken.iter().any(|(q, qr)| q.distance(p) < (qr + rad) * 0.6) {
+                        continue;
+                    }
+                    if claimed.iter().any(|&q| ((q % W) as i32 - x).abs() <= 1 && ((q / W) as i32 - y).abs() <= 1) {
+                        continue;
+                    }
+                    let mut v = 0;
+                    for yy in (y - k).max(0)..=(y + k).min(H as i32 - 1) {
+                        for xx in (x - k).max(0)..=(x + k).min(W as i32 - 1) {
+                            if (xx - x) * (xx - x) + (yy - y) * (yy - y) <= k * k {
+                                v += self.swarm.at(yy as usize * W + xx as usize);
+                            }
+                        }
+                    }
+                    if v > bv {
+                        bv = v;
+                        best = Some(p);
+                    }
+                }
+            }
+            if best.is_some() {
+                return best;
+            }
+            looked += 1;
+            if looked > 12 {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Sets a turret's targeting (see `PRIOS`); false if it isn't the player's turret.
+    pub fn set_prio(&mut self, i: usize, prio: u8) -> bool {
+        let Some(s) = self.structs.get_mut(i) else { return false };
+        if s.dead || !Self::has_prio(s.t) || prio as usize >= PRIOS.len() {
+            return false;
+        }
+        s.prio = prio;
+        true
+    }
+    /// Turrets whose targeting the player can set.
+    pub fn has_prio(t: S) -> bool {
+        matches!(t, S::Gun | S::Cannon | S::Custom)
     }
 
     /// The nearest occupied cell within `r`, skipping cells next to ones in `claimed` (so gun
@@ -4579,11 +4719,83 @@ impl Game {
         if self.scrap < d.cost || self.world.irradiated_at(at) || !self.unit_ok(self.actor, kind) || !self.logi_room(self.actor, 1) {
             return false;
         }
-        if !self.spawn_group(kind, d.n, at) {
+        if self.garrison_full(kind, at, None, d.n) {
             return false;
         }
+        let (roof, bunker) = self.order_into(kind, at);
+        if self.order_cell(roof, bunker, at).is_none() {
+            return false;
+        }
+        // paid now; it leaves the HQ once it's ready
         self.scrap -= d.cost;
+        let dur = muster_time(kind) * self.muster_mult(self.actor);
+        self.musters.push(Muster { kind, at, t: dur, dur, own: self.actor as u8, cost: d.cost });
         true
+    }
+    /// Player `o`'s campaign upgrades to how fast squads get ready.
+    pub fn muster_mult(&self, o: usize) -> f32 {
+        let mut m = 1.0;
+        if self.has_up(o, Up::Muster1) {
+            m *= 0.65;
+        }
+        if self.has_up(o, Up::Muster2) {
+            m *= 0.6;
+        }
+        m
+    }
+    /// Squads and tanks that are ready leave the HQ (refunded if their spot can't be reached now).
+    fn musters_tick(&mut self) {
+        if self.musters.is_empty() {
+            return;
+        }
+        let mut ready = Vec::new();
+        for m in &mut self.musters {
+            m.t -= DT;
+            if m.t <= 0.0 {
+                ready.push(m.clone());
+            }
+        }
+        self.musters.retain(|m| m.t > 0.0);
+        for m in ready {
+            let actor = self.actor;
+            self.actor = (m.own as usize).min(self.perks.len() - 1);
+            // a building that filled up meanwhile: they stop on the street outside instead
+            let at = if self.garrison_full(m.kind, m.at, None, udef(m.kind).n) { self.street_near(m.at) } else { m.at };
+            if !self.spawn_group(m.kind, udef(m.kind).n, at) {
+                self.scrap += m.cost;
+            }
+            self.actor = actor;
+        }
+    }
+    /// A spot on the street next to `at` (outside whatever building is there).
+    fn street_near(&self, at: Vec2) -> Vec2 {
+        match self.roof_at(at) {
+            Some((b, _)) => {
+                let bb = &self.world.buildings[b];
+                let r = ((bb.x1 - bb.x0).max(bb.y1 - bb.y0) / 2.0) as i32 + 14;
+                self.nearest_walkable(bb.c, r).map(Self::cell_pos).unwrap_or(at)
+            }
+            None => at,
+        }
+    }
+    /// Whether the building or bunker at `at` already holds `GARRISON_SQUADS` rifle squads
+    /// (garrisoned or on their way in), not counting group `gi`, so `n` more troops won't fit.
+    pub fn garrison_full(&self, kind: U, at: Vec2, gi: Option<usize>, n: usize) -> bool {
+        let (roof, bunker) = self.order_into(kind, at);
+        let (b, sb) = (roof.map(|r| r.0 as i32).unwrap_or(-1), bunker.map(|i| i as i32).unwrap_or(-1));
+        if b < 0 && sb < 0 {
+            return false;
+        }
+        let per = udef(U::Rifle).n;
+        let inside: usize = self
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(k, g)| Some(*k) != gi && !g.dead && g.kind == U::Rifle && g.b == b && g.sb == sb)
+            .map(|(_, g)| g.m.iter().filter(|m| m.alive).count())
+            .sum();
+        let coming: usize = self.musters.iter().filter(|m| m.kind == U::Rifle && m.at.distance(at) < 0.01).count() * per;
+        (inside + coming).div_ceil(per) + n.div_ceil(per) > GARRISON_SQUADS
     }
     /// Sends `n` troops out of the HQ to a spot (free; `deploy` is the paid version).
     pub fn spawn_group(&mut self, kind: U, n: usize, at: Vec2) -> bool {
@@ -4729,6 +4941,10 @@ impl Game {
             return false;
         }
         let kind = self.groups[gi].kind;
+        let alive = self.groups[gi].m.iter().filter(|m| m.alive).count();
+        if self.garrison_full(kind, at, Some(gi), alive) {
+            return false;
+        }
         let (roof, bunker) = self.order_into(kind, at);
         let Some(tc) = self.order_cell(roof, bunker, at) else {
             return false;

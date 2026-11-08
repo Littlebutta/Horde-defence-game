@@ -1,5 +1,5 @@
-//! The garage: a bright assembly hall, laid out like a rocket builder's, where turrets are put
-//! together from parts on a launch pad, painted with a bucket, named, and saved to the build
+//! The garage: a dark 3D grid the turret floats in, laid out like a rocket builder's, where
+//! turrets are put together from parts, painted with a bucket, named, and saved to the build
 //! library. The parts palette runs down the left in category tabs, the assembly stack stands
 //! beside the pad, and the engineer's report and saved turrets are on the right. Opened from the
 //! main menu it's a free builder with every part on the shelf; from the campaign screen parts
@@ -33,12 +33,8 @@ const PAINTS: [[u8; 3]; 20] = [
     [140, 90, 60],
 ];
 const ZONE_NAMES: [&str; 3] = ["Body", "Head", "Barrel"];
-/// The hall's own colours: pale steel and sky, a map-blue for the blueprint lines.
-const HALL_TOP: Color = Color::new(0.93, 0.95, 0.97, 1.0);
-const HALL_LOW: Color = Color::new(0.84, 0.87, 0.91, 1.0);
-const STEEL_LT: Color = Color::new(0.70, 0.74, 0.79, 1.0);
-const STEEL_MD: Color = Color::new(0.55, 0.60, 0.66, 1.0);
-const PRINT: Color = Color::new(0.10, 0.45, 0.91, 1.0);
+/// The grid's colour: the UI's cyan accent.
+const PRINT: Color = Color::new(0.26, 0.71, 0.87, 1.0);
 
 pub(super) struct Workshop {
     pub build: Build,
@@ -160,10 +156,13 @@ impl App {
         }
     }
 
-    /// Headless test hook (PH_GARAGE).
+    /// Headless test hook (PH_GARAGE; PH_GARAGE_CODE=<build code> puts that build on the pad).
     pub fn open_garage_test(&mut self) {
         let camp = self.camp.is_some();
         self.open_workshop(camp);
+        if let (Some(w), Some(b)) = (self.workshop.as_mut(), std::env::var("PH_GARAGE_CODE").ok().and_then(|c| Build::from_code(&c))) {
+            w.build = b;
+        }
     }
     /// One frame of the garage.
     pub(super) fn workshop(&mut self) {
@@ -173,8 +172,8 @@ impl App {
         };
         let mut camp = if w.campaign { self.camp.take() } else { None };
         let before = camp.as_ref().map(|c| c.crew.clone());
-        // the hall is always lit: the light palette, whatever the map uses
-        let dark = std::mem::replace(&mut self.dark, false);
+        // dark like the rest of the UI (Devin: the bright hall was far too white)
+        let dark = std::mem::replace(&mut self.dark, true);
         let back = self.workshop_frame(&mut w, camp.as_mut());
         self.dark = dark;
         if let Some(c) = camp {
@@ -199,7 +198,7 @@ impl App {
 
     /// Draws and runs the garage; true when the player leaves it.
     fn workshop_frame(&mut self, w: &mut Workshop, mut camp: Option<&mut Campaign>) -> bool {
-        let p = pal(false);
+        let p = pal(true);
         let dt = get_frame_time().min(0.1);
         let scr = ui::screen();
         let hud = ui::hud();
@@ -521,7 +520,7 @@ impl App {
                 self.tip = Some(format!(
                     "{}: {} parts",
                     kind.plural(),
-                    PARTS.iter().filter(|q| q.slot() == *kind).count()
+                    (0..PARTS.len() as u16).filter(|i| part(*i).slot() == *kind && !parts::retired(*i)).count()
                 ));
             }
             self.ui_rects.push(r);
@@ -560,7 +559,7 @@ impl App {
         }
         let list = a;
         let mut ids: Vec<u16> = (0..PARTS.len() as u16)
-            .filter(|i| part(*i).slot() == kind)
+            .filter(|i| part(*i).slot() == kind && !parts::retired(*i))
             .collect();
         ids.sort_by_key(|i| (part(*i).tier, part(*i).fam as u8, part(*i).lvl));
         let per = 2;
@@ -1344,7 +1343,7 @@ impl App {
 
     /// Strength, as five little bars.
     fn tier_pips(&self, x: f32, y: f32, tier: u8) {
-        let p = pal(false);
+        let p = pal(true);
         for k in 0..5u8 {
             let c = if k < tier {
                 tier_col(k + 1)
@@ -1355,216 +1354,11 @@ impl App {
         }
     }
 
-    /// The assembly hall: pale steel walls, the great door open on the city seen from above, a
-    /// service tower and crane by the pad, blueprint lines on the floor.
-    fn garage_backdrop(&self, scr: Rect, stage: Rect, view: Rect) {
-        ui::vgrad(scr, HALL_TOP, HALL_LOW);
-        let floor_y = view.y + view.h * 0.7;
-        let cx = view.center().x;
-        // tall wall panels and girders
-        let pw = 120.0;
-        let mut x = stage.x - (stage.x % pw);
-        while x < stage.right() {
-            draw_line(
-                x,
-                stage.y,
-                x,
-                floor_y,
-                1.0,
-                Color::new(0.2, 0.3, 0.45, 0.07),
-            );
-            x += pw;
-        }
-        for k in 1..4 {
-            let y = stage.y + (floor_y - stage.y) * k as f32 / 4.0;
-            draw_rectangle(
-                stage.x,
-                y - 2.0,
-                stage.w,
-                4.0,
-                Color::new(0.2, 0.3, 0.45, 0.05),
-            );
-        }
-        // the great door, open on the city below
-        let door = Rect::new(
-            cx - view.w * 0.32,
-            view.y + view.h * 0.1,
-            view.w * 0.64,
-            floor_y - view.y - view.h * 0.1,
-        );
-        city_view(door, self.clock);
-        draw_rectangle_lines(
-            door.x - 6.0,
-            door.y - 6.0,
-            door.w + 12.0,
-            door.h + 6.0,
-            6.0,
-            STEEL_LT,
-        );
-        draw_rectangle(door.x - 14.0, door.y - 22.0, door.w + 28.0, 16.0, STEEL_MD);
-        for k in 0..((door.w + 28.0) / 22.0) as i32 {
-            draw_rectangle(
-                door.x - 10.0 + k as f32 * 22.0,
-                door.y - 18.0,
-                10.0,
-                8.0,
-                STEEL_LT,
-            );
-        }
-        // the floor, a few shades darker, with blueprint lines running to the pad
-        ui::vgrad(
-            Rect::new(stage.x, floor_y, stage.w, stage.bottom() - floor_y),
-            Color::new(0.80, 0.83, 0.87, 1.0),
-            Color::new(0.72, 0.76, 0.81, 1.0),
-        );
-        draw_line(stage.x, floor_y, stage.right(), floor_y, 2.0, STEEL_LT);
-        for k in -8..=8 {
-            let bx = cx + k as f32 * view.w * 0.14;
-            draw_line(
-                cx + (bx - cx) * 0.35,
-                floor_y,
-                bx,
-                stage.bottom(),
-                1.0,
-                alpha(PRINT, 0.10),
-            );
-        }
-        let mut d = 6.0;
-        let mut y = floor_y + d;
-        while y < stage.bottom() {
-            draw_line(stage.x, y, stage.right(), y, 1.0, alpha(PRINT, 0.08));
-            d *= 1.35;
-            y += d;
-        }
-        // the service tower: a lattice of white steel up the left of the pad
-        let tx = view.x + view.w * 0.14;
-        let (t0, t1) = (tx - 18.0, tx + 18.0);
-        let tt = view.y + view.h * 0.06;
-        draw_rectangle(t0 - 3.0, tt, 6.0, floor_y - tt, STEEL_MD);
-        draw_rectangle(t1 - 3.0, tt, 6.0, floor_y - tt, STEEL_MD);
-        let mut y = tt;
-        while y + 30.0 <= floor_y {
-            draw_line(t0, y, t1, y + 30.0, 2.0, STEEL_LT);
-            draw_line(t1, y, t0, y + 30.0, 2.0, STEEL_LT);
-            draw_line(t0, y, t1, y, 2.0, STEEL_MD);
-            y += 30.0;
-        }
-        // its crane arm across the top, a hook swinging over the pad
-        let ay = tt + 4.0;
-        draw_rectangle(t0 - 6.0, ay - 6.0, cx - t0 + view.w * 0.1, 10.0, STEEL_MD);
-        let mut x = t1;
-        while x < cx + view.w * 0.1 - 16.0 {
-            draw_line(x, ay - 6.0, x + 12.0, ay + 4.0, 1.5, STEEL_LT);
-            x += 16.0;
-        }
-        let hx = cx + (self.clock * 0.4).sin() * 2.0;
-        draw_line(hx, ay + 4.0, hx, ay + 36.0, 1.5, STEEL_MD);
-        draw_circle_lines(hx, ay + 42.0, 5.0, 2.0, STEEL_MD);
-        // a warning lamp on top of the tower
-        let blink = 0.5 + 0.5 * (self.clock * 3.0).sin();
-        draw_circle(
-            tx,
-            tt - 6.0,
-            4.0,
-            Color::new(1.0, 0.45, 0.1, 0.6 + 0.4 * blink),
-        );
-        // ceiling lights
-        let mut x = stage.x + 60.0;
-        while x < stage.right() {
-            draw_rectangle(
-                x - 18.0,
-                stage.y + 4.0,
-                36.0,
-                5.0,
-                Color::new(1.0, 1.0, 1.0, 0.9),
-            );
-            draw_triangle(
-                vec2(x - 18.0, stage.y + 9.0),
-                vec2(x + 18.0, stage.y + 9.0),
-                vec2(x, stage.y + 9.0 + view.h * 0.25),
-                Color::new(1.0, 1.0, 1.0, 0.12),
-            );
-            x += 140.0;
-        }
+    /// Behind the 3D grid the turret floats in: a plain dark backdrop, a little lighter at the
+    /// horizon.
+    fn garage_backdrop(&self, scr: Rect, _stage: Rect, _view: Rect) {
+        ui::vgrad(scr, Color::new(0.035, 0.045, 0.06, 1.0), Color::new(0.06, 0.075, 0.095, 1.0));
     }
-}
-
-/// The view out of the hall's door: the city from high above, the way the game's maps draw it
-/// (pale land, white streets, parks and a river), with clouds drifting across.
-fn city_view(r: Rect, t: f32) {
-    draw_rectangle(r.x, r.y, r.w, r.h, rgb(232, 230, 222));
-    // a little hash for the blocks
-    let h = |a: i32, b: i32| -> f32 {
-        let v = (a.wrapping_mul(374761393) ^ b.wrapping_mul(668265263)) as u32;
-        let v = (v ^ (v >> 13)).wrapping_mul(1274126177);
-        (v >> 8) as f32 / 16777216.0
-    };
-    let bs = 34.0;
-    let (nx, ny) = ((r.w / bs) as i32 + 1, (r.h / bs) as i32 + 1);
-    for j in 0..ny {
-        for i in 0..nx {
-            let x = r.x + i as f32 * bs + 3.0;
-            let y = r.y + j as f32 * bs + 3.0;
-            let w = (bs - 6.0).min(r.right() - x);
-            let hh = (bs - 6.0).min(r.bottom() - y);
-            if w <= 0.0 || hh <= 0.0 {
-                continue;
-            }
-            let v = h(i, j);
-            let c = if v < 0.14 {
-                rgb(200, 230, 190)
-            } else if v < 0.5 {
-                rgb(240, 238, 232)
-            } else {
-                rgb(222, 219, 210)
-            };
-            draw_rectangle(x, y, w, hh, c);
-            // buildings in the block
-            if v >= 0.14 {
-                for q in 0..3 {
-                    let bw = 6.0 + h(i * 7 + q, j * 3) * 8.0;
-                    let bx = x + 2.0 + h(i + q, j * 5) * (w - bw - 2.0).max(0.0);
-                    let by = y + 2.0 + q as f32 * (hh - 4.0) / 3.0;
-                    let bh = ((hh - 4.0) / 3.0 - 2.0).max(1.0);
-                    if bx + bw <= x + w && by + bh <= y + hh {
-                        draw_rectangle(bx, by, bw, bh, rgb(214, 210, 200));
-                    }
-                }
-            }
-        }
-    }
-    // a river winding down through it
-    let mut y = r.y;
-    while y < r.bottom() {
-        let f = (y - r.y) / r.h;
-        let x0 = r.x + r.w * (0.62 + 0.12 * (f * 4.0).sin());
-        let wd = r.w * 0.07;
-        let x1 = (x0 + wd).min(r.right());
-        if x0 < r.right() {
-            draw_rectangle(x0, y, x1 - x0, 4.0, rgb(170, 210, 240));
-        }
-        y += 4.0;
-    }
-    // two big roads
-    draw_rectangle(r.x, r.y + r.h * 0.55, r.w, 5.0, rgb(255, 236, 170));
-    draw_rectangle(r.x + r.w * 0.3, r.y, 5.0, r.h, rgb(255, 255, 255));
-    // clouds, slow
-    for k in 0..3 {
-        let w = r.w * 0.28;
-        let x = r.x + ((t * 6.0 + k as f32 * r.w * 0.45) % (r.w + w)) - w;
-        let y = r.y + r.h * (0.2 + 0.25 * k as f32);
-        let x0 = x.max(r.x);
-        let x1 = (x + w).min(r.right());
-        if x1 > x0 {
-            draw_rectangle(x0, y, x1 - x0, r.h * 0.08, Color::new(1.0, 1.0, 1.0, 0.45));
-        }
-    }
-    // the haze of height
-    ui::vgrad(
-        Rect::new(r.x, r.y, r.w, r.h * 0.4),
-        Color::new(0.85, 0.92, 1.0, 0.65),
-        Color::new(0.85, 0.92, 1.0, 0.0),
-    );
 }
 
 /// Strength colours: map greens through to orange.

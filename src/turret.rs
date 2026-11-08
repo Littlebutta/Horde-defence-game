@@ -294,8 +294,10 @@ impl Game {
         let range = self.custom_range(sp, self.struct_base(i), o) * (1.0 + link);
         let c = cu.pos;
         let src = self.rev_src(RevKey::Struct(i));
+        // beams and sprays from a multi-barrel head are one beam, that much hotter
+        let beam = matches!(sp.fire, Fire::Laser | Fire::Flame);
         let hit = Hit {
-            dmg: sp.dmg,
+            dmg: sp.dmg * if beam { sp.barrels.max(1) as f32 } else { 1.0 },
             rad: sp.rad,
             bdmg: sp.bdmg,
             napalm: sp.napalm,
@@ -592,6 +594,11 @@ impl Game {
                 score_best(g, &|gi| -crowd(g, gi))
             }
         };
+        // the player's choice for this turret, if they made one
+        let prio = self.structs[i].prio;
+        if prio > 0 {
+            return self.prio_target(c, range, sp.rad.max(1.0), prio, &[], &[], &ok);
+        }
         match sp.aim {
             Aim::Near => nearest(self),
             Aim::Dense => dense(self),
@@ -722,6 +729,14 @@ impl Game {
             return;
         }
         self.fire_once(i, cu, sp, tg, range, hit);
+        // the other barrels of a multi-barrel head fire with it, each paid for
+        for _ in 1..sp.barrels.max(1) {
+            if self.ammo < sp.ammo {
+                break;
+            }
+            self.ammo -= sp.ammo;
+            self.shot(i, cu, sp, tg, range, hit);
+        }
         if sp.burst > 1 {
             cu.burst = sp.burst - 1;
             cu.burst_t = sp.burst_gap;
@@ -1275,6 +1290,9 @@ mod tests {
                 }
                 if !bl.ok() {
                     bl.parts[0] = find("m.fort");
+                }
+                if !bl.ok() {
+                    bl.parts[1] = find("h.optic1");
                 }
                 assert!(bl.ok(), "{:?} {:?}", bl.problem(), bl.code());
                 assert!(g.pick_design(&bl));
