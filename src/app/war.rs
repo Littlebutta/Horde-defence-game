@@ -3,11 +3,12 @@
 //! bulletins and the dialog share a look: chamfered dark panels with thin coloured edges,
 //! slightly futuristic but grounded.
 
-use super::{wrap_lines, App, HubAct};
+use super::{wrap_lines, App, HubAct, DIFFS};
 use crate::campaign::{self, Bulletin, Campaign, ALIENS, FTIERS, ORCS, ZOMBIES};
 use crate::defs::*;
 use crate::render::{text, text_w};
-use crate::ui::{self, alpha, mix, pal};
+use crate::ui::{self, alpha, mix, pal, rrect, rrect_lines, RectExt};
+use super::widgets::R_CTRL;
 use macroquad::prelude::*;
 
 /// Each army's colour on the campaign screen: zombie green, alien purple, orc orange.
@@ -246,6 +247,88 @@ impl App {
         true
     }
 
+    /// Reads what the campaign save slots hold, at most once a second.
+    pub(super) fn peek_slots(&mut self) {
+        if self.slot_peek.len() == campaign::SLOTS && (self.clock - self.slot_peek_t).abs() < 1.0 {
+            return;
+        }
+        self.slot_peek_t = self.clock;
+        self.slot_peek = (0..campaign::SLOTS).map(campaign::peek).collect();
+    }
+
+    /// The campaign save slots on the menu: one big card each, click to pick the one Start uses.
+    pub(super) fn slot_cards(&mut self, r: Rect) {
+        let p = pal(self.dark);
+        // a campaign city left running keeps its slot until it's resumed or abandoned
+        let locked = self.suspended && self.in_camp && self.game.is_some();
+        let cur = campaign::slot();
+        let gap = 8.0;
+        let w = (r.w - gap * (campaign::SLOTS as f32 - 1.0)) / campaign::SLOTS as f32;
+        for i in 0..campaign::SLOTS {
+            let cr = Rect::new(r.x + i as f32 * (w + gap), r.y, w, r.h);
+            let sel = i == cur;
+            let saved = self.slot_peek.get(i).cloned().flatten();
+            let col = match &saved {
+                Some(c) if c.fired() => p.bad,
+                Some(c) if c.finished() => p.good,
+                _ => p.accent,
+            };
+            let hot = self.hot(cr) && !locked;
+            rrect(cr, R_CTRL, if sel { mix(p.panel2, col, 0.16) } else if hot { mix(p.panel2, p.text, 0.06) } else { p.panel2 });
+            rrect_lines(cr, R_CTRL, if sel { 2.0 } else { 1.0 }, if sel { col } else { p.line });
+            self.ui_rects.push(cr);
+            let mut a = cr.pad(12.0, 10.0);
+            let head = a.cut_top(14.0, 4.0);
+            text(&self.fonts.mono, &format!("SLOT {}", i + 1), head.x, head.y + 11.0, 11.0, if sel { col } else { p.dim });
+            if sel {
+                let t = "IN USE";
+                text(&self.fonts.mono, t, head.right() - text_w(&self.fonts.mono, t, 10.0), head.y + 11.0, 10.0, alpha(col, 0.8));
+            }
+            let (big, l1, l2) = match &saved {
+                None => ("Empty".to_string(), "No campaign yet".to_string(), if sel { "Start begins one here".to_string() } else { String::new() }),
+                Some(c) if c.fired() => ("Fired".to_string(), format!("{} failed defences", c.lost), format!("{} cities saved", c.held())),
+                Some(c) if c.saved_world() => ("World saved".to_string(), format!("{} cities held", c.held()), DIFFS[c.diff].0.to_string()),
+                Some(c) if c.finished() => ("Over".to_string(), format!("{} cities held", c.held()), DIFFS[c.diff].0.to_string()),
+                Some(c) => (format!("Turn {}", c.fought + 1), format!("next {}", c.city().name), format!("{} · {} RP", DIFFS[c.diff].0, c.points(0))),
+            };
+            let bt = a.cut_top(24.0, 4.0);
+            let big = super::fit(&self.fonts.head, &big, bt.w, 20.0);
+            text(&self.fonts.head, &big, bt.x, bt.y + 19.0, 20.0, if saved.is_some() { p.text } else { p.dim });
+            for (k, l) in [&l1, &l2].into_iter().enumerate() {
+                let l = super::fit(&self.fonts.mono, l, a.w, 12.0);
+                text(&self.fonts.mono, &l, a.x, a.y + 12.0 + k as f32 * 17.0, 12.0, if k == 0 { p.text } else { p.dim });
+            }
+            // start this slot over
+            let br = Rect::new(cr.x + 10.0, cr.bottom() - 34.0, cr.w - 20.0, 26.0);
+            if saved.is_some() && !locked {
+                if self.button(br, "Start over", true, false) {
+                    campaign::set_slot(i);
+                    self.save_settings();
+                    self.confirm_new = true;
+                    continue;
+                }
+                if self.hot(br) {
+                    self.tip = Some(format!("Erases slot {} and starts a new campaign there with the difficulty picked below.", i + 1));
+                    continue;
+                }
+            }
+            if hot {
+                self.tip = Some(if locked {
+                    "Resume or abandon the city you left first.".into()
+                } else {
+                    format!("Use slot {} for the campaign. Each slot keeps its own research, troops and globe.", i + 1)
+                });
+            }
+            if self.pressed(hot) && !sel {
+                campaign::set_slot(i);
+                self.save_settings();
+            }
+        }
+        if locked && self.hot(r) {
+            self.tip = Some("Resume or abandon the city you left first.".into());
+        }
+    }
+
     /// Asks before a new campaign erases the saved one.
     pub(super) fn confirm_new_dialog(&mut self) {
         let p = pal(self.dark);
@@ -254,8 +337,8 @@ impl App {
         let w = 480.0f32.min(sw - 40.0);
         let saved = campaign::load();
         let what = match &saved {
-            Some(c) if !c.finished() => format!("Your saved campaign (turn {}, {} cities saved) will be erased. There's no undo.", c.fought + 1, c.held()),
-            _ => "Your saved campaign will be erased. There's no undo.".to_string(),
+            Some(c) if !c.finished() => format!("The campaign in slot {} (turn {}, {} cities saved) will be erased. There's no undo.", campaign::slot() + 1, c.fought + 1, c.held()),
+            _ => format!("The campaign in slot {} will be erased. There's no undo.", campaign::slot() + 1),
         };
         let lines = wrap_lines(&self.fonts.mono, &what, w - 56.0, 13.0);
         let h = 150.0 + lines.len() as f32 * 18.0;
@@ -280,6 +363,7 @@ impl App {
         if self.button(go, "Erase and start over", true, true) {
             self.confirm_new = false;
             campaign::clear();
+            self.slot_peek.clear();
             self.trail_t = None;
             self.told_local = 0;
             self.open_campaign(Some(Campaign::new(self.diff)));

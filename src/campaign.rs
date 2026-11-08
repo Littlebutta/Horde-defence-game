@@ -1189,16 +1189,40 @@ impl Campaign {
 
 // ------------------------------------------------------------------------------------------ saving
 
+/// How many campaigns can be kept side by side.
+pub const SLOTS: usize = 3;
+
+static SLOT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The save slot that load, save and clear work on.
+pub fn slot() -> usize {
+    SLOT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_slot(i: usize) {
+    SLOT.store(i.min(SLOTS - 1), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn slot_path(i: usize) -> PathBuf {
+    // slot 1 keeps the old file name, so a campaign saved before slots carries over
+    if i == 0 { data_dir().join("campaign.txt") } else { data_dir().join(format!("campaign-{}.txt", i + 1)) }
+}
+
 fn save_path() -> PathBuf {
-    data_dir().join("campaign.txt")
+    slot_path(slot())
+}
+
+/// The campaign saved in slot i, without switching to it.
+pub fn peek(i: usize) -> Option<Campaign> {
+    let t = std::fs::read_to_string(slot_path(i)).ok()?;
+    t.lines().any(|l| l.trim() == format!("version={}", VERSION)).then(|| from_text(&t))
 }
 
 /// The save format: campaigns from before turns (version 1, with days) start over.
 const VERSION: u64 = 2;
 
 pub fn load() -> Option<Campaign> {
-    let t = std::fs::read_to_string(save_path()).ok()?;
-    t.lines().any(|l| l.trim() == format!("version={}", VERSION)).then(|| from_text(&t))
+    peek(slot())
 }
 
 pub fn save(c: &Campaign) {

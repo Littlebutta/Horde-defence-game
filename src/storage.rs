@@ -30,6 +30,8 @@ pub struct Settings {
     pub real: bool,
     pub city: String,
     pub campaign: bool,
+    /// campaign save slot in use, from 0
+    pub slot: usize,
     /// music volume 0..=100
     pub music: u32,
     /// sound effects volume 0..=100
@@ -50,7 +52,7 @@ pub struct Settings {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { dark: true, fac: 0, diff: 1, real: false, city: String::new(), campaign: false, music: 70, sfx: 80, news: 80, ui_scale: 100, hud_wide: false, fullscreen: false, fps: true, aa: 0, render: 100 }
+        Settings { dark: true, fac: 0, diff: 1, real: false, city: String::new(), campaign: false, slot: 0, music: 70, sfx: 80, news: 80, ui_scale: 100, hud_wide: false, fullscreen: false, fps: true, aa: 0, render: 100 }
     }
 }
 
@@ -68,6 +70,7 @@ pub fn load_settings() -> Settings {
             "real" => s.real = v == "1",
             "city" => s.city = v.to_string(),
             "campaign" => s.campaign = v == "1",
+            "slot" => s.slot = v.parse().unwrap_or(0).min(2),
             "music" => s.music = v.parse().unwrap_or(70).min(100),
             "sfx" => s.sfx = v.parse().unwrap_or(80).min(100),
             "news" => s.news = v.parse().unwrap_or(80).min(100),
@@ -85,7 +88,7 @@ pub fn load_settings() -> Settings {
 
 pub fn save_settings(s: &Settings) {
     let mut t = format!("dark={}\nfaction={}\ndifficulty={}\nreal={}\ncity={}\ncampaign={}\nmusic={}\nsfx={}\n", s.dark as u8, s.fac, s.diff, s.real as u8, s.city.replace('\n', " "), s.campaign as u8, s.music, s.sfx);
-    t.push_str(&format!("news={}\n", s.news));
+    t.push_str(&format!("news={}\nslot={}\n", s.news, s.slot));
     t.push_str(&format!("ui_scale={}\nhud_wide={}\nfullscreen={}\nfps={}\naa={}\nrender={}\n", s.ui_scale, s.hud_wide as u8, s.fullscreen as u8, s.fps as u8, s.aa, s.render));
     let _ = std::fs::write(data_dir().join("settings.txt"), t);
 }

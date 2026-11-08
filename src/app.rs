@@ -109,6 +109,8 @@ fn swatch(i: usize, k: usize, c: Color) -> Color {
 
 /// Height of a faction card on the menu.
 const FAC_ROW: f32 = 56.0;
+/// height of the campaign save slot cards on the menu
+const SLOT_CARD_H: f32 = 130.0;
 const FAC_ROW_COMPACT: f32 = 46.0;
 
 pub(crate) const DIFFS: [(&str, f32); 4] = [
@@ -158,6 +160,9 @@ pub struct App {
     /// the last bulletin whose newscaster line was played: (campaign seed, bulletin bit)
     bulletin_played: Option<(u64, u8)>,
     camp: Option<Campaign>,
+    /// what each campaign save slot holds, read again every second on the menu
+    slot_peek: Vec<Option<Campaign>>,
+    slot_peek_t: f32,
     /// the game being played (or loaded) is a campaign city
     in_camp: bool,
     pack: campaign::Pack,
@@ -392,7 +397,7 @@ impl App {
             diff: st.diff,
             real: st.real,
             city: st.city,
-            camp_mode: st.campaign,
+            camp_mode: { campaign::set_slot(st.slot); st.campaign },
             confirm_new: std::env::var("PH_CONFIRM").is_ok(),
             confirm_quit: std::env::var("PH_QUIT").is_ok(),
             trail_t: None,
@@ -407,6 +412,8 @@ impl App {
             music_vol: st.music,
             music_prev: if st.music > 0 { st.music } else { 70 },
             camp: None,
+            slot_peek: Vec::new(),
+            slot_peek_t: -9.0,
             in_camp: false,
             pack: campaign::Pack::start(),
             globe: None,
@@ -1299,9 +1306,12 @@ impl App {
             Some(2) => self.camp_mode = true,
             _ => {}
         }
-        let saved_camp = if self.camp_mode { campaign::load() } else { None };
+        if self.camp_mode {
+            self.peek_slots();
+        }
+        let saved_camp = if self.camp_mode { self.slot_peek.get(campaign::slot()).cloned().flatten() } else { None };
         let detail_h = if self.camp_mode {
-            if saved_camp.is_some() { 150.0 } else { 104.0 }
+            142.0 + SLOT_CARD_H
         } else if self.real {
             if self.saved.is_empty() { 74.0 } else { 136.0 }
         } else {
@@ -1329,30 +1339,8 @@ impl App {
             let m = d.cut_top(30.0, 6.0);
             text(&self.fonts.mono, &maps, m.x, m.y + 13.0, 12.5, p.text);
             self.progress(Rect::new(m.x, m.y + 21.0, m.w, 4.0), f, if f >= 1.0 { p.good } else { p.accent });
-            if let Some(c) = &saved_camp {
-                let line = if c.fired() {
-                    format!("fired after {} failed defences", c.lost)
-                } else if c.saved_world() {
-                    "the world is saved".to_string()
-                } else if c.finished() {
-                    format!("over, {} cities held", c.held())
-                } else {
-                    format!("turn {} · next {} · {} · {} RP to spend", c.fought + 1, c.city().name, DIFFS[c.diff].0, c.points(0))
-                };
-                let sr = d.cut_top(42.0, 0.0);
-                rrect(sr, R_CTRL, alpha(p.accent, 0.1));
-                let mut sr2 = sr.pad(12.0, 6.0);
-                let nr = sr2.cut_right(132.0, 10.0);
-                text(&self.fonts.mono, "SAVED CAMPAIGN", sr2.x, sr2.y + 11.0, 10.5, p.accent);
-                let line = fit(&self.fonts.mono, &line, sr2.w, 12.5);
-                text(&self.fonts.mono, &line, sr2.x, sr2.y + 27.0, 12.5, p.text);
-                if self.button(nr, "New campaign", true, false) {
-                    self.confirm_new = true;
-                }
-                if self.hot(nr) {
-                    self.tip = Some("Starts over in New York with the difficulty picked here. The saved campaign is erased.".into());
-                }
-            }
+            let cr = d.cut_top(SLOT_CARD_H, 0.0);
+            self.slot_cards(cr);
         } else if self.real {
             let fr = d.cut_top(40.0, 8.0);
             rrect(fr, R_CTRL, p.panel2);
@@ -2038,6 +2026,7 @@ impl App {
             real: self.real,
             city: self.city.clone(),
             campaign: self.camp_mode,
+            slot: campaign::slot(),
             music: self.music_vol,
             sfx: self.sfx_vol,
             news: self.news_vol,
