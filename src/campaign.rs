@@ -121,7 +121,7 @@ pub enum Tech {
 pub const START_BUILDS: [S; 6] = [S::Wall, S::Gate, S::Bunker, S::Extractor, S::Pad, S::Rescue];
 
 /// The whole tree, in the order the campaign screen lists it. Saves store indices into it, so new entries go at the end.
-pub const TECH: [Tech; 46] = [
+pub const TECH: [Tech; 47] = [
     Tech::Build(S::Gun),
     Tech::Build(S::Cannon),
     Tech::Build(S::Flame),
@@ -168,6 +168,7 @@ pub const TECH: [Tech; 46] = [
     Tech::Up(Up::Muster1),
     Tech::Up(Up::Muster2),
     Tech::Build(S::Sniper),
+    Tech::Up(Up::Safehouse),
 ];
 
 /// Turrets that shoot ammo: the first one unlocked brings the ammo plant with it.
@@ -243,7 +244,7 @@ impl Tech {
         match self {
             Tech::Build(s) if shoots(s) || s == S::Helium => "Turrets",
             Tech::Build(_) | Tech::Unit(_) | Tech::Hq(_) => "Support",
-            Tech::Up(u) if RIFLE_UPS.contains(&u) || matches!(u, Up::Muster1 | Up::Muster2) => "Support",
+            Tech::Up(u) if RIFLE_UPS.contains(&u) || matches!(u, Up::Muster1 | Up::Muster2 | Up::Safehouse) => "Support",
             Tech::Ability(_) | Tech::Research(R::Rescue | R::Carpet | R::Nuke | R::Napalm) => "Abilities",
             Tech::Research(R::Perimeter) => "Support",
             Tech::Research(_) => "Research",

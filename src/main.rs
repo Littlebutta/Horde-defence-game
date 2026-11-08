@@ -241,6 +241,29 @@ async fn run(steam: Option<net::Steam>) {
                     selftest::builds(g, l);
                 }
                 let mut hq = g.world.hq;
+                // PH_SAFE=<ticks>: a safehouse drawn near the HQ, then that many more ticks
+                if let Some(n) = std::env::var("PH_SAFE").ok().and_then(|v| v.parse::<u32>().ok()) {
+                    g.scrap = g.scrap.max(5000.0);
+                    match g.auto_safe_border(150.0, 240.0) {
+                        Some((_, pts)) => {
+                            let r = g.place_safe(&pts);
+                            for _ in 0..n {
+                                g.tick();
+                            }
+                            if std::env::var("PH_SAFE_UPS").is_ok() {
+                                for u in 0..4 {
+                                    g.safe_upgrade(0, u);
+                                }
+                                for _ in 0..40 {
+                                    g.tick();
+                                }
+                            }
+                            eprintln!("safehouse: {:?}, state {}, held {}, saved {}, trucks {}", r, g.safes[0].state, g.safes[0].held, g.safes[0].saved, g.trucks.len());
+                            hq = world::centroid(&pts);
+                        }
+                        None => eprintln!("safehouse: no spot"),
+                    }
+                }
                 // PH_LOOK=air|gunship|heli|icbm: look at the first one in flight instead
                 match std::env::var("PH_LOOK").as_deref() {
                     Ok("air") => {

@@ -427,6 +427,7 @@ pub enum Up {
     RifleRocket,
     Muster1,
     Muster2,
+    Safehouse,
 }
 /// The rifle squad upgrades, in the order they unlock (each needs the one before).
 pub const RIFLE_UPS: [Up; 4] = [Up::RifleDrill, Up::RifleAp, Up::RifleGrenade, Up::RifleRocket];
@@ -460,6 +461,7 @@ pub fn updef(u: Up) -> UpDef {
         Up::RifleGrenade => ("Rifle grenades", "Rifle shots burst in a small blast that also hits the units around the target", S::Hq, 200),
         Up::Muster1 => ("Quick muster", "Squads and tanks get ready and leave the HQ 35% sooner", S::Hq, 120),
         Up::Muster2 => ("Rapid deployment", "Squads and tanks get ready another 40% sooner", S::Hq, 240),
+        Up::Safehouse => ("Safehouses", "Draw a border around buildings out in the city: a truck sets up a safehouse there that civilians run to, and armoured trucks bring them to the HQ", S::Outpost, 200),
         Up::RifleRocket => ("Shoulder rockets", "Riflemen fire rockets: much harder hits in a small blast that also damages buildings, at a slower rate", S::Hq, 300),
     };
     UpDef { name, tip, on, cost }

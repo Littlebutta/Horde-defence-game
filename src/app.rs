@@ -33,7 +33,12 @@ enum Tool {
     Ability(A),
     /// the k-th deployed garage design (F1..F6)
     Custom(u8),
+    /// drawing a safehouse border, corner by corner
+    Safe,
 }
+
+/// The safehouse's line on the build bar.
+const SAFE_TIP: &str = "Click corners around one or more whole buildings out in the city, then click the first corner again. A slow truck drives out and sets up a safehouse: civilians nearby run to it, turrets go up inside at base price with no helicopter, and armoured trucks bring the people there to the HQ. Click it later for walls and other upgrades. No hostiles may be close when you send the truck.";
 
 /// Something done on the campaign screen. In co-op, picking the city and going in are votes, and a
 /// majority of the players makes the host carry them out; buying tech and recruiting are each
@@ -199,6 +204,10 @@ pub struct App {
     selected: Option<usize>,
     /// a selected artillery piece or heli pad (right-click aims it)
     sel_struct: Option<usize>,
+    /// a selected safehouse (its upgrades show)
+    sel_safe: Option<usize>,
+    /// the corners of the safehouse border being drawn
+    safe_pts: Vec<Vec2>,
     /// height of the build bar, so panels above it can sit clear
     bar_h: f32,
     acc: f32,
@@ -435,6 +444,8 @@ impl App {
             scene: None,
             cam: Orbit { t: vec2(W as f32 / 2.0, H as f32 / 2.0), dist: 400.0, yaw: 0.0, pitch: 0.95 },
             tool: Tool::None,
+            sel_safe: None,
+            safe_pts: Vec::new(),
             press: None,
             panning: false,
             selected: None,
@@ -3097,6 +3108,34 @@ impl App {
                 };
                 Some((hint.to_string(), WHITE))
             }
+            Tool::Safe => {
+                let mut pts = self.safe_pts.clone();
+                let near_first = pts.len() >= 3 && pts[0].distance(mw) < (14.0 / self.cam.scale()).max(3.0);
+                if !near_first {
+                    pts.push(mw);
+                }
+                let check = if pts.len() >= 3 { Some(g.safe_check(self.me(), &pts)) } else { None };
+                let ok = check.is_none_or(|c| c.is_ok());
+                let col = if ok { rgba(66, 133, 244, 0.95) } else { rgba(250, 82, 82, 0.95) };
+                for w in pts.windows(2) {
+                    draw_line(w[0].x, w[0].y, w[1].x, w[1].y, 0.9, col);
+                }
+                if pts.len() >= 3 {
+                    let (a, b) = (pts[pts.len() - 1], pts[0]);
+                    draw_line(a.x, a.y, b.x, b.y, 0.5, alpha(col, 0.5));
+                }
+                for (k, q) in self.safe_pts.iter().enumerate() {
+                    draw_circle(q.x, q.y, if k == 0 { 1.6 } else { 1.0 }, col);
+                }
+                let s = match check {
+                    Some(Err(e)) => e.to_string(),
+                    _ if self.safe_pts.is_empty() => "Click the first corner of the safehouse".to_string(),
+                    _ if self.safe_pts.len() < 3 => "Click the next corner · right-click takes one back".to_string(),
+                    Some(Ok(())) if near_first => format!("Click to send the truck (${:.0})", SAFE_COST),
+                    _ => "Next corner, or click the first corner to finish".to_string(),
+                };
+                Some((s, if ok { WHITE } else { rgb(255, 140, 140) }))
+            }
             Tool::None | Tool::Custom(_) => {
                 let i = self.sel_struct?;
                 let s = &g.structs[i];
@@ -3222,6 +3261,7 @@ impl App {
             .iter()
             .filter(|s| !(g.campaign && **s == S::Lab) && g.build_ok(self.me(), **s))
             .map(|s| Tool::Build(*s))
+            .chain(g.safe_ok(self.me()).then_some(Tool::Safe))
             .chain([U::Rifle, U::Tank].into_iter().filter(|u| g.unit_ok(self.me(), *u)).map(Tool::Unit))
             .chain(self.custom_tools(g).into_iter().map(|c| Tool::Custom(c.0)))
             .collect();
@@ -3263,6 +3303,7 @@ impl App {
                     let [r0, g0, b0] = b.paint[0];
                     (' ', "Custom turret", cost, Color::from_rgba(r0, g0, b0, 255), "", g.scrap >= cost)
                 }
+                Tool::Safe => ('[', "Safehouse", SAFE_COST, rgb(66, 133, 244), SAFE_TIP, g.scrap >= SAFE_COST),
                 _ => unreachable!(),
             };
             let active = self.tool == *it;
@@ -3435,7 +3476,9 @@ impl App {
                 text(&self.fonts.mono, label, r.x + 16.0, r.y + 15.0, 11.0, p.dim);
             }
         }
-        if let Some(si) = self.sel_struct.filter(|si| Game::has_prio(g.structs[*si].t)) {
+        if let Some(k) = self.sel_safe.filter(|k| g.safes.get(*k).is_some_and(|s| s.state != SH_LOST)) {
+            self.safe_panel(g, k, area, bar);
+        } else if let Some(si) = self.sel_struct.filter(|si| Game::has_prio(g.structs[*si].t)) {
             self.prio_panel(g, si, area, bar);
         } else if let Some(si) = self.sel_struct {
             let st = &g.structs[si];
@@ -3695,6 +3738,48 @@ impl App {
     }
 
     /// The selected turret's card over the build bar: what it is and its targeting buttons.
+    /// Sends the safehouse border drawn so far.
+    fn finish_safe(&mut self, g: &mut Game) {
+        let mut pts = [Vec2::ZERO; SAFE_PTS];
+        let n = self.safe_pts.len().min(SAFE_PTS);
+        pts[..n].copy_from_slice(&self.safe_pts[..n]);
+        if self.act(g, Cmd::Safe { n: n as u8, pts }).is_none() {
+            self.safe_pts.clear();
+            self.tool = Tool::None;
+        }
+    }
+
+    /// A selected safehouse: how it's doing, and its upgrades.
+    fn safe_panel(&mut self, g: &mut Game, k: usize, area: Rect, bar: Rect) {
+        let s = &g.safes[k];
+        let head = match s.state {
+            SH_DRIVE => "Safehouse · the truck is on its way".to_string(),
+            SH_BUILD => format!("Safehouse · setting up, {:.0}s left", s.t.max(0.0)),
+            _ => format!("Safehouse · {} waiting · {} taken to the HQ", s.held, s.saved),
+        };
+        let ready = s.state == SH_READY;
+        let ups = s.ups;
+        let bw = 150.0;
+        let w = 24.0 + SAFE_UPS.len() as f32 * (bw + 6.0) - 6.0;
+        let r = Rect::new(area.x + 12.0, bar.y - 76.0, w.max(300.0), 64.0);
+        self.panel(r);
+        self.ui_rects.push(r);
+        text(&self.fonts.mono, &head, r.x + 12.0, r.y + 20.0, 12.5, rgb(116, 192, 252));
+        for (u, (name, what, cost)) in SAFE_UPS.iter().enumerate() {
+            let b = Rect::new(r.x + 12.0 + u as f32 * (bw + 6.0), r.y + 28.0, bw, 28.0);
+            let have = ups & (1 << u) != 0;
+            let label = if have { format!("{} ✓", name) } else { format!("{} ${:.0}", name, cost) };
+            let can = ready && !have && g.scrap >= *cost;
+            let clicked = if have { self.button(b, &label, false, true) } else { self.button(b, &label, can, false) };
+            if self.hot(b) {
+                self.tip = Some(if ready { what.to_string() } else { format!("{} (once it's set up)", what) });
+            }
+            if clicked && can {
+                self.act(g, Cmd::SafeUp(k as u32, u as u8));
+            }
+        }
+    }
+
     fn prio_panel(&mut self, g: &mut Game, si: usize, area: Rect, bar: Rect) {
         let p = pal(self.dark);
         let st = &g.structs[si];
@@ -3757,6 +3842,8 @@ impl App {
                     Tool::Build(*s)
                 };
             } else if self.placing.is_some() && !"tkmfh".contains(ch) {
+            } else if ch == '[' && g.safe_ok(self.me()) {
+                self.tool = if self.tool == Tool::Safe { Tool::None } else { Tool::Safe };
             } else if let Some(u) = [U::Rifle, U::Tank].iter().find(|u| udef(**u).key == ch && g.unit_ok(self.me(), **u)) {
                 self.tool = Tool::Unit(*u);
             } else if let Some(a) = ABILITIES.iter().find(|a| adef(**a).key == ch) {
@@ -3790,7 +3877,19 @@ impl App {
             self.tool = Tool::None;
             self.selected = None;
             self.sel_struct = None;
+            self.sel_safe = None;
             self.press = None;
+        }
+        // drawing a safehouse border: Backspace takes the last corner back, Enter closes it
+        if self.tool != Tool::Safe {
+            self.safe_pts.clear();
+        } else {
+            if is_key_pressed(KeyCode::Backspace) {
+                self.safe_pts.pop();
+            }
+            if is_key_pressed(KeyCode::Enter) && self.safe_pts.len() >= 3 {
+                self.finish_safe(g);
+            }
         }
         let fkeys = [KeyCode::F1, KeyCode::F2, KeyCode::F3, KeyCode::F4, KeyCode::F5, KeyCode::F6];
         for (k, key) in fkeys.into_iter().enumerate() {
@@ -3871,7 +3970,9 @@ impl App {
         }
         // right click: order the selected group, or drop the tool
         if is_mouse_button_pressed(MouseButton::Right) && !ui && !air {
-            if self.tool != Tool::None {
+            if self.tool == Tool::Safe && !self.safe_pts.is_empty() {
+                self.safe_pts.pop();
+            } else if self.tool != Tool::None {
                 self.tool = Tool::None;
                 self.press = None;
             } else if let Some(si) = self.sel_struct.filter(|si| matches!(g.structs[*si].t, S::Artillery | S::Helipad | S::Sniper) || g.is_mech(*si)) {
@@ -3926,13 +4027,27 @@ impl App {
             let tool = if let Tool::Custom(_) = self.tool { Tool::Build(S::Custom) } else { self.tool };
             match tool {
                 Tool::Custom(_) => {}
+                Tool::Safe => {
+                    let near_first = self.safe_pts.first().is_some_and(|f| f.distance(mw) < (14.0 / self.cam.scale()).max(3.0));
+                    if self.safe_pts.len() >= 3 && near_first {
+                        self.finish_safe(g);
+                    } else if self.safe_pts.len() < SAFE_PTS {
+                        self.safe_pts.push(mw);
+                    } else {
+                        self.said("Twelve corners at most: click the first corner to finish");
+                    }
+                }
                 Tool::None => {
                     self.selected = g.group_at(mw);
                     self.sel_struct = None;
+                    self.sel_safe = None;
                     if self.selected.is_none() {
                         self.sel_struct = g
                             .struct_at(mw)
                             .filter(|i| matches!(g.structs[*i].t, S::Artillery | S::Helipad) || Game::has_prio(g.structs[*i].t));
+                    }
+                    if self.selected.is_none() && self.sel_struct.is_none() {
+                        self.sel_safe = g.safe_under(mw);
                     }
                 }
                 Tool::Build(t) => {

@@ -11,6 +11,9 @@ use std::sync::Arc;
 
 #[path = "turret.rs"]
 mod turret;
+#[path = "safe.rs"]
+mod safe;
+pub use safe::*;
 pub use turret::{CShot, Chill, Custom, Design, Mine};
 
 pub const DT: f32 = 0.05;
@@ -189,7 +192,7 @@ pub const EVAC_AMMO: f32 = 10.0;
 
 /// Civilians still on the map (not dead, flown out or taken).
 pub fn civ_here(st: u8) -> bool {
-    st < C_DEAD || matches!(st, C_TO_PAD | C_AT_PAD | C_TO_IDLE | C_AT_HQ)
+    st < C_DEAD || matches!(st, C_TO_PAD | C_AT_PAD | C_TO_IDLE | C_AT_HQ | C_SAFE | C_RIDE)
 }
 
 pub struct Civ {
@@ -615,6 +618,11 @@ pub struct Game {
     spawnq: Vec<SpawnQ>,
     /// squads and tanks paid for, getting ready to leave the HQ
     pub musters: Vec<Muster>,
+    /// safehouses the players drew out in the city, and the trucks serving them
+    pub safes: Vec<Safehouse>,
+    pub trucks: Vec<Truck>,
+    /// the ground changed: work every safehouse's field out again
+    safe_call: bool,
     conv: Vec<Vec2>,
     pub scrap: f32,
     pub ammo: f32,
@@ -751,6 +759,9 @@ impl Game {
             drum_rallies: Vec::new(),
             spawnq: Vec::new(),
             musters: Vec::new(),
+            safes: Vec::new(),
+            trucks: Vec::new(),
+            safe_call: false,
             conv: Vec::new(),
             scrap: 700.0,
             ammo: 400.0,
@@ -1054,6 +1065,7 @@ impl Game {
                     self.home = home;
                     self.pad_dirty = true;
                     self.outpost_call |= self.outpost_field.is_some();
+                    self.safe_call |= !self.safes.is_empty();
                 }
                 Done::Target { id, d } => {
                     for g in &mut self.groups {
@@ -1082,6 +1094,8 @@ impl Game {
                     self.portal_field = Some(d);
                 } else if id == self.outpost_job {
                     self.outpost_field = Some(d);
+                } else if let Some(sh) = self.safes.iter_mut().find(|s| s.job == id) {
+                    sh.field = Some(d);
                 } else if let Some(r) = self.revs.iter_mut().find(|r| r.job == id) {
                     r.field = Some(d);
                 } else if let Some(q) = self.squads.iter_mut().find(|q| q.gjob == id) {
@@ -1127,6 +1141,24 @@ impl Game {
             } else {
                 self.outpost_job = self.next_job();
                 self.fw_aux.submit(Job::Multi { id: self.outpost_job, obj: self.pass.clone(), src, max: OUTPOST_SEEK });
+            }
+        }
+        // safehouses: the way there for their trucks, rescue teams and the civilians they call
+        if self.safe_call && self.fw_aux.busy < 3 {
+            self.safe_call = false;
+            for k in 0..self.safes.len() {
+                if self.safes[k].state == SH_LOST {
+                    continue;
+                }
+                let mut src = Vec::new();
+                fill_poly(&self.safes[k].poly, |c| {
+                    if self.pass[c] == FREE {
+                        src.push(c as u32);
+                    }
+                });
+                let id = self.next_job();
+                self.safes[k].job = id;
+                self.fw_aux.submit(Job::Multi { id, obj: self.pass.clone(), src, max: INF - 1 });
             }
         }
         // orc portals: where captured civilians are dragged
@@ -1293,7 +1325,7 @@ impl Game {
     pub fn cost_for(&self, o: usize, t: S, at: Vec2) -> f32 {
         let d = def(t);
         let mut c = if t == S::Custom { self.cur_design(o).map_or(f32::INFINITY, |d| d.spec.cost) } else { d.cost };
-        if d.turret && !self.world.in_zone(at) {
+        if d.turret && !self.world.in_zone(at) && self.safe_at(at).is_none() {
             let dist = at.distance(self.hq_near(at));
             c *= 1.0 + (dist - 100.0).max(0.0) / 350.0;
         }
@@ -1408,7 +1440,7 @@ impl Game {
             }
         }
         let c = s.center();
-        if d.turret && !self.world.in_zone(c) {
+        if d.turret && !self.world.in_zone(c) && self.safe_at(c).is_none() {
             s.pending = true;
             let from = self.hq_near(c);
             let dist = c.distance(from);
@@ -1850,6 +1882,7 @@ impl Game {
         for c in outposts {
             self.world.add_outpost(c);
         }
+        self.safe_zone();
         self.zone_dirty = true;
         self.outpost_call = true;
         if self.has_perimeter() {
@@ -2401,6 +2434,7 @@ impl Game {
         self.civilians();
         lap(&mut self.prof[4]);
         self.squads_tick();
+        self.safehouses_tick();
         lap(&mut self.prof[5]);
         self.musters_tick();
         self.groups_tick();
@@ -4425,6 +4459,10 @@ impl Game {
                 }
                 continue;
             }
+            if st == C_RIDE {
+                // aboard a safehouse truck: it carries them
+                continue;
+            }
             let mut hit = self.swarm.at(c) > 0;
             if !hit && self.rng.f() < 0.35 {
                 hit = (cx > 0 && self.swarm.at(c - 1) > 0)
@@ -4447,8 +4485,17 @@ impl Game {
                 }
                 continue;
             }
+            if st == C_SAFE {
+                self.civ_in_safe(i, &obj);
+                continue;
+            }
             if st == C_ESCORT {
                 let (sqi, mi) = (self.civs[i].sq, self.civs[i].esc);
+                // a safehouse's rescue team walks them back there
+                let from = self.squads[sqi].from;
+                let to_safe = (from <= -2)
+                    .then(|| (-2 - from) as usize)
+                    .and_then(|k| self.safes.get(k).filter(|s| s.state == SH_READY).and_then(|s| s.field.clone()).map(|f| (k, f)));
                 let (state, m) = {
                     let q = &self.squads[sqi];
                     (q.state, q.m[mi].clone())
@@ -4461,13 +4508,19 @@ impl Game {
                 let dist = m.p.distance(pp);
                 let sp = if dist > 5.0 { 15.0 } else { 9.0 };
                 if (state == QState::Return || m.home) && (dist > 12.0 || m.home) {
-                    Self::step_on_field(&obj, &mut pp, &hqd, sp, &mut self.rng);
+                    let f = to_safe.as_ref().map_or(&hqd, |t| &t.1);
+                    Self::step_on_field(&obj, &mut pp, f, sp, &mut self.rng);
                 } else if dist > 2.0 {
                     let off = vec2(((i * 7) % 5) as f32 - 2.0, ((i * 3) % 5) as f32 - 2.0) * 0.6;
                     Self::step_toward(&obj, &mut pp, m.p + off, sp);
                 }
                 self.civs[i].p = pp;
-                if self.world.in_zone(pp) {
+                if let Some((k, _)) = &to_safe {
+                    if self.safe_at(pp) == Some(*k) {
+                        self.civs[i].st = C_SAFE;
+                        self.civs[i].pad = *k;
+                    }
+                } else if self.world.in_zone(pp) {
                     self.civs[i].st = C_TO_PAD;
                     self.rescued += 1;
                     self.score += 10.0;
@@ -4497,19 +4550,35 @@ impl Game {
                 self.rescued += 1;
                 continue;
             }
+            if let Some(k) = self.safe_at(p) {
+                self.civs[i].st = C_SAFE;
+                self.civs[i].pad = k;
+                continue;
+            }
             let near_post = outf.as_ref().filter(|f| f[c] <= OUTPOST_SEEK);
-            if hqd[c] <= HQ_SEEK || near_post.is_some() {
-                // close enough to an HQ (or an outpost's zone) to make a run for it
-                let f = match near_post {
-                    Some(f) if hqd[c] > HQ_SEEK || f[c] < hqd[c] => f,
-                    _ => &hqd,
-                };
+            let near_safe = self.safe_seek(c);
+            if hqd[c] <= HQ_SEEK || near_post.is_some() || near_safe.is_some() {
+                // close enough to an HQ (or an outpost's zone, or a safehouse) to make a run for it
+                let mut best: (&[u32], u32) = (&hqd, if hqd[c] <= HQ_SEEK { hqd[c] } else { INF });
+                if let Some(f) = near_post {
+                    if f[c] < best.1 {
+                        best = (f, f[c]);
+                    }
+                }
+                if let Some((_, f, d)) = &near_safe {
+                    if *d < best.1 {
+                        best = (f, *d);
+                    }
+                }
                 let mut pp = p;
-                Self::step_on_field(&obj, &mut pp, f, if seen > 0 { 8.5 } else { 4.5 }, &mut self.rng);
+                Self::step_on_field(&obj, &mut pp, best.0, if seen > 0 { 8.5 } else { 4.5 }, &mut self.rng);
                 self.civs[i].p = pp;
                 if self.world.in_zone(pp) {
                     self.civs[i].st = C_TO_PAD;
                     self.rescued += 1;
+                } else if let Some(k) = self.safe_at(pp) {
+                    self.civs[i].st = C_SAFE;
+                    self.civs[i].pad = k;
                 }
                 continue;
             }
@@ -4643,7 +4712,13 @@ impl Game {
             gt: 0.0,
             found: 0,
             from,
-            own: if from >= 0 { self.structs[from as usize].owner } else { self.actor as u8 },
+            own: if from >= 0 {
+                self.structs[from as usize].owner
+            } else if from <= -2 {
+                self.safes[(-2 - from) as usize].own
+            } else {
+                self.actor as u8
+            },
         });
         true
     }
@@ -4670,6 +4745,11 @@ impl Game {
             let tf = self.squads[si].tf.clone();
             let gather = self.squads[si].gather.clone();
             let target = self.squads[si].target;
+            // a safehouse's own rescue team goes home to it
+            let from = self.squads[si].from;
+            let safe_home = (from <= -2)
+                .then(|| (-2 - from) as usize)
+                .and_then(|k| self.safes.get(k).filter(|s| s.state == SH_READY).and_then(|s| s.field.clone()).map(|f| (k, f)));
             let mut shots = Vec::new();
             let mut claimed = 0;
             for mi in 0..n {
@@ -4724,12 +4804,20 @@ impl Game {
                             }
                         }
                     }
-                    QState::Return => {
-                        Self::step_on_field(&obj, &mut m.p, &hqd, 12.0, &mut self.rng);
-                        if self.world.in_zone(m.p) {
-                            m.home = true;
+                    QState::Return => match &safe_home {
+                        Some((k, f)) => {
+                            Self::step_on_field(&obj, &mut m.p, f, 12.0, &mut self.rng);
+                            if self.safe_at(m.p) == Some(*k) || self.world.in_zone(m.p) {
+                                m.home = true;
+                            }
                         }
-                    }
+                        None => {
+                            Self::step_on_field(&obj, &mut m.p, &hqd, 12.0, &mut self.rng);
+                            if self.world.in_zone(m.p) {
+                                m.home = true;
+                            }
+                        }
+                    },
                     QState::Wait => {}
                 }
                 m.cd -= DT;
@@ -4817,8 +4905,8 @@ impl Game {
                         q.t = 0.0;
                         q.gather = None;
                         let f = q.found;
-                        // rescue stations work quietly
-                        if q.from >= 0 {
+                        // rescue stations and safehouse teams work quietly
+                        if q.from != -1 {
                             continue;
                         }
                         self.banner = (
@@ -5532,6 +5620,53 @@ mod tests {
         assert!(g.deploy(U::Rifle, c));
         assert!(!g.deploy(U::Rifle, c), "a fourth squad fit in");
         assert!(g.garrison_full(U::Rifle, c, None, 6));
+    }
+
+    /// A safehouse drawn around a building: the truck drives out and sets it up, civilians come
+    /// in, a convoy takes them to the base, turrets inside go up at once at base price, and a
+    /// border through a building is refused.
+    #[test]
+    fn safehouse_sets_up_and_ferries_civilians() {
+        let mut g = Game::new(crate::citygen::generate(11), 0, 0.2, 7);
+        g.scrap = 1e6;
+        g.fields_now();
+        let hq = g.world.hq;
+        let pick = g.auto_safe_border(170.0, 260.0);
+        let (b, sq) = pick.expect("a building to draw a safehouse around");
+        // through the middle of the building: refused
+        let bb = &g.world.buildings[b];
+        let half = vec![vec2(bb.x0 - 5.0, bb.y0 - 5.0), vec2(bb.c.x, bb.y0 - 5.0), vec2(bb.c.x, bb.y1 + 5.0), vec2(bb.x0 - 5.0, bb.y1 + 5.0)];
+        assert!(g.safe_check(0, &half).is_err());
+        let scrap = g.scrap;
+        assert!(g.place_safe(&sq).is_ok());
+        assert_eq!(g.scrap, scrap - SAFE_COST);
+        assert_eq!(g.trucks.len(), 1);
+        let mut ready_at = None;
+        for t in 0..4000 {
+            g.tick();
+            if g.safes[0].state == SH_READY {
+                ready_at = Some(t);
+                break;
+            }
+        }
+        assert!(ready_at.is_some(), "never set up: state {}, truck at {:?}", g.safes[0].state, g.trucks.first().map(|t| t.p));
+        let inside = centroid(&sq);
+        assert_eq!(g.safe_at(inside), Some(0));
+        // a turret inside: base price, no helicopter
+        assert_eq!(g.cost_at(S::Gun, g.safes[0].c), def(S::Gun).cost);
+        // civilians drop in, and the convoy carries them off
+        let mut most = 0;
+        for _ in 0..3000 {
+            g.tick();
+            most = most.max(g.safes[0].held + g.trucks.iter().map(|t| t.load as u32).sum::<u32>());
+            if g.safes[0].saved > 0 {
+                break;
+            }
+        }
+        assert!(most > 0, "nobody came to the safehouse");
+        assert!(g.safes[0].saved > 0, "the convoy never brought anyone to the HQ");
+        assert!(g.safe_upgrade(0, SU_WALLS));
+        assert!(g.structs.iter().filter(|s| !s.dead && s.t.is_wall() && point_in(&sq, s.center())).count() > 10);
     }
 
     /// Cells reachable on open ground from the HQ, over `obj`.

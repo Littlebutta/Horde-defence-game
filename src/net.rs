@@ -57,6 +57,10 @@ pub enum Cmd {
     Design { parts: [u16; 7], paint: [[u8; 3]; 3] },
     /// a turret's targeting (`game::PRIOS`)
     Prio(u32, u8),
+    /// a safehouse border: the first `n` corners
+    Safe { n: u8, pts: [Vec2; crate::game::SAFE_PTS] },
+    /// buy upgrade `u` for safehouse `k`
+    SafeUp(u32, u8),
 }
 
 impl Cmd {
@@ -149,6 +153,18 @@ impl Wr {
                 self.u32(i);
                 self.u32(p as u32);
             }
+            Cmd::Safe { n, pts } => {
+                self.u32(26);
+                self.u32(n as u32);
+                for p in &pts[..n as usize] {
+                    self.v2(*p);
+                }
+            }
+            Cmd::SafeUp(k, u) => {
+                self.u32(27);
+                self.u32(k);
+                self.u32(u as u32);
+            }
             Cmd::Design { parts, paint } => {
                 self.u32(24);
                 for p in parts {
@@ -201,6 +217,18 @@ impl Rd<'_> {
                 Cmd::Design { parts, paint }
             }
             25 => Cmd::Prio(self.u32()?, self.u32()?.min(255) as u8),
+            26 => {
+                let n = self.u32()?;
+                if n as usize > crate::game::SAFE_PTS {
+                    return None;
+                }
+                let mut pts = [Vec2::ZERO; crate::game::SAFE_PTS];
+                for p in &mut pts[..n as usize] {
+                    *p = self.v2()?;
+                }
+                Cmd::Safe { n: n as u8, pts }
+            }
+            27 => Cmd::SafeUp(self.u32()?, self.u32()?.min(255) as u8),
             _ => return None,
         })
     }
@@ -310,6 +338,8 @@ fn apply_as(g: &mut Game, c: Cmd) -> Option<&'static str> {
             None
         }
         Cmd::Prio(i, p) => (!g.set_prio(i as usize, p)).then_some("Can't change that turret's targeting"),
+        Cmd::Safe { n, pts } => g.place_safe(&pts[..n as usize]).err(),
+        Cmd::SafeUp(k, u) => (!g.safe_upgrade(k as usize, u)).then_some("Can't buy that upgrade"),
         Cmd::Design { parts, paint } => {
             let b = crate::garage::Build { name: String::new(), parts: parts.map(|p| ((p as usize) < crate::garage::PARTS.len()).then_some(p)), paint };
             (!g.pick_design(&b)).then_some("That turret uses parts you haven't got")

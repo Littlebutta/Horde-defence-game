@@ -952,7 +952,8 @@ fn zone_meshes(zone: &[u8], th: &Theme) -> Vec<Mesh> {
     let mut f: Vec<f32> = (0..GW * GH)
         .map(|k| {
             let (x, y) = ((k % GW * ZG).min(W - 1), (k / GW * ZG).min(H - 1));
-            zone[y * W + x] as f32
+            // safehouses (2) draw their own blue border
+            (zone[y * W + x] == 1) as u8 as f32
         })
         .collect();
     // two box blurs, radius 2 grid points, make a soft hump around every corner
@@ -1239,6 +1240,24 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
     let mut mb = MB::default();
     let inview = |p: Vec2, m: f32| p.distance(v.center) < v.radius + m;
     let t = v.time;
+    // safehouse borders: a solid blue line once it's up, dashed while the truck sets it up
+    for s in &g.safes {
+        if s.state == SH_LOST {
+            continue;
+        }
+        let mut ring = s.poly.clone();
+        ring.push(s.poly[0]);
+        let blue = rgb(66, 133, 244);
+        if s.state == SH_READY {
+            mb.line(&ring, 1.4, blue);
+            let inner = art::shrink(&s.poly, 1.6);
+            let mut r2 = inner.clone();
+            r2.push(inner[0]);
+            mb.line(&r2, 0.5, alpha(blue, 0.45));
+        } else {
+            mb.dashed(&ring, 1.1, 3.0, 2.0, alpha(blue, 0.8));
+        }
+    }
     // civilians
     for c in &g.civs {
         if !civ_here(c.st) || !inview(c.p, 2.0) {
@@ -1246,6 +1265,7 @@ fn ground_dynamic(g: &Game, th: &Theme, v: &ViewInfo) -> MB {
         }
         let r = match c.st {
             C_ESCORT => rgb(28, 126, 214),
+            C_SAFE => rgb(66, 133, 244),
             C_CAPTURED => rgb(230, 60, 30),
             _ => th.civ_rim,
         };
@@ -1754,6 +1774,29 @@ pub fn draw_world(sc: &mut Scene, g: &Game, th: &Theme, v: &ViewInfo, labels: &m
         for m in gr.m.iter().filter(|m| m.alive) {
             air::tank(&mut glow, m.p, m.hd, m.aim, mk.min(1.6));
         }
+    }
+    for tr in &g.trucks {
+        if tr.dead || tr.p.distance(v.center) > v.radius + 10.0 {
+            continue;
+        }
+        let armour = g.safes.get(tr.sh).is_some_and(|s| s.has(SU_CONVOY));
+        air::truck(&mut glow, tr.p, tr.hd, tr.kind == TRUCK_SETUP, armour, mk.min(1.6));
+        if tr.load > 0 {
+            labels.items.push((p3(tr.p, 6.0), format!("{}", tr.load), rgb(116, 192, 252), 11.0));
+        }
+    }
+    // safehouses: setting up, and how many are waiting inside
+    for s in &g.safes {
+        if s.state == SH_LOST || s.c.distance(v.center) > v.radius + 60.0 {
+            continue;
+        }
+        let line = match s.state {
+            SH_DRIVE => "Safehouse · truck on the way".to_string(),
+            SH_BUILD => format!("Safehouse · setting up {:.0}s", s.t.max(0.0)),
+            _ if s.held > 0 => format!("Safehouse · {} waiting", s.held),
+            _ => "Safehouse".to_string(),
+        };
+        labels.items.push((p3(centroid(&s.poly), 14.0), line, rgb(116, 192, 252), 12.0));
     }
     gl_use_material(&sc.line_mat);
     for m in glow.finish() {

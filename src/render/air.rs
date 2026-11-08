@@ -312,6 +312,62 @@ pub fn tank(g: &mut Glow, p: Vec2, heading: f32, turret: f32, k: f32) {
     g.stroke(&[vec2(3.7, 0.0), vec2(4.2, 0.0)], false, w * 2.4, AIR);
 }
 
+/// A safehouse truck in the tank's line art: a cab, a boxy load bed and six wheels. The setup
+/// truck carries a folded crane and crates; a convoy truck has an armoured box with vision slits
+/// (`armour`: the heavier plating of the Armoured convoy upgrade).
+pub fn truck(g: &mut Glow, p: Vec2, heading: f32, setup: bool, armour: bool, k: f32) {
+    let s = 1.15 * k;
+    let w = 0.16;
+    let col = if setup { AIR } else { rgb(116, 192, 252) };
+    let chassis = mirrored(&[vec2(3.2, 0.0), vec2(3.2, 1.1), vec2(-3.0, 1.1), vec2(-3.0, 0.0)]);
+    ground_shadow(&chassis, p + vec2(0.4, 0.5), heading, s, 0.3);
+    g.flat(p, 0.45, heading, s);
+    g.fill(&chassis, INK);
+    g.stroke(&chassis, true, w, col);
+    // wheels sticking out each side: two at the back, one under the cab
+    for x in [2.2f32, -0.9, -2.2] {
+        for side in [-1.0f32, 1.0] {
+            g.stroke(&[vec2(x - 0.45, 1.25 * side), vec2(x + 0.45, 1.25 * side)], false, w * 2.6, alpha(col, 0.85));
+        }
+    }
+    // the cab at the front with its windscreen
+    g.flat(p, 1.25, heading, s);
+    let cab = mirrored(&[vec2(3.0, 0.0), vec2(3.0, 0.85), vec2(1.7, 0.95), vec2(1.5, 0.0)]);
+    g.fill(&cab, INK);
+    g.stroke(&cab, true, w, col);
+    g.stroke(&[vec2(2.75, -0.6), vec2(2.75, 0.6)], false, w * 0.7, alpha(col, 0.8));
+    if setup {
+        // flat bed with crates and a folded crane boom
+        g.flat(p, 1.0, heading, s);
+        let bed = mirrored(&[vec2(1.3, 0.0), vec2(1.3, 1.0), vec2(-2.9, 1.0), vec2(-2.9, 0.0)]);
+        g.fill(&bed, INK);
+        g.stroke(&bed, true, w * 0.9, col);
+        g.flat(p, 1.6, heading, s);
+        for (x, y) in [(-0.6f32, 0.45f32), (-1.9, -0.4)] {
+            let crate_ = [vec2(x - 0.5, y - 0.45), vec2(x + 0.5, y - 0.45), vec2(x + 0.5, y + 0.45), vec2(x - 0.5, y + 0.45)];
+            g.fill(&crate_, INK);
+            g.stroke(&crate_, true, w * 0.8, col);
+            g.stroke(&[crate_[0], crate_[2]], false, w * 0.5, alpha(col, 0.6));
+        }
+        g.flat(p, 2.0, heading, s);
+        g.stroke(&[vec2(1.1, 0.0), vec2(-2.6, 0.0)], false, w * 1.6, col);
+        g.circle(vec2(1.1, 0.0), 0.35, w * 0.7, col);
+    } else {
+        // the armoured box, slits along its sides
+        g.flat(p, 1.7, heading, s);
+        let bw = if armour { 1.15 } else { 1.0 };
+        let bx = mirrored(&[vec2(1.35, 0.0), vec2(1.35, bw), vec2(-2.95, bw), vec2(-2.95, 0.0)]);
+        g.fill(&bx, INK);
+        g.stroke(&bx, true, w * if armour { 1.4 } else { 1.0 }, col);
+        for x in [0.6f32, -0.5, -1.6] {
+            for side in [-1.0f32, 1.0] {
+                g.stroke(&[vec2(x - 0.3, (bw - 0.25) * side), vec2(x + 0.3, (bw - 0.25) * side)], false, w * 0.6, alpha(col, 0.75));
+            }
+        }
+        g.circle(vec2(-0.8, 0.0), 0.4, w * 0.6, col);
+    }
+}
+
 // ------------------------------------------------------------------------------------------ ICBM
 
 /// An ICBM in red line art, pointing along its flight (`dir`, in 3D), with a flickering flame.
