@@ -47,6 +47,8 @@ pub struct Custom {
     pub home: Vec2,
     /// crane arms: how far the head has swung out
     pub arm: f32,
+    /// pop-up mounts: seconds since it last came fully up (its first shots hit harder)
+    pub risen: f32,
 }
 
 /// What a shot does when it lands.
@@ -93,6 +95,10 @@ pub struct Chill {
 }
 
 const MINE_LIFE: f32 = 45.0;
+/// Pop-up mounts: share of their armour they mend a second down in the vault, and the seconds
+/// after rising that their shots hit 60% harder.
+const POPUP_MEND: f32 = 0.04;
+const POPUP_AMBUSH: f32 = 2.0;
 const SHIELD_BACK: f32 = 8.0;
 const WALK_SPEED: f32 = 3.0;
 /// seconds of fire in each rotary turret sound (the gatling clips are made this long)
@@ -286,6 +292,14 @@ impl Game {
         if cu.calm >= SHIELD_BACK {
             cu.shield = sp.shield;
         }
+        // pop-up mounts mend down in the vault and hit harder for a moment as they come up
+        if sp.rise > 0.0 {
+            if cu.rise < 0.5 {
+                let s = &mut self.structs[i];
+                s.hp = (s.hp + s.max * POPUP_MEND * DT).min(s.max);
+            }
+            cu.risen = if cu.rise >= 1.0 { cu.risen + DT } else { 0.0 };
+        }
         let link = links
             .iter()
             .filter(|(p, _)| p.distance(cu.pos) < 40.0 && p.distance(cu.pos) > 0.5)
@@ -296,8 +310,9 @@ impl Game {
         let src = self.rev_src(RevKey::Struct(i));
         // beams and sprays from a multi-barrel head are one beam, that much hotter
         let beam = matches!(sp.fire, Fire::Laser | Fire::Flame);
+        let ambush = if sp.rise > 0.0 && cu.risen < POPUP_AMBUSH { 1.6 } else { 1.0 };
         let hit = Hit {
-            dmg: sp.dmg * if beam { sp.barrels.max(1) as f32 } else { 1.0 },
+            dmg: sp.dmg * if beam { sp.barrels.max(1) as f32 } else { 1.0 } * ambush,
             rad: sp.rad,
             bdmg: sp.bdmg,
             napalm: sp.napalm,
@@ -360,7 +375,7 @@ impl Game {
             }
         }
         // walkers get mobbed by whatever crowds round their legs (on a roof they stand guard)
-        if sp.leash > 0.0 && !up {
+        if (sp.leash > 0.0 || sp.mech > 0.0) && !up {
             let crowd = self.units_in(c, 3.0) as f32;
             if crowd > 0.0 {
                 let atk = self.faction().stats.atk;
@@ -429,6 +444,9 @@ impl Game {
         }
         if sp.leash > 0.0 && !up {
             self.walk(cu, sp, tg, range);
+        }
+        if sp.mech > 0.0 && !up {
+            self.march(cu, sp);
         }
         let Some(tg) = tg else { return };
         if cu.rise < 1.0 {
@@ -507,6 +525,21 @@ impl Game {
             {
                 cu.pos = np;
             }
+        }
+    }
+
+    /// Mech legs: on toward where it was ordered (`home`), over anything but water.
+    fn march(&mut self, cu: &mut Custom, sp: &Spec) {
+        let d = cu.home - cu.pos;
+        if d.length() <= 0.2 {
+            return;
+        }
+        let np = cu.pos + d.normalize() * (sp.mech * DT).min(d.length());
+        let k = np.y as usize * W + np.x as usize;
+        if np.x > 2.0 && np.y > 2.0 && np.x < W as f32 - 2.0 && np.y < H as f32 - 2.0 && self.world.terrain[k] != T_WATER {
+            cu.pos = np;
+        } else {
+            cu.home = cu.pos;
         }
     }
 
@@ -1246,6 +1279,42 @@ mod tests {
         // walled in, as every base used to start
         g.complete_research(0, R::Perimeter);
         g
+    }
+
+    /// Mech legs take long to build, can't go on a roof, and walk where they're sent.
+    #[test]
+    fn mech_walks_where_sent() {
+        let mut g = test_game();
+        let b = Build::from_code("Mech;m.mech;h.optic1;b.rifle1;-;-;-;-").unwrap();
+        assert!(b.ok(), "{:?}", b.problem());
+        assert!(g.pick_design(&b));
+        let hq = g.world.hq;
+        let spot = (0..64)
+            .map(|k| k as f32 * std::f32::consts::TAU / 64.0)
+            .map(|a| hq + vec2(libm::cosf(a), libm::sinf(a)) * 30.0)
+            .find(|p| g.can_place(S::Custom, p.x as i32 - 3, p.y as i32 - 3))
+            .expect("room");
+        assert!(g.place(S::Custom, spot.x as i32 - 3, spot.y as i32 - 3));
+        let i = g.structs.len() - 1;
+        assert!(g.is_mech(i));
+        assert!(g.structs[i].build > 10.0);
+        for _ in 0..((MECH_BUILD / DT) as usize + 5) {
+            g.tick();
+        }
+        assert!(!g.structs[i].pending);
+        let from = g.structs[i].cu.as_ref().unwrap().pos;
+        let to = (0..64)
+            .map(|k| k as f32 * std::f32::consts::TAU / 64.0)
+            .map(|a| from + vec2(libm::cosf(a), libm::sinf(a)) * 20.0)
+            .find(|p| g.world.terrain[p.y as usize * W + p.x as usize] != T_WATER)
+            .unwrap();
+        assert!(g.aim(i, to));
+        for _ in 0..(12.0 / DT) as usize {
+            g.tick();
+        }
+        let now = g.structs[i].cu.as_ref().unwrap().pos;
+        assert!(now.distance(to) < 1.0, "{:?} -> {:?}, at {:?}", from, to, now);
+        assert_eq!(g.struct_at(now), Some(i));
     }
 
     /// Every barrel with a few mods and gear actually fires into a horde, deterministically.

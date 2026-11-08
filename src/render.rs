@@ -844,10 +844,24 @@ impl Scene {
         for i in 0..CW * CH {
             let n = g.swarm.coarse_at(i) as f32;
             let a = if n <= 0.0 { 0.0 } else { (n.sqrt() / 7.0).min(0.7) };
-            // chaos: the glow takes the colour of the army in the middle of the patch
-            let col = if chaos {
-                let c = ((i / CW) * CG + CG / 2) * W + (i % CW) * CG + CG / 2;
-                FACTIONS[((tint[c].load(Relaxed) >> TINT_ARMY_SHIFT) as usize).min(2)].col
+            // chaos: the glow takes the colour of the army most of the patch belongs to (counting
+            // only cells with someone in them: an empty cell reads as army 0, the zombies)
+            let col = if chaos && n > 0.0 {
+                let (x0, y0) = ((i % CW) * CG, (i / CW) * CG);
+                let mut by = [0u32; 3];
+                for y in y0..y0 + CG {
+                    for x in x0..x0 + CG {
+                        let c = y * W + x;
+                        let d = dens[c].load(Relaxed);
+                        if d > 0 {
+                            by[((tint[c].load(Relaxed) >> TINT_ARMY_SHIFT) as usize).min(2)] += d as u32;
+                        }
+                    }
+                }
+                let k = (0..3).max_by_key(|&k| (by[k], 3 - k)).unwrap_or(0);
+                FACTIONS[k].col
+            } else if chaos {
+                g.faction().col
             } else {
                 g.faction().col
             };

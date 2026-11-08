@@ -459,7 +459,7 @@ impl Fam {
             Ring => "The all-rounder. A steel ring that turns at a fair pace and carries a fair load.",
             Casemate => "Thick concrete facing away from your HQ. It can only fire across its front (140°), but it shrugs off the horde and hits 10% harder. Ground only.",
             Mast => "A tall lattice tower: sees and shoots much further, but it turns slowly and is fragile. Ground only.",
-            Popup => "Sinks into an armoured vault when there's nothing to shoot and takes a fifth of the damage while down. Needs a moment to rise before the first shot.",
+            Popup => "Sinks into an armoured vault when there's nothing to shoot: takes a fifth of the damage and mends 4% of its armour a second while down. Needs a moment to rise, then its first two seconds of fire hit 60% harder.",
             Crane => "The head rides on a crane arm that swings out toward whatever it's shooting, reaching past its own range.",
             Gyro => "Gyroscopic cradle: fires while still turning onto the target and steadies the aim.",
             Twin => "Carries two heads and two barrels that pick different targets. Doubles their price and weight.",

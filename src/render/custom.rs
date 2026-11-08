@@ -106,63 +106,68 @@ pub(super) fn turret(mb: &mut MB, b: &Build, sp: &Spec, c: Vec2, base: f32, pose
             (c, top)
         }
         Fam::Popup => {
+            // a round armoured silo: hazard-striped collar, two hatch doors that slide apart, and
+            // a telescoping column that lifts the head out
             plinth(mb, c, 3.0, 3.0, base);
-            let lid = chamfer(c, 2.6, 2.6, 0.6, 0.0);
-            block(
-                mb,
-                &lid,
-                base + 0.5,
-                base + 0.8,
-                mix(STEEL, body, 0.4),
-                STEEL_DARK,
-            );
-            mb.poly_at(
-                &chamfer(c, 1.6, 1.6, 0.4, 0.0),
-                base + 0.82,
-                rgb(20, 22, 26),
-            );
-            // stripes round the hatch
-            for k in 0..4 {
-                let a = k as f32 * std::f32::consts::FRAC_PI_2;
-                lamp(
-                    mb,
-                    c + vec2(a.cos(), a.sin()) * 2.1,
-                    base + 0.8,
-                    0.18,
-                    rgb(255, 196, 40),
-                );
+            cyl(mb, c, 2.7, base + 0.5, base + 0.95, mix(STEEL_DARK, body, 0.3), STEEL_DARK);
+            for k in 0..12 {
+                let a = k as f32 / 12.0 * std::f32::consts::TAU;
+                if k % 2 == 0 {
+                    beam(mb, c + vec2(a.cos(), a.sin()) * 2.45, c + vec2((a + 0.4).cos(), (a + 0.4).sin()) * 2.45, 0.14, base + 0.97, rgb(255, 196, 40));
+                }
             }
-            let up = base + 0.8 + 1.6 * pose.rise;
+            mb.poly_at(&ngon(c, 1.9, 20, 0.0), base + 0.96, rgb(16, 18, 22));
+            // the doors: two half discs, pushed out to the sides as it rises
+            let open = pose.rise.min(1.0) * 1.7;
+            for sgn in [-1.0f32, 1.0] {
+                let half = chamfer(c + vec2(sgn * (0.95 + open), 0.0), 0.92, 1.85, 0.5, 0.0);
+                block(mb, &half, base + 0.98, base + 1.18, mix(STEEL, body, 0.45), STEEL_DARK);
+            }
+            let up = base + 1.0 + 1.9 * pose.rise;
             if pose.rise > 0.05 {
-                cyl(mb, c, 1.2, base + 0.8, up, body, side);
+                cyl(mb, c, 1.25, base + 1.0, base + 1.0 + 0.9 * pose.rise, mix(STEEL, body, 0.2), side);
+                cyl(mb, c, 0.95, base + 1.0 + 0.9 * pose.rise, up, body, side);
             }
             (c, up)
         }
         Fam::Crane => {
+            // a pedestal and mast carrying a boom: a heavy inner stage, a lighter stage that
+            // slides out toward the target, a counterweight behind, the head riding the tip
             plinth(mb, c, 2.8, 2.8, base);
-            let lo = chamfer(c, 2.0, 2.0, 0.7, 0.0);
-            block(
-                mb,
-                &lo,
-                base + 0.5,
-                base + 1.6,
-                mix(CONCRETE, body, 0.3),
-                side,
-            );
-            cyl(mb, c, 0.8, base + 1.6, base + 2.4, body, side);
+            cyl(mb, c, 1.7, base + 0.5, base + 1.2, mix(CONCRETE, body, 0.3), side);
+            cyl(mb, c, 0.7, base + 1.2, base + 2.6, body, side);
             let d = vec2(pose.aim.cos(), pose.aim.sin());
-            let tip = c + d * (0.6 + pose.arm.min(16.0));
-            strut(
-                mb,
-                c,
-                base + 2.4,
-                tip,
-                base + 2.2,
-                0.22,
-                mix(rgb(255, 196, 40), body, 0.3),
-            );
-            beam(mb, c - d * 1.2, c, 0.35, base + 2.3, STEEL_DARK);
-            (tip, base + 2.3)
+            let zb = base + 2.85;
+            let out = pose.arm.min(16.0);
+            let tip = c + d * (1.6 + out);
+            block(mb, &rect(c, -1.9, -0.45, 2.2, 0.45, pose.aim), zb - 0.3, zb + 0.25, body, side);
+            block(mb, &rect(c, 1.4, -0.3, 1.6 + out + 0.5, 0.3, pose.aim), zb - 0.2, zb + 0.15, mix(body, WHITE, 0.25), side);
+            block(mb, &rect(c, -2.6, -0.7, -1.5, 0.7, pose.aim), zb - 0.75, zb + 0.15, STEEL_DARK, rgb(30, 32, 36));
+            lamp(mb, tip, zb + 0.15, 0.22, rgb(255, 196, 40));
+            (tip, zb + 0.15)
+        }
+        Fam::Mech => {
+            // two armoured legs (thigh, shin, a wide foot each) under a hull the head sits on
+            let ph = pose.walk * 4.0;
+            let lift = base + 4.0 + (ph * 2.0).sin().abs() * 0.2;
+            let fwd = vec2(pose.aim.cos(), pose.aim.sin());
+            let sd = vec2(-fwd.y, fwd.x);
+            for (k, sgn) in [(0.0f32, 1.0f32), (std::f32::consts::PI, -1.0)] {
+                let stride = (ph + k).sin() * 0.9;
+                let raise = (ph + k).cos().max(0.0) * 0.5;
+                let hip = c + sd * sgn * 1.75;
+                let foot = hip + fwd * stride + sd * sgn * 0.25;
+                let knee = hip + fwd * (stride * 0.5 + 0.6);
+                strut(mb, hip, lift - 0.4, knee, base + 2.1 + raise, 0.45, mix(body, STEEL_DARK, 0.25));
+                strut(mb, knee, base + 2.1 + raise, foot, base + 0.4 + raise, 0.36, mix(STEEL_DARK, body, 0.3));
+                lamp(mb, knee, base + 2.1 + raise, 0.42, mix(body, WHITE, 0.15));
+                cyl(mb, hip, 0.55, lift - 0.8, lift - 0.1, mix(body, WHITE, 0.1), side);
+                block(mb, &rect(foot, -0.8, -0.6, 1.2, 0.6, pose.aim), base + 0.05 + raise, base + 0.45 + raise, side, STEEL_DARK);
+            }
+            let hull = chamfer(c, 1.9, 2.1, 0.6, pose.aim);
+            loft(mb, &hull, &shrink(&hull, 0.25), lift - 0.9, lift, Some(body), side);
+            band(mb, &hull, lift - 0.7, lift - 0.5, mix(body, BLACK, 0.4));
+            (c, lift)
         }
         Fam::Gyro => {
             plinth(mb, c, 2.8, 2.8, base);
@@ -193,7 +198,13 @@ pub(super) fn turret(mb: &mut MB, b: &Build, sp: &Spec, c: Vec2, base: f32, pose
                 Some(mix(CONCRETE, body, 0.3)),
                 side,
             );
-            (c, base + 1.8)
+            // the yoke both heads ride on
+            let s2 = vec2(-pose.aim.sin(), pose.aim.cos());
+            beam(mb, c - s2 * 1.6, c + s2 * 1.6, 0.4, base + 1.85, STEEL_DARK);
+            for sg in [-1.0f32, 1.0] {
+                cyl(mb, c + s2 * 1.2 * sg, 0.55, base + 1.8, base + 2.0, STEEL, STEEL_DARK);
+            }
+            (c, base + 2.0)
         }
         Fam::Fortress => {
             plinth(mb, c, 3.0, 3.0, base);

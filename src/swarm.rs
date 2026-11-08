@@ -547,6 +547,13 @@ fn cell_costs(k: &Ctx, t: usize, tab: &mut [[f32; 8]; TS * TS], use_hunt: bool) 
     }
 }
 
+/// Wall charging: hostiles around a cell (3x3) from which a crowd starts to weigh a player's wall
+/// cheaper, the crowd at which it counts the most, and how much cheaper (in field units: a wall
+/// cell costs 400 more than open ground, a step 10).
+const CHARGE_AT: u32 = 24;
+const CHARGE_FULL: u32 = 160;
+const CHARGE_DISC_MIN: f32 = 250.0;
+const CHARGE_DISC: f32 = 1100.0;
 /// Crowding weight when following the HQ or hunting field.
 const DK: f32 = 6.0;
 
@@ -815,6 +822,8 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
         let mut cs = [f32::INFINITY; 8];
         // zombies off the rush: a share of their steps head for the HQ anyway (see `StepIn::pull`)
         let pulled = wander && field_hq && inp.pull > 0.0 && xs(&mut s) < inp.pull;
+        // following the HQ field (not hunting what they see, not wandering)
+        let on_hq = field_hq && (pulled || !(use_hunt && hunt[c] < U16)) && !(wander && !pulled);
         if !field_hq {
         } else if pulled {
             best = descend(m, c, f32::MAX, |i| hq[i], INF, prev, dk, &k.jt[(xr(&mut s) & 255) as usize]);
@@ -845,6 +854,33 @@ fn step_units(k: &Ctx, t: usize, seed: u64, us: &mut [Unit], ev: &mut Vec<Death>
             best = descend(m, c, f32::MAX, |i| hq[i], INF, prev, dk, &k.jt[(xr(&mut s) & 255) as usize]);
             if u.n > 1 {
                 costs(&mut cs, m, c, |i| hq[i], INF, prev, dk);
+            }
+        }
+        // a big enough crowd at a player's wall doesn't trail along a long way round: it weighs
+        // the way through the wall cheaper the more of them there are and charges it when that
+        // comes out shorter
+        if on_hq && best >= 0 && cx > 0 && cy > 0 && cx < W as i32 - 1 && cy < H as i32 - 1 {
+            let wall_near = (0..8).any(|j| m & (1 << j) != 0 && obj[(c as isize + OFF[j]) as usize] >= 0);
+            if wall_near {
+                let p = |i: usize| prev[i].load(Relaxed) as u32;
+                let near = p(c - W - 1) + p(c - W) + p(c - W + 1) + p(c - 1) + p(c) + p(c + 1) + p(c + W - 1) + p(c + W) + p(c + W + 1) + u.n as u32;
+                if near >= CHARGE_AT {
+                    let f = ((near - CHARGE_AT) as f32 / (CHARGE_FULL - CHARGE_AT) as f32).min(1.0);
+                    let disc = CHARGE_DISC_MIN + (CHARGE_DISC - CHARGE_DISC_MIN) * f;
+                    let bnc = (c as isize + OFF[best as usize]) as usize;
+                    let mut bv = if hq[bnc] == INF { f32::MAX } else { hq[bnc] as f32 };
+                    for j in 0..8 {
+                        let nc = (c as isize + OFF[j]) as usize;
+                        if m & (1 << j) == 0 || obj[nc] < 0 || hq[nc] == INF {
+                            continue;
+                        }
+                        let v = hq[nc] as f32 - disc;
+                        if v < bv {
+                            bv = v;
+                            best = j as i32;
+                        }
+                    }
+                }
             }
         }
         // steps one unit or clump to neighbour `best`: into it if it is open, otherwise attacking

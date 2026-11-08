@@ -3667,7 +3667,13 @@ impl App {
         let head = format!(
             "{} · targeting{}{}",
             name,
-            if st.t == S::Sniper { " · right-click to aim it" } else { "" },
+            if st.t == S::Sniper {
+                " · right-click to aim it"
+            } else if g.is_mech(si) {
+                " · right-click to walk it there"
+            } else {
+                ""
+            },
             if mine { "" } else { " (a partner's turret)" }
         );
         text(&self.fonts.mono, &head, r.x + 12.0, r.y + 20.0, 12.5, p.dim);
@@ -3823,7 +3829,7 @@ impl App {
             if self.tool != Tool::None {
                 self.tool = Tool::None;
                 self.press = None;
-            } else if let Some(si) = self.sel_struct.filter(|si| matches!(g.structs[*si].t, S::Artillery | S::Helipad | S::Sniper)) {
+            } else if let Some(si) = self.sel_struct.filter(|si| matches!(g.structs[*si].t, S::Artillery | S::Helipad | S::Sniper) || g.is_mech(*si)) {
                 self.act(g, Cmd::Aim(si as u32, mw));
             } else if let Some(gi) = self.selected {
                 self.act(g, Cmd::Order(gi as u32, mw));

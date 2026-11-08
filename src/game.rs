@@ -62,6 +62,8 @@ pub struct Structure {
 /// A sniper nest fires within this many radians either side of where it's aimed, and its round
 /// carries on through this many more spots behind the target.
 pub const SNIPER_CONE: f32 = 0.44;
+/// Seconds mech legs take to build.
+pub const MECH_BUILD: f32 = 12.0;
 pub const SNIPER_PIERCE: usize = 8;
 pub const PRIOS: [&str; 5] = ["Default", "Nearest", "Biggest crowd", "Closest to HQ", "Furthest"];
 impl Structure {
@@ -1018,7 +1020,7 @@ impl Game {
             })
             .collect();
         for (i, s) in self.structs.iter().enumerate() {
-            if s.dead || s.up() || s.pending {
+            if s.dead || s.up() || s.pending || self.on_legs(s) {
                 continue;
             }
             for y in s.y..s.y + s.h {
@@ -1397,7 +1399,7 @@ impl Game {
             prio: 0,
         };
         // walkers stand on their own legs: they never block the street
-        let walker = t == S::Custom && self.cur_design(self.actor).is_some_and(|d| d.spec.leash > 0.0);
+        let walker = t == S::Custom && self.cur_design(self.actor).is_some_and(|d| d.spec.leash > 0.0 || d.spec.mech > 0.0);
         if !s.up() && !walker {
             for yy in y..y + d.h {
                 for xx in x..x + d.w {
@@ -1531,7 +1533,7 @@ impl Game {
     }
     /// Buys and mounts a turret on a bunker.
     pub fn place_mount(&mut self, t: S, b: usize) -> bool {
-        if !self.can_mount(t, b) {
+        if !self.can_mount(t, b) || (t == S::Custom && self.cur_design(self.actor).is_some_and(|d| d.spec.mech > 0.0)) {
             return false;
         }
         let c = self.structs[b].center();
@@ -1612,6 +1614,9 @@ impl Game {
     /// Buys and places a turret on a rooftop.
     pub fn place_roof(&mut self, t: S, b: usize, p: Vec2) -> bool {
         let d = def(t);
+        if t == S::Custom && self.cur_design(self.actor).is_some_and(|d| d.spec.mech > 0.0) {
+            return false;
+        }
         let cost = self.cost_at(t, p);
         if !d.turret || d.ground || self.scrap < cost || !self.can_place_roof(t, b, p) || !self.build_ok(self.actor, t) || !self.logi_room(self.actor, 1) {
             return false;
@@ -1631,8 +1636,10 @@ impl Game {
     /// A structure the player just bought goes up behind scaffolding for a few seconds (after its
     /// helicopter lands, for one flown in) and does nothing until it is finished.
     fn construct(&mut self, i: usize) {
+        // mech legs take a long time to put together
+        let mech = self.structs[i].cu.as_ref().is_some_and(|c| self.designs.get(c.d as usize).is_some_and(|d| d.spec.mech > 0.0));
         let s = &mut self.structs[i];
-        s.build = build_time(s.t);
+        s.build = if mech { MECH_BUILD } else { build_time(s.t) };
         if s.build > 0.0 && !s.pending {
             s.pending = true;
             if !s.up() {
@@ -1736,9 +1743,19 @@ impl Game {
         true
     }
     /// The structure (not the HQ or a wall) under a point.
+    /// A custom turret that walks (walker or mech legs): it stands wherever its legs took it and
+    /// never blocks the street.
+    pub fn on_legs(&self, s: &Structure) -> bool {
+        s.cu.as_ref().is_some_and(|c| self.designs.get(c.d as usize).is_some_and(|d| d.spec.leash > 0.0 || d.spec.mech > 0.0))
+    }
     pub fn struct_at(&self, p: Vec2) -> Option<usize> {
+        // walking turrets are where their legs are
+        if let Some(i) = self.structs.iter().enumerate().rev().find(|(_, s)| !s.dead && self.on_legs(s) && s.cu.as_ref().is_some_and(|c| c.pos.distance(p) < 3.5)).map(|(i, _)| i) {
+            return Some(i);
+        }
         self.structs.iter().enumerate().rev().find(|(_, s)| {
             !s.dead
+                && !self.on_legs(s)
                 && !matches!(s.t, S::Hq | S::Wall | S::Gate)
                 && p.x >= s.x as f32
                 && p.y >= s.y as f32
@@ -3199,6 +3216,10 @@ impl Game {
         s.prio = prio;
         true
     }
+    /// Whether structure `i` is a custom turret on mech legs (it walks where it's sent).
+    pub fn is_mech(&self, i: usize) -> bool {
+        self.structs.get(i).and_then(|s| s.cu.as_ref()).is_some_and(|c| self.designs.get(c.d as usize).is_some_and(|d| d.spec.mech > 0.0))
+    }
     /// Turrets whose targeting the player can set.
     pub fn has_prio(t: S) -> bool {
         matches!(t, S::Gun | S::Cannon | S::Custom | S::Sniper)
@@ -3362,6 +3383,15 @@ impl Game {
         match self.structs[i].t {
             S::Artillery | S::Sniper => {
                 self.structs[i].target = Some(p);
+                true
+            }
+            S::Custom if self.is_mech(i) => {
+                if self.world.terrain[p.y as usize * W + p.x as usize] == T_WATER {
+                    return false;
+                }
+                if let Some(cu) = self.structs[i].cu.as_mut() {
+                    cu.home = p;
+                }
                 true
             }
             S::Helipad => {
