@@ -224,6 +224,9 @@ pub struct App {
     coop_map: Option<(Desc, u64)>,
     /// set during a frame: move the HQ here / start the match
     place_at: Option<Vec2>,
+    /// the game for a newly picked HQ spot, being built on another thread so the click doesn't
+    /// stall a frame
+    place_job: Option<std::sync::mpsc::Receiver<Game>>,
     place_go: bool,
     /// headless tests start right away with the suggested HQ (`PH_PLACE=1` shows the choice)
     auto_place: bool,
@@ -449,6 +452,7 @@ impl App {
             spot_sent: false,
             coop_map: None,
             place_at: None,
+            place_job: None,
             place_go: false,
             banner: None,
             news: None,
@@ -2127,9 +2131,13 @@ impl App {
         }
     }
 
-    fn make_game(&self, mut d: Desc, seed: u64) -> Game {
-        let camp = if self.in_camp { self.camp.as_ref() } else { None };
-        // co-op: the HQ spots the players picked (a guest still choosing sees their own pick)
+    fn make_game(&self, d: Desc, seed: u64) -> Game {
+        let (d, fac, mult) = self.game_args(d);
+        let g = Game::new(d, fac, mult, seed);
+        self.finish_game(g)
+    }
+    /// Co-op: the HQ spots the players picked (a guest still choosing sees their own pick).
+    fn hq_spots(&self) -> Vec<Option<Vec2>> {
         let mut spots = self.sess.as_ref().filter(|s| s.in_game).map(|s| s.spots.clone()).unwrap_or_default();
         if let (Some(s), Some(p)) = (&self.sess, self.my_spot) {
             if !s.spots_ready && s.me > 0 {
@@ -2139,11 +2147,24 @@ impl App {
                 spots[s.me] = Some(p);
             }
         }
+        spots
+    }
+    /// What `Game::new` is called with for map `d`: the map with the co-op HQ spots, the army
+    /// and the horde multiplier.
+    fn game_args(&self, mut d: Desc) -> (Desc, usize, f32) {
+        let camp = if self.in_camp { self.camp.as_ref() } else { None };
+        let spots = self.hq_spots();
         d.extra_hqs = spots.iter().skip(1).flatten().copied().collect();
-        let mut g = match camp {
-            Some(c) => Game::new(d, c.army(), DIFFS[c.diff].1 * c.horde_mult(), seed),
-            None => Game::new(d, self.fac, DIFFS[self.diff].1, seed),
-        };
+        match camp {
+            Some(c) => (d, c.army(), DIFFS[c.diff].1 * c.horde_mult()),
+            None => (d, self.fac, DIFFS[self.diff].1),
+        }
+    }
+    /// The rest of setting up a new game once `Game::new` is done: co-op HQs, the campaign's
+    /// tech and loadout.
+    fn finish_game(&self, mut g: Game) -> Game {
+        let camp = if self.in_camp { self.camp.as_ref() } else { None };
+        let spots = self.hq_spots();
         // co-op: an HQ for every player
         let players = match &self.sess {
             Some(s) if s.in_game || !s.is_host() => s.game_players,
@@ -2243,8 +2264,41 @@ impl App {
         d.hq = p;
         d.note = if near_airport(d, p) { "HQ set up at the airport you picked.".into() } else { "HQ set up where you picked.".into() };
         let (d, seed) = (d.clone(), *seed);
+        // alone, the new game is built on another thread and swapped in when it's ready (the
+        // map doesn't hitch on every click); a newer click simply replaces the job
+        if self.sess.is_none() {
+            let (d, fac, mult) = self.game_args(d);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(Game::new(d, fac, mult, seed));
+            });
+            self.place_job = Some(rx);
+            return;
+        }
         let g = self.make_game(d, seed);
         self.show(g, false);
+    }
+    /// Swaps in the game built for the last HQ spot picked, once it's ready (`wait`: block for it).
+    fn place_ready(&mut self, wait: bool) {
+        let Some(rx) = self.place_job.as_ref() else { return };
+        let (got, gone) = if wait {
+            let r = rx.recv().ok();
+            let gone = r.is_none();
+            (r, gone)
+        } else {
+            match rx.try_recv() {
+                Ok(g) => (Some(g), false),
+                Err(std::sync::mpsc::TryRecvError::Empty) => (None, false),
+                Err(_) => (None, true),
+            }
+        };
+        if let Some(g) = got {
+            self.place_job = None;
+            let g = self.finish_game(g);
+            self.show(g, false);
+        } else if gone {
+            self.place_job = None;
+        }
     }
 
     /// The banner while choosing the HQ spot. Returns nothing; the clicks set `place_go`.
@@ -2667,6 +2721,8 @@ impl App {
             if let Some(p) = self.place_at.take() {
                 self.move_hq(p);
             }
+            let go = self.place_go;
+            self.place_ready(go);
             if std::mem::take(&mut self.place_go) {
                 if self.client() {
                     // a guest sends their spot; the match starts once everybody has
