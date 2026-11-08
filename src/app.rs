@@ -131,11 +131,7 @@ pub struct App {
     music_vol: u32,
     /// effects volume 0..=100, saved in settings
     sfx_vol: u32,
-    /// the low ammo warning has sounded (until the store fills up again)
-    low_ammo_cue: bool,
-    /// the end of the match (the win or game over sting) has sounded
-    end_cue: bool,
-    /// players in the co-op session last frame (0: none), for the join and leave chimes
+    /// players in the co-op session last frame (0: none)
     coop_players: usize,
     /// news broadcast volume 0..=100, saved in settings
     news_vol: u32,
@@ -153,6 +149,8 @@ pub struct App {
     camp_mode: bool,
     /// asking before a new campaign erases the saved one
     confirm_new: bool,
+    /// the Quit game button asks first
+    confirm_quit: bool,
     /// the turn the campaign screen's alien trails started drawing for, and when
     trail_t: Option<(u32, f32)>,
     /// bulletins acknowledged here (a co-op guest can't mark them in the host's campaign)
@@ -393,13 +391,12 @@ impl App {
             city: st.city,
             camp_mode: st.campaign,
             confirm_new: std::env::var("PH_CONFIRM").is_ok(),
+            confirm_quit: std::env::var("PH_QUIT").is_ok(),
             trail_t: None,
             told_local: 0,
             bulletin_played: None,
             music: music::Music::start(st.music, st.sfx, st.news),
             sfx_vol: st.sfx,
-            low_ammo_cue: false,
-            end_cue: false,
             coop_players: 0,
             news_vol: st.news,
             suspended: false,
@@ -511,7 +508,7 @@ impl App {
             self.play(dt);
         } else {
             ui::begin();
-            self.blocked = self.settings_open || self.invite_open || self.confirm_new;
+            self.blocked = self.settings_open || self.invite_open || self.confirm_new || self.confirm_quit;
             match self.screen {
                 Screen::Menu => self.menu(),
                 Screen::Loading => self.loading(),
@@ -523,11 +520,14 @@ impl App {
             ui::end();
         }
         self.grab_mouse();
-        // our own pointer, over everything (the system one is hidden)
+        // our own pointer, over everything (the system one is hidden while the window has
+        // focus; with another program in front the system pointer shows and ours goes)
         show_mouse(false);
         set_default_camera();
         gl_use_default_material();
-        render::cursor(self.px_mouse());
+        if miniquad::window::has_focus() {
+            render::cursor(self.px_mouse());
+        }
     }
 
     /// While a match is being played the mouse can't leave the window; pausing (or the settings,
@@ -556,6 +556,10 @@ impl App {
         if self.confirm_new && matches!(self.screen, Screen::Menu | Screen::Hub) && !self.settings_open {
             self.tip = None;
             self.confirm_new_dialog();
+        }
+        if self.confirm_quit && !self.settings_open {
+            self.tip = None;
+            self.confirm_quit_dialog();
         }
         if self.settings_open {
             self.tip = None;
@@ -604,12 +608,7 @@ impl App {
                 return;
             }
         };
-        // a chime when a co-op player joins, a lower one when one leaves
-        let n = self.sess.as_ref().map_or(0, |s| s.players.len());
-        if self.coop_players > 0 && n != self.coop_players {
-            self.cue(if n > self.coop_players { music::Snd::Join } else { music::Snd::Leave }, 0.45);
-        }
-        self.coop_players = n;
+        self.coop_players = self.sess.as_ref().map_or(0, |s| s.players.len());
         for n in notes {
             match n {
                 net::Note::Started { desc, fac, diff, seed, camp } => {
@@ -630,7 +629,6 @@ impl App {
                     self.camp = None;
                 }
                 net::Note::Closed(why) => {
-                    self.cue(music::Snd::Leave, 0.45);
                     if let Some(mut s) = self.sess.take() {
                         s.leave();
                     }
@@ -813,13 +811,9 @@ impl App {
         }
         m
     }
-    /// What the game said back to one of this player's orders, with an error buzz when it was
-    /// refused.
+    /// What the game said back to one of this player's orders.
     fn said(&mut self, m: &str) {
         self.msg = (m.into(), 1.5);
-        if m != net::SOLD {
-            self.cue(music::Snd::Error, 0.25);
-        }
     }
 
     /// Where the menu column goes, and in co-op the players panel beside it. The column sits on the
@@ -1050,17 +1044,7 @@ impl App {
         }
         if !self.hub_votes() || a.kind() == 0 {
             let me = self.me();
-            let had = |c: &Campaign| (c.crew(me).tech.len(), c.points(me), c.crew(me).money);
-            let before = had(c);
             let go = Self::do_act(c, me, a);
-            // an unlock sparkles, a purchase clunks, and one that couldn't be paid for buzzes
-            let done = had(c) != before;
-            match a {
-                HubAct::Tech(_) | HubAct::ResearchPart(_) if done => self.cue(music::Snd::TechUnlock, 0.5),
-                HubAct::Recruit(_) | HubAct::BuyPart(_) | HubAct::Hunt(_) if done => self.cue(music::Snd::Place, 0.4),
-                HubAct::Tech(_) | HubAct::ResearchPart(_) | HubAct::Recruit(_) | HubAct::BuyPart(_) => self.cue(music::Snd::Error, 0.25),
-                _ => {}
-            }
             return go;
         }
         self.cast(0, a);
@@ -1211,32 +1195,10 @@ impl App {
                 Sfx::HeliGun => (music::Snd::HeliGun, 0.35, jitter),
                 Sfx::Rocket => (music::Snd::Cannon, 0.3, 1.45 * jitter),
                 Sfx::BaseAttacked => (music::Snd::BaseAttacked, 0.8, 1.0),
-                Sfx::Rifle => (music::Snd::Rifle, 0.13, jitter),
-                Sfx::Gunship => (music::Snd::Gunship, 0.5, 1.0),
-                Sfx::Jet => (music::Snd::Jet, 0.6, jitter),
-                Sfx::Launch => (music::Snd::Launch, 0.7, 1.0),
-                Sfx::Radio(_) => (music::Snd::Radio, 0.35, 1.0),
-                Sfx::Outbreak => (music::Snd::ZombieGroan, 0.5, jitter),
-                Sfx::Rush => (music::Snd::ZombieRush, 0.55, 1.0),
-                Sfx::BugDrop => (music::Snd::BugDrop, 0.4, jitter),
-                Sfx::Hive => (music::Snd::Hive, 0.45, jitter),
-                Sfx::Portal => (music::Snd::OrcPortal, 0.5, jitter),
-                Sfx::Warcry => (music::Snd::OrcWarcry, 0.4, jitter),
-                Sfx::Death => (music::Snd::Death, 0.22, jitter),
-                Sfx::TankLost => (music::Snd::TankLost, 0.55, jitter),
-                Sfx::Place => (music::Snd::Place, 0.35, jitter),
-                Sfx::Sell => (music::Snd::Sell, 0.35, 1.0),
-                Sfx::Wrecked => (music::Snd::Wrecked, 0.45, jitter),
-                Sfx::Collapse => (music::Snd::Collapse, 0.4, jitter),
-                Sfx::HqFallen => (music::Snd::HqFallen, 0.85, 1.0),
-                Sfx::Rescue => (music::Snd::Rescue, 0.25, jitter),
-                Sfx::Evac => (music::Snd::Evac, 0.4, 1.0),
-                Sfx::ResearchStart(_) => (music::Snd::ResearchStart, 0.3, 1.0),
-                Sfx::ResearchDone(_) => (music::Snd::ResearchDone, 0.45, 1.0),
-                Sfx::Inbound => (music::Snd::Inbound, 0.4, 1.0),
-                // rotary turrets: well under the other guns, as they never stop
-                Sfx::Gatling(l) => ([music::Snd::GatlingSlow, music::Snd::GatlingMid, music::Snd::GatlingFast][l.min(2) as usize], 0.11, 0.97 + 0.06 * rand::gen_range(0.0, 1.0)),
-                Sfx::GatlingSpin(up) => (if up { music::Snd::GatlingSpinUp } else { music::Snd::GatlingSpinDown }, 0.12, jitter),
+                // rotary turrets: one short crack a burst, well under the other guns
+                Sfx::Gatling(_) => (music::Snd::Gun, 0.08, 1.15 * jitter),
+                // the generated sounds were removed (Devin didn't like them): these cues stay silent
+                Sfx::Rifle | Sfx::Gunship | Sfx::Jet | Sfx::Launch | Sfx::Radio(_) | Sfx::Outbreak | Sfx::Rush | Sfx::BugDrop | Sfx::Hive | Sfx::Portal | Sfx::Warcry | Sfx::Death | Sfx::TankLost | Sfx::Place | Sfx::Sell | Sfx::Wrecked | Sfx::Collapse | Sfx::HqFallen | Sfx::Rescue | Sfx::Evac | Sfx::ResearchStart(_) | Sfx::ResearchDone(_) | Sfx::Inbound | Sfx::GatlingSpin(_) => continue,
                 Sfx::FlameStop | Sfx::Custom(_) => continue,
             };
             // a nuke is heard anywhere on the map, the alarm and the radio wherever you're
@@ -1267,49 +1229,6 @@ impl App {
     fn zoom_gain(&self) -> f32 {
         let zoom = ((1100.0 - self.cam.dist) / 800.0).clamp(0.0, 1.0);
         zoom * zoom
-    }
-    /// The loops under the battle (tank engines, rotors, factories, helium sprayers), each as
-    /// loud as its closest source to the view, and the cues the app raises itself: the low ammo
-    /// warning and the end-of-match sting.
-    fn loops_and_cues(&mut self, g: &Game) {
-        let zoom = self.zoom_gain();
-        let on = !g.over && !self.paused_now();
-        let loud = |ps: &mut dyn Iterator<Item = Vec2>| -> f32 {
-            if !on {
-                return 0.0;
-            }
-            let n = ps.map(|p| self.hearing(p).0).fold(0.0, f32::max);
-            n * n * zoom
-        };
-        let tanks = loud(&mut g.groups.iter().filter(|gr| !gr.dead && gr.kind == U::Tank && gr.state == GState::Move).filter_map(|gr| gr.m.iter().find(|m| m.alive).map(|m| m.p)));
-        let rotors = loud(&mut g.gunships.iter().map(|s| s.p).chain(g.helis.iter().map(|h| h.from + (h.to - h.from) * (h.t / h.dur.max(0.01)))));
-        let works = |t: S| g.structs.iter().filter(move |s| !s.dead && !s.pending && s.t == t).map(|s| s.center());
-        let factory = loud(&mut works(S::Extractor).chain(works(S::Plant)));
-        // a helium tower only hisses while something is in its field
-        let helium = loud(&mut g.structs.iter().filter(|s| !s.dead && !s.pending && s.t == S::Helium && self.hearing(s.center()).0 > 0.0).filter(|s| g.find_target(s.center(), g.turret_range(S::Helium, s.up(), s.owner as usize)).is_some()).map(|s| s.center()));
-        self.music.set_loop(music::Lp::Engine, tanks);
-        self.music.set_loop(music::Lp::Rotor, rotors);
-        self.music.set_loop(music::Lp::Factory, factory);
-        self.music.set_loop(music::Lp::Helium, helium);
-        // low ammo: below a tenth of the store while something needs it, once until it's refilled
-        let needs = g.structs.iter().any(|s| !s.dead && def(s.t).ammo > 0.0) || g.groups.iter().any(|gr| !gr.dead && gr.kind == U::Tank);
-        let low = g.ammo_cap * 0.1;
-        if !self.low_ammo_cue && needs && g.ammo < low && !g.over {
-            self.low_ammo_cue = true;
-            self.cue(music::Snd::LowAmmo, 0.35);
-        } else if g.ammo > low * 2.0 {
-            self.low_ammo_cue = false;
-        }
-        if g.over && !self.end_cue {
-            self.end_cue = true;
-            self.cue(if g.won { music::Snd::Win } else { music::Snd::GameOver }, 0.6);
-        } else if !g.over {
-            self.end_cue = false;
-        }
-    }
-    /// An effect that isn't anywhere on the map (a warning, a menu sound), in the middle.
-    pub(super) fn cue(&self, snd: music::Snd, gain: f32) {
-        self.music.play(music::Play { snd, gain, pan: 0.0, speed: 1.0, key: 0 });
     }
     fn set_sfx(&mut self, v: u32) {
         self.sfx_vol = v;
@@ -1608,7 +1527,7 @@ impl App {
             self.tip = Some("The free builder: every part on the shelf. Builds saved here can be imported in a campaign once its parts are researched.".into());
         }
         if self.button(fc[2], "Quit game", true, false) {
-            self.quit();
+            self.confirm_quit = true;
         }
         // updater line, under the panel
         let st = self.updater.get();
@@ -1930,13 +1849,13 @@ impl App {
             if !guest {
                 campaign::save(&c);
             }
-            self.quit();
+            self.confirm_quit = true;
         }
 
         // ---- right: research and the army
         self.research_column(&mut c, right);
         if tree && !news {
-            self.blocked = self.settings_open || self.invite_open || self.confirm_new;
+            self.blocked = self.settings_open || self.invite_open || self.confirm_new || self.confirm_quit;
             self.tech_tree(&mut c);
         }
         if news {
@@ -2531,7 +2450,6 @@ impl App {
         // the war drum, louder the closer the view is to the nearest drummer
         let near = g.drummers.iter().filter(|d| !d.dead).map(|d| d.p.distance(self.cam.t)).fold(f32::MAX, f32::min);
         self.music.set_loop(music::Lp::Drum, if near < f32::MAX && !g.over { (1.0 - near / 700.0).clamp(0.3, 1.0) } else { 0.0 });
-        self.loops_and_cues(&g);
         if let (Some(n), None, false) = (self.news.as_mut(), &self.placing, g.over) {
             if let Some(army) = n.broadcast(g.time, dt) {
                 self.music.news(army);

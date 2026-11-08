@@ -285,4 +285,30 @@ impl App {
             self.open_campaign(Some(Campaign::new(self.diff)));
         }
     }
+
+    /// Asks before Quit game closes the game.
+    pub(super) fn confirm_quit_dialog(&mut self) {
+        let p = pal(self.dark);
+        self.backdrop();
+        let (sw, sh) = (ui::sw(), ui::sh());
+        let w = 440.0f32.min(sw - 40.0);
+        let h = 168.0;
+        let r = Rect::new((sw - w) / 2.0, (sh - h) / 2.0, w, h);
+        chamfer(r, 14.0, Color::new(0.035, 0.05, 0.08, 0.98));
+        draw_rectangle(r.x + 14.0, r.y, r.w - 14.0, 3.0, p.accent);
+        chamfer_lines(r, 14.0, 1.2, alpha(p.accent, 0.6));
+        let x0 = r.x + 28.0;
+        text(&self.fonts.head, "Quit the game?", x0, r.y + 46.0, 24.0, p.text);
+        let note = if self.game.is_some() { "The match in progress will be lost." } else { "Settings and the campaign are already saved." };
+        text(&self.fonts.mono, note, x0, r.y + 76.0, 13.0, p.dim);
+        let bw = (w - 56.0 - 12.0) / 2.0;
+        let stay = Rect::new(x0, r.bottom() - 54.0, bw, 36.0);
+        let go = Rect::new(x0 + bw + 12.0, r.bottom() - 54.0, bw, 36.0);
+        if self.button(stay, "Keep playing", true, false) || is_key_pressed(KeyCode::Escape) {
+            self.confirm_quit = false;
+        }
+        if self.button(go, "Quit", true, true) || is_key_pressed(KeyCode::Enter) {
+            self.quit();
+        }
+    }
 }

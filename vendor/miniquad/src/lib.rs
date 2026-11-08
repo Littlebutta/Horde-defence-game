@@ -266,6 +266,17 @@ pub mod window {
         }
     }
 
+    static FOCUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    /// Patched for Pixel Horde: whether the window has keyboard focus (always true where the
+    /// platform doesn't report it).
+    pub fn has_focus() -> bool {
+        FOCUSED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[allow(dead_code)]
+    pub(crate) fn set_focus(f: bool) {
+        FOCUSED.store(f, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Set the mouse cursor icon.
     pub fn set_mouse_cursor(cursor_icon: CursorIcon) {
         let d = native_display().lock().unwrap();

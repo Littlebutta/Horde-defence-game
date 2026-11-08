@@ -75,8 +75,7 @@ const BED_GAIN: f32 = 0.16;
 const BED_LEAD: f32 = 1.2;
 const BED_FADE: f32 = 1.5;
 
-/// The sound effects: Devin's recordings first, then the ones made by tools/make_sfx.py for
-/// everything that had no sound of its own (assets/sfx/gen).
+/// The sound effects, all Devin's recordings.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Snd {
     Cannon,
@@ -89,43 +88,8 @@ pub enum Snd {
     Nuke,
     Button,
     BaseAttacked,
-    Rifle,
-    Gunship,
-    Jet,
-    Launch,
-    Radio,
-    ZombieGroan,
-    ZombieRush,
-    BugDrop,
-    Hive,
-    OrcPortal,
-    OrcWarcry,
-    Death,
-    TankLost,
-    Place,
-    Sell,
-    Wrecked,
-    Collapse,
-    HqFallen,
-    LowAmmo,
-    Error,
-    Rescue,
-    Evac,
-    Win,
-    GameOver,
-    ResearchStart,
-    ResearchDone,
-    TechUnlock,
-    Inbound,
-    Join,
-    Leave,
-    GatlingSlow,
-    GatlingMid,
-    GatlingFast,
-    GatlingSpinUp,
-    GatlingSpinDown,
 }
-const SNDS: usize = 45;
+const SNDS: usize = 10;
 /// One effect: the clip, at most `voices` copies at once with a new copy at least `gap_ms` after
 /// the last (so a hundred cannons firing together stay a rumble instead of a wall of noise), and
 /// `cut` seconds of it played (0: all of it), ending in a short fade.
@@ -137,11 +101,6 @@ struct Fx {
 }
 const fn fx(bytes: &'static [u8], voices: usize, gap_ms: u64) -> Fx {
     Fx { bytes, voices, gap_ms, cut: 0.0 }
-}
-macro_rules! gen {
-    ($name:literal) => {
-        include_bytes!(concat!("../assets/sfx/gen/", $name, ".wav"))
-    };
 }
 /// In the order of `Snd`. The gun turret plays once per shot, so its long ringing tail is cut to
 /// a crack that fits between shots.
@@ -156,42 +115,6 @@ static SFX: [Fx; SNDS] = [
     fx(include_bytes!("../assets/sfx/icbm-explosion.mp3"), 2, 300),
     fx(include_bytes!("../assets/sfx/button.mp3"), 2, 40),
     fx(include_bytes!("../assets/sfx/base-attacked.mp3"), 1, 20_000),
-    fx(gen!("rifle"), 6, 45),
-    fx(gen!("gunship"), 2, 1500),
-    fx(gen!("jet"), 2, 1500),
-    fx(gen!("launch"), 2, 1000),
-    fx(gen!("radio"), 1, 600),
-    fx(gen!("zombie-groan"), 2, 2000),
-    fx(gen!("zombie-rush"), 1, 4000),
-    fx(gen!("bug-drop"), 2, 800),
-    fx(gen!("hive"), 1, 2000),
-    fx(gen!("orc-portal"), 2, 1000),
-    fx(gen!("orc-warcry"), 2, 1500),
-    fx(gen!("death"), 3, 120),
-    fx(gen!("tank-lost"), 2, 300),
-    fx(gen!("place"), 3, 60),
-    fx(gen!("sell"), 2, 150),
-    fx(gen!("wrecked"), 3, 200),
-    fx(gen!("collapse"), 3, 500),
-    fx(gen!("hq-fallen"), 1, 3000),
-    fx(gen!("low-ammo"), 1, 3000),
-    fx(gen!("error"), 1, 250),
-    fx(gen!("rescue"), 2, 300),
-    fx(gen!("evac"), 2, 1000),
-    fx(gen!("win"), 1, 3000),
-    fx(gen!("game-over"), 1, 3000),
-    fx(gen!("research-start"), 1, 200),
-    fx(gen!("research-done"), 1, 500),
-    fx(gen!("tech-unlock"), 1, 300),
-    fx(gen!("inbound"), 1, 2500),
-    fx(gen!("join"), 1, 300),
-    fx(gen!("leave"), 1, 300),
-    // a rotary turret's bursts play back to back (every GATLING_BURST), so a few can run at once
-    fx(gen!("gatling-slow"), 4, 60),
-    fx(gen!("gatling-mid"), 4, 60),
-    fx(gen!("gatling-fast"), 4, 60),
-    fx(gen!("gatling-spinup"), 2, 200),
-    fx(gen!("gatling-spindown"), 2, 200),
 ];
 const CUT_FADE_S: f32 = 0.06;
 
@@ -201,19 +124,11 @@ const CUT_FADE_S: f32 = 0.06;
 pub enum Lp {
     /// Devin's war drum, while a war-drum orc is out
     Drum,
-    /// tanks on the move
-    Engine,
-    /// gunships and helicopters in the air
-    Rotor,
-    /// extractors and ammo plants at work
-    Factory,
-    /// helium towers spraying
-    Helium,
 }
-const LOOPS: usize = 5;
-static LOOP_SRC: [&[u8]; LOOPS] = [DRUM, gen!("engine-loop"), gen!("rotor-loop"), gen!("factory-loop"), gen!("helium-loop")];
+const LOOPS: usize = 1;
+static LOOP_SRC: [&[u8]; LOOPS] = [DRUM];
 /// each loop's loudness at full (before the effects volume)
-const LOOP_GAIN: [f32; LOOPS] = [DRUM_GAIN, 0.35, 0.4, 0.14, 0.16];
+const LOOP_GAIN: [f32; LOOPS] = [DRUM_GAIN];
 
 /// seconds each music crossfade takes; the end of a track fades out while the next fades in
 const FADE: f32 = 6.0;
@@ -749,7 +664,7 @@ mod tests {
             let c = decode(f.bytes, 0.0).expect("decodes");
             assert!(c.data.len() > 4_000);
         }
-        assert_eq!(Snd::GatlingSpinDown as usize + 1, SNDS);
+        assert_eq!(Snd::BaseAttacked as usize + 1, SNDS);
         // the gun turret is cut to a short crack that ends in silence
         let c = decode(SFX[Snd::Gun as usize].bytes, SFX[Snd::Gun as usize].cut).unwrap();
         assert!(c.data.len() / 2 <= (0.21 * c.rate as f32) as usize);

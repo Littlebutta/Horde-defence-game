@@ -445,12 +445,28 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     }
     extern "C" fn window_did_become_key(this: &Object, _: Sel, _: ObjcId) {
         let payload = get_window_payload(this);
+        // patched for Pixel Horde: a grabbed cursor is held again when the window comes back
+        crate::window::set_focus(true);
+        if payload.cursor_grabbed {
+            unsafe {
+                CGAssociateMouseAndMouseCursorPosition(false);
+                let () = msg_send![class!(NSCursor), hide];
+            }
+        }
         if let Some(event_handler) = payload.context() {
             event_handler.window_restored_event();
         }
     }
     extern "C" fn window_did_resign_key(this: &Object, _: Sel, _: ObjcId) {
         let payload = get_window_payload(this);
+        // patched for Pixel Horde: switching to another app lets the cursor go and shows it
+        crate::window::set_focus(false);
+        if payload.cursor_grabbed {
+            unsafe {
+                let () = msg_send![class!(NSCursor), unhide];
+                CGAssociateMouseAndMouseCursorPosition(true);
+            }
+        }
         if let Some(event_handler) = payload.context() {
             event_handler.window_minimized_event();
         }

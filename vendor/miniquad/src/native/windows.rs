@@ -106,6 +106,8 @@ pub(crate) struct WindowsDisplay {
     window_scale: f32,
     mouse_scale: f32,
     show_cursor: bool,
+    /// patched for Pixel Horde: whether the OS cursor is hidden right now (only while focused)
+    os_hidden: bool,
     user_cursor: bool,
     mouse_x: f32,
     mouse_y: f32,
@@ -132,10 +134,8 @@ impl WindowsDisplay {
         }
     }
     fn show_mouse(&mut self, shown: bool) {
-        if self.show_cursor != shown {
-            self.show_cursor = shown;
-            unsafe { ShowCursor(shown.into()) };
-        }
+        self.show_cursor = shown;
+        apply_cursor(&mut self.os_hidden, shown);
     }
     /// Set IME candidate window position in client coordinates
     fn set_ime_position(&mut self, x: i32, y: i32) {
@@ -324,7 +324,21 @@ fn get_win_style(is_fullscreen: bool, is_resizable: bool) -> DWORD {
     }
 }
 
+/// patched for Pixel Horde: the OS cursor is only hidden while the window has focus, so it
+/// stays visible over other programs and other monitors
+fn apply_cursor(os_hidden: &mut bool, shown: bool) {
+    let hide = !shown && crate::window::has_focus();
+    if hide != *os_hidden {
+        *os_hidden = hide;
+        unsafe { ShowCursor((!hide).into()) };
+    }
+}
+
 unsafe fn update_clip_rect(hwnd: HWND) {
+    // patched for Pixel Horde: never hold the cursor while another window has focus
+    if GetForegroundWindow() != hwnd {
+        return;
+    }
     // Retrieve the screen coordinates of the client area,
     // and convert them into client coordinates.
     let mut rect: RECT = std::mem::zeroed();
@@ -763,12 +777,16 @@ unsafe extern "system" fn win32_wndproc(
         WM_ACTIVATE => {
             if LOWORD(wparam as _) == WA_ACTIVE || LOWORD(wparam as _) == WA_CLICKACTIVE {
                 // patched for Pixel Horde: a grabbed cursor is held again when the window comes back
+                crate::window::set_focus(true);
+                apply_cursor(&mut payload.os_hidden, payload.show_cursor);
                 if payload.cursor_grabbed {
                     update_clip_rect(hwnd);
                 }
                 event_handler.window_restored_event();
             } else {
-                // patched for Pixel Horde: alt-tabbing away lets the cursor go
+                // patched for Pixel Horde: alt-tabbing away lets the cursor go and shows it again
+                crate::window::set_focus(false);
+                apply_cursor(&mut payload.os_hidden, payload.show_cursor);
                 ClipCursor(NULL as _);
                 event_handler.window_minimized_event();
             }
@@ -1190,6 +1208,7 @@ where
             mouse_x: 0.,
             mouse_y: 0.,
             show_cursor: true,
+            os_hidden: false,
             user_cursor: false,
             cursor: std::ptr::null_mut(),
             libopengl32,
