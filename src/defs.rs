@@ -35,6 +35,8 @@ pub enum S {
     Custom,
     /// a wall that lets civilians and the player's troops through but holds the horde back
     Gate,
+    /// a marksman's nest on a rooftop, aimed in a direction
+    Sniper,
 }
 impl S {
     /// Walls and gates: low, cheap, laid in lines on the 3-cell grid.
@@ -42,11 +44,12 @@ impl S {
         matches!(self, S::Wall | S::Gate)
     }
 }
-pub const BUILD_ORDER: [S; 19] = [
+pub const BUILD_ORDER: [S; 20] = [
     S::Wall,
     S::Gate,
     S::Bunker,
     S::Gun,
+    S::Sniper,
     S::Cannon,
     S::Flame,
     S::Rail,
@@ -99,6 +102,25 @@ pub fn logi_cap(level: u8) -> u32 {
 }
 
 /// Seconds a structure takes to build once placed (scaffolding goes up, then sinks away).
+/// Rooftops: how much further a turret reaches standing `base` cells up (higher roofs, further).
+pub fn height_mult(base: f32) -> f32 {
+    if base <= 0.0 {
+        1.0
+    } else {
+        (1.2 + 0.03 * base).min(2.4)
+    }
+}
+/// Roofs up to this many cells high let a turret shoot straight down; above it there's a blind
+/// ring under it that grows with the height.
+pub const DEAD_FROM: f32 = 10.0;
+/// The blind ring under a turret standing `base` cells up with reach `range` (0: none).
+pub fn dead_zone(base: f32, range: f32) -> f32 {
+    if base <= DEAD_FROM {
+        0.0
+    } else {
+        ((base - DEAD_FROM) * 1.1).min(range * 0.4)
+    }
+}
 pub fn build_time(t: S) -> f32 {
     match t {
         S::Hq => 0.0,
@@ -158,8 +180,9 @@ const BASE: Def = Def {
 pub fn def(s: S) -> &'static Def {
     static WALL: Def = Def { key: '1', name: "Wall", w: 3, h: 3, hp: 300.0, cost: 3.0, ht: 2.2, top: rgb(139, 147, 159), side: rgb(93, 100, 112), tip: "Drag across a street to seal it. Corners that touch still block. Hordes chew through when there is no other way.", ..BASE };
     static GATE: Def = Def { key: '=', name: "Gate", w: 3, h: 3, hp: 450.0, cost: 6.0, ht: 2.2, top: rgb(240, 180, 40), side: rgb(110, 104, 92), tip: "A wall your civilians and troops can walk through, but the horde can't. Drag it across a street to keep it open for your side only. The horde still chews through when there is no other way.", ..BASE };
-    static GUN: Def = Def { key: '2', name: "Gun turret", w: 5, h: 5, hp: 220.0, cost: 90.0, ht: 3.0, top: rgb(255, 212, 59), side: rgb(184, 147, 31), range: 46.0, rate: 0.16, dmg: 14.0, rad: 1.3, ammo: 1.0, turret: true, tip: "Fast, 1 ammo per shot. Click a rooftop for +60% range (it falls with the building). Base price inside the base zone; outside it costs more the further from the HQ it goes and is flown in by helicopter.", ..BASE };
-    static CANNON: Def = Def { key: '3', name: "Cannon", w: 7, h: 7, hp: 420.0, cost: 240.0, ht: 3.5, top: rgb(255, 146, 43), side: rgb(184, 100, 15), range: 80.0, rate: 1.4, dmg: 70.0, rad: 5.0, ammo: 6.0, bdmg: 6.0, turret: true, tip: "Slow splash damage, 6 ammo per shell. Rooftops give +60% range. Base price inside the base zone; outside it costs more the further from the HQ it goes.", ..BASE };
+    static GUN: Def = Def { key: '2', name: "Gun turret", w: 5, h: 5, hp: 220.0, cost: 90.0, ht: 3.0, top: rgb(255, 212, 59), side: rgb(184, 147, 31), range: 46.0, rate: 0.16, dmg: 14.0, rad: 1.3, ammo: 1.0, turret: true, tip: "Fast, 1 ammo per shot. Click a rooftop for more range the higher it is (tall roofs can't shoot straight down; it falls with the building). Base price inside the base zone; outside it costs more the further from the HQ it goes and is flown in by helicopter.", ..BASE };
+    static SNIPER: Def = Def { key: 'k', name: "Sniper nest", w: 3, h: 3, hp: 160.0, cost: 140.0, ht: 1.2, top: rgb(130, 160, 110), side: rgb(80, 100, 66), range: 105.0, rate: 1.6, dmg: 170.0, rad: 0.9, ammo: 1.0, turret: true, tip: "A marksman for rooftops and bunkers only. Click it, then right-click to aim it: it fires down that direction (a 50° cone) at long range, each round punching through a line of the horde. The higher the roof the further it sees, but tall roofs can't shoot straight down.", ..BASE };
+    static CANNON: Def = Def { key: '3', name: "Cannon", w: 7, h: 7, hp: 420.0, cost: 240.0, ht: 3.5, top: rgb(255, 146, 43), side: rgb(184, 100, 15), range: 80.0, rate: 1.4, dmg: 70.0, rad: 5.0, ammo: 6.0, bdmg: 6.0, turret: true, tip: "Slow splash damage, 6 ammo per shell. Rooftops give more range the higher they are (tall ones can't shoot straight down). Base price inside the base zone; outside it costs more the further from the HQ it goes.", ..BASE };
     static EXT: Def = Def {
         key: '4',
         name: "Scrap extractor",
@@ -240,13 +263,13 @@ pub fn def(s: S) -> &'static Def {
         ..BASE
     };
     static FLAME: Def = Def { key: 'b', name: "Flame bunker", w: 6, h: 6, hp: 1600.0, cost: 280.0, ht: 2.4, top: rgb(240, 101, 46), side: rgb(150, 52, 20), range: 20.0, rate: 1.8, dmg: 3.0, rad: 2.6, ammo: 5.0, bdmg: 0.0, turret: true, ground: true, tip: "Very tough, short range, burns right up to its walls. Sprays fire for a second, leaving burning napalm, then pauses; it won't hit a spot again until the napalm there is out. 5 ammo a spray. Ground only.", ..BASE };
-    static RAIL: Def = Def { key: 'n', name: "Railgun", w: 7, h: 7, hp: 520.0, cost: 750.0, ht: 4.0, top: rgb(116, 192, 252), side: rgb(35, 90, 150), range: 120.0, rate: 3.5, dmg: 400.0, rad: 2.4, ammo: 30.0, turret: true, tip: "Picks the line through the most of the horde, leading their movement, charges for a moment, then a slug destroys everything in a wide straight line to the end of its range. 30 ammo a shot. Rooftops give +60% range.", ..BASE };
-    static HELIUM: Def = Def { key: 'i', name: "Helium tower", w: 6, h: 6, hp: 450.0, cost: 380.0, ht: 4.5, top: rgb(165, 216, 255), side: rgb(70, 130, 190), range: 30.0, turret: true, tip: "Sprays liquid helium around it: everything in the field moves at 40% speed. Needs no ammo. Rooftops give +60% range.", ..BASE };
+    static RAIL: Def = Def { key: 'n', name: "Railgun", w: 7, h: 7, hp: 520.0, cost: 750.0, ht: 4.0, top: rgb(116, 192, 252), side: rgb(35, 90, 150), range: 120.0, rate: 3.5, dmg: 400.0, rad: 2.4, ammo: 30.0, turret: true, tip: "Picks the line through the most of the horde, leading their movement, charges for a moment, then a slug destroys everything in a wide straight line to the end of its range. 30 ammo a shot. Rooftops give more range the higher they are (tall ones can't shoot straight down).", ..BASE };
+    static HELIUM: Def = Def { key: 'i', name: "Helium tower", w: 6, h: 6, hp: 450.0, cost: 380.0, ht: 4.5, top: rgb(165, 216, 255), side: rgb(70, 130, 190), range: 30.0, turret: true, tip: "Sprays liquid helium around it: everything in the field moves at 40% speed. Needs no ammo. Rooftops give more range the higher they are (tall ones can't shoot straight down).", ..BASE };
     static ARTY: Def = Def { key: 'y', name: "Artillery", w: 9, h: 9, hp: 1000.0, cost: 1800.0, ht: 3.0, top: rgb(134, 142, 150), side: rgb(73, 80, 87), range: 0.0, rate: 4.0, dmg: 140.0, rad: 10.0, ammo: 45.0, bdmg: 25.0, turret: true, ground: true, tip: "Lobs heavy shells anywhere on the map. Click it, then right-click a target; it keeps firing there until you pick another spot or cease fire. 45 ammo a shell.", ..BASE };
     static HELIPAD: Def = Def { key: 'u', name: "Heli pad", w: 11, h: 11, hp: 800.0, cost: 1500.0, ht: 0.6, top: rgb(73, 80, 87), side: rgb(40, 44, 50), zone: true, tip: "Keeps a gunship of its own. Click the pad, then right-click anywhere: the gunship flies there for free and fires for 20 s (right-click again to move it), then returns to rearm for 35 s. Base zone only.", ..BASE };
     static RESCUE: Def = Def { key: 'j', name: "Rescue station", w: 9, h: 9, hp: 600.0, cost: 500.0, ht: 3.2, top: rgb(105, 219, 124), side: rgb(43, 138, 62), zone: true, tip: "Every 25 s sends a rescue team to the biggest group of civilians it can reach safely and walks them back to the base. Base zone only.", ..BASE };
     static SDEPOT: Def = Def { key: '0', name: "Scrap depot", w: 7, h: 7, hp: 500.0, cost: 250.0, ht: 2.6, top: rgb(56, 217, 169), side: rgb(18, 134, 106), zone: true, tip: "Stores 2500 more scrap (you start with room for 2500). Base zone only.", ..BASE };
-    static BUNKER: Def = Def { key: '-', name: "Bunker", w: 7, h: 7, hp: 1400.0, cost: 150.0, ht: 2.4, top: rgb(150, 156, 122), side: rgb(92, 98, 72), tip: "A concrete bunker. Right-click it with a squad selected to send them in: they fire from the slits with +60% range and are safe until it falls, when 3 in 4 of them die. Any number of troops fit. Research turret mounts to put a turret on top for the rooftop range bonus.", ..BASE };
+    static BUNKER: Def = Def { key: '-', name: "Bunker", w: 7, h: 7, hp: 1400.0, cost: 150.0, ht: 2.4, top: rgb(150, 156, 122), side: rgb(92, 98, 72), tip: "A concrete bunker. Right-click it with a squad selected to send them in: they fire from the slits with +60% range and are safe until it falls, when 3 in 4 of them die. Up to three squads fit. Research turret mounts to put a turret on top for the rooftop range bonus.", ..BASE };
     static CUSTOM: Def = Def { key: ' ', name: "Custom turret", w: 6, h: 6, hp: 300.0, cost: 0.0, ht: 2.6, top: rgb(150, 160, 140), side: rgb(90, 96, 86), range: 40.0, turret: true, tip: "A turret you built in the garage. Any of them can go on a rooftop or a bunker: the higher the roof and the taller its mount, the further it reaches.", ..BASE };
     static ADEPOT: Def = Def { key: 'v', name: "Ammo depot", w: 7, h: 7, hp: 500.0, cost: 250.0, ht: 2.6, top: rgb(198, 154, 116), side: rgb(134, 96, 63), zone: true, tip: "Stores 2000 more ammo (you start with room for 1500). Base zone only.", ..BASE };
     match s {
@@ -262,6 +285,7 @@ pub fn def(s: S) -> &'static Def {
         S::Rescue => &RESCUE,
         S::Wall => &WALL,
         S::Gate => &GATE,
+        S::Sniper => &SNIPER,
         S::Gun => &GUN,
         S::Cannon => &CANNON,
         S::Extractor => &EXT,
@@ -296,7 +320,7 @@ pub struct UDef {
     pub tip: &'static str,
 }
 pub fn udef(u: U) -> &'static UDef {
-    static RIFLE: UDef = UDef { key: '8', name: "Rifle squad", cost: 60.0, n: 6, hp: 30.0, spd: 14.0, range: 24.0, rate: 0.5, dmg: 9.0, rad: 1.0, ammo: 0.0, bdmg: 0.0, col: rgb(28, 126, 214), tip: "Six soldiers march from the HQ and hold where you click, spread out in a line. They need no ammo. Click a building or a bunker to garrison it (+60% range). Select units with left click, send them with right click." };
+    static RIFLE: UDef = UDef { key: '8', name: "Rifle squad", cost: 60.0, n: 6, hp: 30.0, spd: 14.0, range: 24.0, rate: 0.5, dmg: 9.0, rad: 1.0, ammo: 0.0, bdmg: 0.0, col: rgb(28, 126, 214), tip: "Six soldiers march from the HQ and hold where you click, spread out in a line. They need no ammo. Click a building or a bunker to garrison it (+60% range, three squads at most). Select units with left click, send them with right click." };
     static TANK: UDef = UDef { key: '9', name: "Tank", cost: 300.0, n: 1, hp: 600.0, spd: 18.0, range: 44.0, rate: 1.1, dmg: 45.0, rad: 3.5, ammo: 2.0, bdmg: 4.0, col: rgb(24, 100, 171), tip: "Drives from the HQ and shells the thickest part of the horde. Tough, but each shell costs 2 ammo. Left click to select, right click to move." };
     match u {
         U::Rifle => &RIFLE,
@@ -368,7 +392,7 @@ pub fn rdef(r: R) -> &'static RDef {
     static PRESSES: RDef = RDef { name: "Shell presses", tip: "Ammo plants make 10 ammo a second instead of 6 from the same scrap", cost: 800.0, civs: 180 };
     static BARRELS: RDef = RDef { name: "Long barrels", tip: "Turrets reach 25% further", cost: 1000.0, civs: 220 };
     static NAPALM: RDef = RDef { name: "Napalm bombs", tip: "Every airstrike bomb leaves a pool of burning napalm that hurts anything passing through it for 10 s", cost: 1100.0, civs: 260 };
-    static MOUNTS: RDef = RDef { name: "Turret mounts", tip: "A turret can be built on top of a bunker, where it gets the rooftop range bonus (+60%)", cost: 600.0, civs: 140 };
+    static MOUNTS: RDef = RDef { name: "Turret mounts", tip: "A turret can be built on top of a bunker, where it gets the rooftop range bonus", cost: 600.0, civs: 140 };
     static PERIMETER: RDef = RDef { name: "Perimeter wall", tip: "A solid wall rings the base zone, with gates across every street so civilians and troops can still get in. It follows the zone out when an outpost pushes it", cost: 500.0, civs: 120 };
     match r {
         R::Perimeter => &PERIMETER,

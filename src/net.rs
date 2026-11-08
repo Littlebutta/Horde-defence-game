@@ -65,7 +65,7 @@ impl Cmd {
     }
 }
 
-const ALL_S: [S; 21] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue, S::ScrapDepot, S::AmmoDepot, S::Bunker, S::Custom, S::Gate];
+const ALL_S: [S; 22] = [S::Wall, S::Gun, S::Cannon, S::Extractor, S::Plant, S::Silo, S::Pad, S::Outpost, S::Lab, S::Hq, S::Flame, S::Rail, S::Helium, S::Artillery, S::Helipad, S::Rescue, S::ScrapDepot, S::AmmoDepot, S::Bunker, S::Custom, S::Gate, S::Sniper];
 const ALL_U: [U; 2] = [U::Rifle, U::Tank];
 
 fn s_id(t: S) -> u32 {

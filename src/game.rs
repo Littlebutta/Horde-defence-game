@@ -59,6 +59,10 @@ pub struct Structure {
 }
 /// The targeting a player can set on a turret (`Structure::prio`). Each still looks for the spot
 /// that catches the most of the horde within the part of its range the choice picks.
+/// A sniper nest fires within this many radians either side of where it's aimed, and its round
+/// carries on through this many more spots behind the target.
+pub const SNIPER_CONE: f32 = 0.44;
+pub const SNIPER_PIERCE: usize = 8;
 pub const PRIOS: [&str; 5] = ["Default", "Nearest", "Biggest crowd", "Closest to HQ", "Furthest"];
 impl Structure {
     /// Up on a roof or a bunker: no footprint on the ground, and the rooftop range bonus.
@@ -305,6 +309,7 @@ pub struct Boom {
 /// Sound cues the sim raises for the app to play (not part of the checksum or net state).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Sfx {
+    Sniper,
     Cannon,
     Flame,
     Railgun,
@@ -1295,6 +1300,10 @@ impl Game {
 
     pub fn can_place(&self, t: S, x: i32, y: i32) -> bool {
         let d = def(t);
+        // snipers only go on roofs and bunkers
+        if t == S::Sniper {
+            return false;
+        }
         if x < 1 || y < 1 || x + d.w >= W as i32 || y + d.h >= H as i32 {
             return false;
         }
@@ -1460,13 +1469,34 @@ impl Game {
         };
         def(t).range * if roof { 1.6 } else { 1.0 } * if self.res(o).barrels { 1.25 } else { 1.0 } * up
     }
+    /// Range of structure `i` where it stands: the higher its roof, the further it reaches.
+    pub fn struct_range(&self, i: usize) -> f32 {
+        let s = &self.structs[i];
+        let base = self.struct_base(i);
+        let o = s.owner as usize;
+        if let (S::Custom, Some(cu)) = (s.t, s.cu.as_ref()) {
+            return self.custom_range(&self.designs[cu.d as usize].spec, base, o);
+        }
+        self.turret_range(s.t, false, o) * height_mult(base)
+    }
+    /// The blind ring under structure `i` (tall roofs can't shoot straight down).
+    pub fn struct_dead(&self, i: usize) -> f32 {
+        let s = &self.structs[i];
+        if s.cu.as_ref().is_some_and(|c| {
+            let sp = &self.designs[c.d as usize].spec;
+            sp.mech > 0.0 || sp.leash > 0.0
+        }) {
+            return 0.0;
+        }
+        dead_zone(self.struct_base(i), self.struct_range(i))
+    }
     /// Range of turret `t` standing `base` cells up (custom turrets reach further the higher they
     /// stand; the rest get the flat rooftop bonus).
     pub fn turret_range_on(&self, t: S, base: f32, o: usize) -> f32 {
         if t == S::Custom {
             return self.cur_design(o).map_or(0.0, |d| self.custom_range(&d.spec, base, o));
         }
-        self.turret_range(t, base > 0.0, o)
+        self.turret_range(t, false, o) * height_mult(base)
     }
     /// Height a structure stands at: a building's roof, a bunker's top, or the ground.
     pub fn struct_base(&self, i: usize) -> f32 {
@@ -2891,7 +2921,7 @@ impl Game {
         for i in 0..self.structs.len() {
             let (t, center, up) = {
                 let s = &self.structs[i];
-                if s.dead || s.pending || !matches!(s.t, S::Gun | S::Cannon) {
+                if s.dead || s.pending || !matches!(s.t, S::Gun | S::Cannon | S::Sniper) {
                     continue;
                 }
                 (s.t, s.center(), s.up())
@@ -2902,22 +2932,33 @@ impl Game {
             if self.structs[i].cd > 0.0 || self.ammo < d.ammo {
                 continue;
             }
-            let range = self.turret_range(t, up, o);
+            let _ = up;
+            let range = self.struct_range(i);
+            let dead = self.struct_dead(i);
+            if t == S::Sniper {
+                self.sniper(i, range, dead, &mut claimed);
+                continue;
+            }
             // every other turret in reach of a war-drum orc goes for it
-            let drum = if i % 2 == 0 { self.drummer_in_range(center, range) } else { None };
-            let prio = self.structs[i].prio;
+            let drum = if i % 2 == 0 { self.drummer_in_range(center, range).filter(|p| p.distance(center) >= dead) } else { None };
+            // a tall roof can't see straight down: that turret works out its spot past the blind ring
+            let prio = match self.structs[i].prio {
+                0 if dead > 0.0 => if t == S::Gun { 1 } else { 2 },
+                p => p,
+            };
+            let ok = move |p: Vec2| p.distance(center) >= dead;
             let tg = if let Some(p) = drum {
                 Some(p)
             } else if prio > 0 {
                 let rad = if t == S::Gun { 1.0 } else { d.rad * self.rad_mult(t, o) };
                 let tg = if t == S::Gun {
-                    let p = self.prio_target(center, range, rad, prio, &[], &claimed, &|_| true);
+                    let p = self.prio_target(center, range, rad, prio, &[], &claimed, &ok);
                     if let Some(p) = p {
                         claimed.push(p.y as usize * W + p.x as usize);
                     }
                     p
                 } else {
-                    let p = self.prio_target(center, range, rad, prio, &shells, &[], &|_| true);
+                    let p = self.prio_target(center, range, rad, prio, &shells, &[], &ok);
                     if let Some(p) = p {
                         shells.push((p, rad));
                     }
@@ -3160,7 +3201,65 @@ impl Game {
     }
     /// Turrets whose targeting the player can set.
     pub fn has_prio(t: S) -> bool {
-        matches!(t, S::Gun | S::Cannon | S::Custom)
+        matches!(t, S::Gun | S::Cannon | S::Custom | S::Sniper)
+    }
+
+    /// A sniper nest's turn: the best spot in its cone (50° about where it's aimed, past its blind
+    /// ring), a round that punches through a line of the horde behind it.
+    fn sniper(&mut self, i: usize, range: f32, dead: f32, claimed: &mut Vec<usize>) {
+        let (c, o, prio) = {
+            let s = &self.structs[i];
+            (s.center(), s.owner as usize, s.prio)
+        };
+        let face = match self.structs[i].target {
+            Some(t) => libm::atan2f(t.y - c.y, t.x - c.x),
+            None => libm::atan2f(c.y - self.world.hq.y, c.x - self.world.hq.x),
+        };
+        let half = SNIPER_CONE;
+        let ok = move |p: Vec2| {
+            let d = p.distance(c);
+            if d < dead.max(2.0) || d > range {
+                return false;
+            }
+            let mut a = libm::atan2f(p.y - c.y, p.x - c.x) - face;
+            while a > std::f32::consts::PI {
+                a -= std::f32::consts::TAU;
+            }
+            while a < -std::f32::consts::PI {
+                a += std::f32::consts::TAU;
+            }
+            a.abs() <= half
+        };
+        let drum = self.drummer_in_range(c, range).filter(|p| ok(*p));
+        let tg = drum.or_else(|| self.prio_target(c, range, 1.0, if prio == 0 { 2 } else { prio }, &[], claimed, &ok));
+        let Some(tg) = tg else {
+            // idles looking down its line
+            self.structs[i].aim = face;
+            return;
+        };
+        let d = def(S::Sniper);
+        claimed.push(tg.y as usize * W + tg.x as usize);
+        let src = self.rev_src(RevKey::Struct(i));
+        let dmg = d.dmg * self.dmg_mult(S::Sniper, o);
+        let dir = (tg - c).normalize_or_zero();
+        self.blast(tg, d.rad, dmg, 0.0, src, 0.0);
+        // the round carries on through the crowd behind
+        for k in 1..=SNIPER_PIERCE {
+            let p = tg + dir * (k as f32 * 1.5);
+            if p.x < 1.0 || p.y < 1.0 || p.x >= W as f32 - 1.0 || p.y >= H as f32 - 1.0 {
+                break;
+            }
+            self.blast(p, 0.8, dmg * 0.6, 0.0, src, 0.0);
+        }
+        self.ammo -= d.ammo;
+        let base = self.struct_base(i);
+        let cd = self.reload(S::Sniper, o);
+        let s = &mut self.structs[i];
+        s.cd = cd;
+        s.last_fire = self.time;
+        s.aim = libm::atan2f(tg.y - c.y, tg.x - c.x);
+        self.tracers.push(Tracer { a: c, az: base + d.ht, b: tg + dir * (SNIPER_PIERCE as f32 * 1.5), t: 0.12, kind: 0 });
+        self.sfx.push((Sfx::Sniper, c));
     }
 
     /// The nearest occupied cell within `r`, skipping cells next to ones in `claimed` (so gun
@@ -3261,7 +3360,7 @@ impl Game {
         }
         let p = p.clamp(vec2(1.0, 1.0), vec2(W as f32 - 2.0, H as f32 - 2.0));
         match self.structs[i].t {
-            S::Artillery => {
+            S::Artillery | S::Sniper => {
                 self.structs[i].target = Some(p);
                 true
             }
@@ -5338,6 +5437,72 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sniper only goes on a roof, fires down where it's aimed (not behind it), and a tall
+    /// roof leaves a blind ring under it.
+    #[test]
+    fn sniper_fires_where_aimed() {
+        let mut g = Game::new(crate::citygen::generate(11), 0, 1.0, 7);
+        g.scrap = 1e6;
+        g.ammo = 1e6;
+        g.ammo_cap = 1e7;
+        g.set_hq_level(0, HQ_MAX);
+        let hq = g.world.hq;
+        assert!(!g.place(S::Sniper, hq.x as i32 + 30, hq.y as i32 + 30));
+        let b = (0..g.world.buildings.len())
+            .filter(|&b| {
+                let c = g.world.buildings[b].c;
+                g.world.buildings[b].alive && c.distance(hq) > 60.0 && c.x > 80.0 && c.y > 80.0 && c.x < W as f32 - 80.0 && c.y < H as f32 - 80.0
+            })
+            .find(|&b| g.can_place_roof(S::Sniper, b, g.world.buildings[b].c))
+            .expect("a roof");
+        let c = g.world.buildings[b].c;
+        assert!(g.place_roof(S::Sniper, b, c));
+        let i = g.structs.len() - 1;
+        for _ in 0..4000 {
+            if !g.structs[i].pending {
+                break;
+            }
+            g.tick();
+        }
+        assert!(!g.structs[i].pending);
+        assert!(g.aim(i, c + vec2(40.0, 0.0)));
+        g.queue((c.x - 40.0, c.y), 400.0, 2.0);
+        let ammo = g.ammo;
+        for _ in 0..60 {
+            g.tick();
+        }
+        assert_eq!(g.ammo, ammo, "fired behind itself");
+        g.queue((c.x + 40.0, c.y), 400.0, 2.0);
+        for _ in 0..90 {
+            g.tick();
+        }
+        assert!(g.ammo < ammo, "never fired down its aim");
+        assert_eq!(dead_zone(DEAD_FROM, 100.0), 0.0);
+        assert!(dead_zone(30.0, 100.0) > 10.0);
+        assert!(height_mult(30.0) > height_mult(8.0));
+    }
+
+    /// Squads take a moment to leave the HQ, and a building holds three squads at most.
+    #[test]
+    fn musters_and_garrison_cap() {
+        let mut g = Game::new(crate::citygen::generate(11), 0, 1.0, 7);
+        g.scrap = 1e6;
+        g.set_hq_level(0, HQ_MAX);
+        let hq = g.world.hq;
+        let b = (0..g.world.buildings.len()).filter(|&b| g.world.buildings[b].alive).min_by_key(|&b| g.world.buildings[b].c.distance(hq) as i32).expect("a building");
+        let c = g.world.buildings[b].c;
+        assert!(g.deploy(U::Rifle, c));
+        assert!(g.groups.is_empty() && g.musters.len() == 1);
+        for _ in 0..((muster_time(U::Rifle) / DT) as usize + 2) {
+            g.tick();
+        }
+        assert_eq!(g.groups.len(), 1);
+        assert!(g.deploy(U::Rifle, c));
+        assert!(g.deploy(U::Rifle, c));
+        assert!(!g.deploy(U::Rifle, c), "a fourth squad fit in");
+        assert!(g.garrison_full(U::Rifle, c, None, 6));
+    }
 
     /// Cells reachable on open ground from the HQ, over `obj`.
     fn reach(g: &Game, obj: &[i32]) -> Vec<u32> {

@@ -215,6 +215,7 @@ pub fn structure(mb: &mut MB, g: &Game, i: usize, s: &Structure, base: f32, t: f
             top
         }
         S::Gun => gun(mb, d, c, w, h, base, s.aim),
+        S::Sniper => sniper(mb, d, c, base, s.aim),
         S::Custom => super::custom::in_game(mb, g, s, base, t),
         S::Cannon => cannon(mb, d, c, w, h, base, s.aim),
         S::Extractor => extractor(mb, d, c, w, h, base, t),
@@ -652,6 +653,22 @@ fn bunker(mb: &mut MB, d: &Def, c: Vec2, w: f32, h: f32, base: f32, manned: bool
     band(mb, &hi, z1 - 0.3, z1 - 0.12, d.top);
     cyl(mb, c, 1.1, z1, z1 + 0.18, STEEL, STEEL_DARK);
     z1
+}
+
+/// A sniper's nest: a ring of sandbags, the marksman lying behind a long thin rifle.
+fn sniper(mb: &mut MB, d: &Def, c: Vec2, base: f32, aim: f32) -> f32 {
+    let ring = ngon(c, 1.45, 10, 0.0);
+    loft(mb, &ring, &shrink(&ring, 0.35), base + 0.05, base + 0.75, Some(mix(rgb(196, 180, 140), d.top, 0.35)), mix(rgb(150, 136, 100), d.side, 0.35));
+    mb.poly_at(&shrink(&ring, 0.4), base + 0.1, mix(d.side, BLACK, 0.3));
+    let fwd = vec2(aim.cos(), aim.sin());
+    let side = vec2(-fwd.y, fwd.x);
+    // the marksman: a long body behind the gun
+    block(mb, &rect(c - fwd * 0.2, -0.85, -0.3, 0.3, 0.3, aim), base + 0.15, base + 0.55, d.top, d.side);
+    lamp(mb, c + fwd * 0.45, base + 0.6, 0.24, mix(d.top, WHITE, 0.15));
+    // the rifle, its scope and the muzzle poking over the bags
+    beam(mb, c + fwd * 0.3, c + fwd * 2.4, 0.09, base + 0.75, STEEL_DARK);
+    beam(mb, c + fwd * 0.4 + side * 0.0, c + fwd * 0.95, 0.12, base + 0.92, STEEL);
+    base + 1.0
 }
 
 /// A sandbagged concrete emplacement with a turning head and twin barrels.

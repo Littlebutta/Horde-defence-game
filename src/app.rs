@@ -1184,6 +1184,7 @@ impl App {
                 continue;
             }
             let (snd, gain, speed) = match s {
+                Sfx::Sniper => (music::Snd::Gun, 0.3, 0.62 * jitter),
                 Sfx::Cannon => (music::Snd::Cannon, 0.55, jitter),
                 Sfx::Flame => (music::Snd::Flame, 0.3, jitter),
                 Sfx::Railgun => (music::Snd::Railgun, 0.8, jitter),
@@ -2800,6 +2801,33 @@ impl App {
         self.ui_rects.iter().any(|r| r.contains(m))
     }
 
+    /// A turret's reach on the ground: its range ring and, under a tall roof, the blind ring it
+    /// can't shoot into (shaded red).
+    fn reach_marks(c: Vec2, range: f32, dead: f32) {
+        draw_circle_lines(c.x, c.y, range, 0.5, rgba(255, 212, 59, 0.7));
+        if dead > 0.0 {
+            draw_circle(c.x, c.y, dead, rgba(250, 82, 82, 0.16));
+            draw_circle_lines(c.x, c.y, dead, 0.5, rgba(250, 82, 82, 0.8));
+        }
+    }
+    /// A sniper's field of fire: the wedge between its blind ring and its range around `face`.
+    fn cone_marks(c: Vec2, range: f32, dead: f32, face: f32, half: f32, col: Color) {
+        let r0 = dead.max(2.0);
+        let dir = |a: f32| vec2(a.cos(), a.sin());
+        for a in [face - half, face + half] {
+            let (p, q) = (c + dir(a) * r0, c + dir(a) * range);
+            draw_line(p.x, p.y, q.x, q.y, 0.5, col);
+        }
+        let n = 16;
+        for k in 0..n {
+            let a0 = face - half + 2.0 * half * k as f32 / n as f32;
+            let a1 = face - half + 2.0 * half * (k + 1) as f32 / n as f32;
+            for r in [r0, range] {
+                let (p, q) = (c + dir(a0) * r, c + dir(a1) * r);
+                draw_line(p.x, p.y, q.x, q.y, 0.5, col);
+            }
+        }
+    }
     /// Ground marks are drawn with `flat`; ghosts of buildings are real 3D boxes.
     /// The range bonus, in percent, turret `t` gets standing `base` cells up.
     fn up_bonus(&self, g: &Game, t: S, base: f32) -> f32 {
@@ -2862,13 +2890,16 @@ impl App {
                         let afford = g.scrap >= cost;
                         ghost(q.x - d.w as f32 / 2.0, q.y - d.h as f32 / 2.0, d.w as f32, d.h as f32, g.world.buildings[b].h, can && afford);
                         let hb = g.world.buildings[b].h;
-                        draw_circle_lines(q.x, q.y, g.turret_range_on(t, hb, self.me()), 0.4, rgba(255, 212, 59, 0.6));
+                        let range = g.turret_range_on(t, hb, self.me());
+                        let dead = dead_zone(hb, range);
+                        Self::reach_marks(q, range, dead);
                         let extra = cost - d.cost;
+                        let blind = if dead > 0.0 { format!("  blind within {:.0}", dead) } else { String::new() };
                         let s = if !can {
                             "Rooftop full".to_string()
                         } else {
                             format!(
-                                "Rooftop  ${:.0}{}  +{:.0}% range",
+                                "Rooftop  ${:.0}{}  +{:.0}% range{blind}",
                                 cost,
                                 if extra > 0.0 {
                                     format!(" (+{:.0} distance)", extra)
@@ -2906,7 +2937,9 @@ impl App {
                         extra += cost - d.cost;
                         n_ok += 1;
                     } else if reason.is_empty() {
-                        reason = if g.hive_blocks(c) {
+                        reason = if t == S::Sniper {
+                            "Rooftops and bunkers only"
+                        } else if g.hive_blocks(c) {
                             "A hive is too close"
                         } else if g.world.irradiated_at(c) {
                             "Radiation"
@@ -3031,6 +3064,21 @@ impl App {
                     S::Helipad => {
                         draw_circle_lines(mw.x, mw.y, 25.0 + 34.0, 0.6, rgba(255, 212, 59, 0.8));
                         Some(("Right-click to send the gunship here".into(), WHITE))
+                    }
+                    t if Game::has_prio(t) => {
+                        let c = s.center();
+                        let c = s.cu.as_ref().map_or(c, |cu| cu.pos);
+                        let range = g.struct_range(i);
+                        let dead = g.struct_dead(i);
+                        Self::reach_marks(c, range, dead);
+                        if t == S::Sniper {
+                            // where it's aimed now, and where a right-click would aim it
+                            let face = s.target.map(|p| (p - c).to_angle()).unwrap_or_else(|| (c - g.world.hq).to_angle());
+                            Self::cone_marks(c, range, dead, face, SNIPER_CONE, rgba(255, 212, 59, 0.75));
+                            Self::cone_marks(c, range, dead, (mw - c).to_angle(), SNIPER_CONE, rgba(255, 255, 255, 0.35));
+                            return Some(("Right-click to aim the sniper this way".into(), WHITE));
+                        }
+                        None
                     }
                     _ => None,
                 }
@@ -3616,7 +3664,12 @@ impl App {
         let r = Rect::new(area.x + 12.0, bar.y - 76.0, w.max(300.0), 64.0);
         self.panel(r);
         self.ui_rects.push(r);
-        let head = format!("{} · targeting{}", name, if mine { "" } else { " (a partner's turret)" });
+        let head = format!(
+            "{} · targeting{}{}",
+            name,
+            if st.t == S::Sniper { " · right-click to aim it" } else { "" },
+            if mine { "" } else { " (a partner's turret)" }
+        );
         text(&self.fonts.mono, &head, r.x + 12.0, r.y + 20.0, 12.5, p.dim);
         for (k, label) in PRIOS.iter().enumerate() {
             let b = Rect::new(r.x + 12.0 + k as f32 * (bw + 6.0), r.y + 28.0, bw, 28.0);
@@ -3770,7 +3823,7 @@ impl App {
             if self.tool != Tool::None {
                 self.tool = Tool::None;
                 self.press = None;
-            } else if let Some(si) = self.sel_struct.filter(|si| matches!(g.structs[*si].t, S::Artillery | S::Helipad)) {
+            } else if let Some(si) = self.sel_struct.filter(|si| matches!(g.structs[*si].t, S::Artillery | S::Helipad | S::Sniper)) {
                 self.act(g, Cmd::Aim(si as u32, mw));
             } else if let Some(gi) = self.selected {
                 self.act(g, Cmd::Order(gi as u32, mw));

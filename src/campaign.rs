@@ -121,7 +121,7 @@ pub enum Tech {
 pub const START_BUILDS: [S; 6] = [S::Wall, S::Gate, S::Bunker, S::Extractor, S::Pad, S::Rescue];
 
 /// The whole tree, in the order the campaign screen lists it. Saves store indices into it, so new entries go at the end.
-pub const TECH: [Tech; 45] = [
+pub const TECH: [Tech; 46] = [
     Tech::Build(S::Gun),
     Tech::Build(S::Cannon),
     Tech::Build(S::Flame),
@@ -167,11 +167,12 @@ pub const TECH: [Tech; 45] = [
     Tech::Research(R::Napalm),
     Tech::Up(Up::Muster1),
     Tech::Up(Up::Muster2),
+    Tech::Build(S::Sniper),
 ];
 
 /// Turrets that shoot ammo: the first one unlocked brings the ammo plant with it.
 fn shoots(t: S) -> bool {
-    matches!(t, S::Gun | S::Cannon | S::Flame | S::Rail | S::Artillery | S::Custom)
+    matches!(t, S::Gun | S::Cannon | S::Flame | S::Rail | S::Artillery | S::Custom | S::Sniper)
 }
 
 impl Tech {
@@ -222,6 +223,7 @@ impl Tech {
                 S::Helipad => 260,
                 S::Silo => 380,
                 S::Custom => 120,
+                S::Sniper => 90,
                 _ => 0,
             },
             Tech::Unit(_) => 150,
@@ -256,7 +258,7 @@ impl Tech {
             Tech::Up(Up::Muster2) => Some(Tech::Up(Up::Muster1)),
             Tech::Up(u) => Some(Tech::Build(updef(u).on)),
             Tech::Hq(l) if l > 2 => Some(Tech::Hq(l - 1)),
-            Tech::Build(S::Cannon | S::Flame | S::Custom) => Some(Tech::Build(S::Gun)),
+            Tech::Build(S::Cannon | S::Flame | S::Custom | S::Sniper) => Some(Tech::Build(S::Gun)),
             Tech::Build(S::Rail | S::Artillery) => Some(Tech::Build(S::Cannon)),
             Tech::Build(S::Silo) => Some(Tech::Ability(A::Air)),
             Tech::Build(S::Helipad) => Some(Tech::Ability(A::Gunship)),

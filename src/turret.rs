@@ -555,7 +555,8 @@ impl Game {
         range: f32,
         guarded: &[Vec2],
     ) -> Option<Vec2> {
-        let (face, arc, min) = (cu.face, sp.arc, sp.min_range);
+        let base = self.struct_base(i);
+        let (face, arc, min) = (cu.face, sp.arc, sp.min_range.max(if sp.mech > 0.0 || sp.leash > 0.0 { 0.0 } else { dead_zone(base, range) }));
         let ok = move |p: Vec2| {
             let d = p.distance(c);
             d <= range
@@ -1377,6 +1378,6 @@ pub fn height_mult(sp: &Spec, base: f32) -> f32 {
     if base <= 0.0 {
         1.0
     } else {
-        (1.25 + 0.035 * (base + sp.height)).min(2.2)
+        crate::defs::height_mult(base + sp.height)
     }
 }
