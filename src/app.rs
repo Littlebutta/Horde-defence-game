@@ -38,13 +38,12 @@ enum Tool {
 }
 
 /// The build bar's tabs.
-const BAR_TABS: [&str; 4] = ["Defence", "Economy", "Rescue", "Troops"];
+const BAR_TABS: [&str; 3] = ["Defence", "Economy", "Troops"];
 /// Which build bar tab a tool sits in.
 fn tab_of(t: Tool) -> usize {
     match t {
-        Tool::Build(S::Extractor | S::Plant | S::ScrapDepot | S::AmmoDepot | S::Lab) => 1,
-        Tool::Build(S::Pad | S::Rescue | S::Outpost) | Tool::Safe => 2,
-        Tool::Unit(_) => 3,
+        Tool::Build(S::Extractor | S::Plant | S::ScrapDepot | S::AmmoDepot | S::Lab | S::Pad | S::Rescue | S::Outpost) | Tool::Safe => 1,
+        Tool::Unit(_) => 2,
         _ => 0,
     }
 }
