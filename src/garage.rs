@@ -841,75 +841,75 @@ fn apply(pt: &Part, s: &mut Spec) {
         Sandbag => {
             s.hp = 150.0;
             s.traverse = 2.4;
-            s.cap = 9.0;
+            s.cap = 11.0;
             s.height = 1.0;
         }
         Pintle => {
             s.hp = k([120.0, 180.0, 0.0]);
             s.traverse = k([7.0, 9.0, 0.0]);
-            s.cap = k([8.0, 10.0, 0.0]);
+            s.cap = k([10.0, 12.0, 0.0]);
             s.height = 1.6;
         }
         Ring => {
             s.hp = k([280.0, 420.0, 600.0]);
             s.traverse = k([3.0, 3.4, 3.8]);
-            s.cap = k([14.0, 19.0, 25.0]);
+            s.cap = k([16.0, 22.0, 28.0]);
             s.height = 1.9;
         }
         Casemate => {
             s.hp = k([800.0, 1150.0, 1600.0]);
             s.traverse = 2.0;
             s.arc = 70f32.to_radians();
-            s.cap = k([20.0, 26.0, 32.0]);
+            s.cap = k([23.0, 29.0, 36.0]);
             s.dmg *= 1.1;
             s.height = 2.2;
         }
         Mast => {
             s.hp = k([170.0, 250.0, 0.0]);
             s.traverse = 2.0;
-            s.cap = k([12.0, 15.0, 0.0]);
+            s.cap = k([14.0, 17.0, 0.0]);
             s.range *= k([1.3, 1.45, 0.0]);
             s.height = k([6.0, 8.0, 0.0]);
         }
         Popup => {
             s.hp = k([420.0, 600.0, 0.0]);
             s.traverse = 3.2;
-            s.cap = k([19.0, 24.0, 0.0]);
+            s.cap = k([21.0, 27.0, 0.0]);
             s.rise = k([0.7, 0.45, 0.0]);
             s.height = 1.6;
         }
         Crane => {
             s.hp = k([320.0, 450.0, 0.0]);
             s.traverse = 2.4;
-            s.cap = k([15.0, 19.0, 0.0]);
+            s.cap = k([17.0, 22.0, 0.0]);
             s.reach = k([10.0, 16.0, 0.0]);
             s.height = 2.4;
         }
         Gyro => {
             s.hp = k([440.0, 620.0, 0.0]);
             s.traverse = k([5.0, 6.5, 0.0]);
-            s.cap = k([22.0, 29.0, 0.0]);
+            s.cap = k([25.0, 32.0, 0.0]);
             s.fire_on_move = true;
             s.height = 2.0;
         }
         Twin => {
             s.hp = k([520.0, 760.0, 0.0]);
             s.traverse = k([3.0, 3.6, 0.0]);
-            s.cap = k([30.0, 40.0, 0.0]);
+            s.cap = k([33.0, 44.0, 0.0]);
             s.twin_mount = true;
             s.height = 2.0;
         }
         Fortress => {
             s.hp = 2800.0;
             s.traverse = 1.5;
-            s.cap = 38.0;
+            s.cap = 42.0;
             s.regen += 6.0;
             s.height = 2.6;
         }
         Walker => {
             s.hp = k([360.0, 520.0, 0.0]);
             s.traverse = 3.4;
-            s.cap = k([21.0, 27.0, 0.0]);
+            s.cap = k([24.0, 30.0, 0.0]);
             s.leash = k([60.0, 90.0, 0.0]);
             s.height = 3.2;
         }
@@ -980,7 +980,7 @@ fn apply(pt: &Part, s: &mut Spec) {
         Mech => {
             s.hp = 1400.0;
             s.traverse = 2.6;
-            s.cap = 40.0;
+            s.cap = 44.0;
             s.mech = 2.2;
             s.fire_on_move = true;
             s.height = 4.2;
