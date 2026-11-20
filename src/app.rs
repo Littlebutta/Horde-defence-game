@@ -294,6 +294,10 @@ pub struct App {
     friends_at: f32,
     /// friends invited from the dialog this session
     invited: Vec<u64>,
+    /// the dialog lists friends to join instead of friends to invite
+    join_mode: bool,
+    /// Steam invites that reached this game: (friend, lobby), newest last
+    got_invites: Vec<(u64, u64)>,
     show_fps: bool,
     fullscreen: bool,
     /// anti-aliasing: 0 = 4x MSAA, 1 = off, 2 = compatible (no render target, painter's order)
@@ -524,6 +528,8 @@ impl App {
             friends: Vec::new(),
             friends_at: -10.0,
             invited: Vec::new(),
+            join_mode: false,
+            got_invites: Vec::new(),
             show_fps: st.fps,
             fullscreen: st.fullscreen,
             aa: st.aa,
@@ -625,21 +631,36 @@ impl App {
     // ------------------------------------------------------------------------------------- co-op
 
     fn net_frame(&mut self) {
-        if let Some(st) = &self.steam {
+        let join = self.steam.as_ref().and_then(|st| {
             st.tick();
-            if let Some(id) = st.take_join() {
-                if self.sess.is_none() && self.screen != Screen::Play {
-                    st.join(id);
-                    self.status = "Joining your friend's game".into();
+            st.take_join()
+        });
+        if self.steam.is_some() {
+            if let Some(id) = join {
+                self.join_lobby(id);
+            }
+            // an invite straight to the game: shown in the join list, so it works even when
+            // Steam's own "Join" button can't reach Pixel Horde
+            if let Some((who, lobby)) = self.steam.as_ref().and_then(|st| st.take_invite()) {
+                let name = self.steam.as_ref().map(|st| st.friend_name(who)).unwrap_or_default();
+                self.got_invites.retain(|(w, _)| *w != who);
+                self.got_invites.push((who, lobby));
+                if self.screen == Screen::Play {
+                    self.msg = (format!("{} invited you to co-op. Leave this game, then press Join a friend.", name), 6.0);
+                } else if self.sess.as_ref().is_some_and(|s| s.players.len() > 1 || s.in_game) {
+                    self.status = format!("{} invited you to co-op. Leave this lobby, then press Join a friend.", name);
                 } else {
-                    self.msg = ("Leave this game first to join a friend".into(), 3.0);
+                    self.open_joins();
                 }
             }
+        }
+        if let Some(st) = &self.steam {
             if let Some(r) = st.take_lobby() {
                 match r {
                     Ok((lobby, host)) => {
                         let (link, name) = (st.link(lobby), st.name());
                         self.status.clear();
+                        self.got_invites.retain(|(_, l)| *l != lobby);
                         self.sess = Some(if host {
                             net::Session::new_host(link, name)
                         } else {
@@ -818,6 +839,25 @@ impl App {
         std::process::exit(0);
     }
 
+    /// Joins a friend's co-op lobby, leaving our own if nobody else is in it yet.
+    pub(super) fn join_lobby(&mut self, id: u64) {
+        if self.screen == Screen::Play {
+            self.msg = ("Leave this game first to join a friend".into(), 3.0);
+            return;
+        }
+        if let Some(s) = &self.sess {
+            if s.players.len() > 1 || s.in_game {
+                self.status = "Leave this co-op lobby first to join a friend".into();
+                return;
+            }
+            self.leave_coop();
+        }
+        if let Some(st) = &self.steam {
+            st.join(id);
+            self.status = "Joining your friend's game".into();
+            self.invite_open = false;
+        }
+    }
     fn leave_coop(&mut self) {
         if let Some(mut s) = self.sess.take() {
             if s.is_host() && s.in_game {
@@ -1510,17 +1550,33 @@ impl App {
             }
         } else {
             let have = self.steam.is_some();
-            if self.button(coop, "Co-op lobby with Steam friends", have, false) {
+            let c = coop.cols(2, 10.0);
+            let why_not = || {
+                let e = net::steam_error();
+                if e.is_empty() { "Steam is not running. Start Steam, then restart Pixel Horde to play co-op.".to_string() } else { e }
+            };
+            if self.button(c[0], "Host co-op lobby", have, false) {
                 if let Some(st) = &self.steam {
                     st.create();
                     self.status = "Opening a Steam lobby".into();
                 }
             }
-            if self.hot(coop) {
+            if self.hot(c[0]) {
                 self.tip = Some(if have {
-                    "Opens a co-op lobby and the Steam invite window. Friends who accept join you there; together you play any city or the world campaign.".into()
+                    "Opens a co-op lobby and the invite list. Friends who join play any city or the world campaign with you.".into()
                 } else {
-                    "Steam is not running. Start Steam, then restart Pixel Horde to play co-op.".into()
+                    why_not()
+                });
+            }
+            let label = if self.got_invites.is_empty() { "Join a friend".to_string() } else { format!("Join a friend ({})", self.got_invites.len()) };
+            if self.button(c[1], &label, have, !self.got_invites.is_empty()) {
+                self.open_joins();
+            }
+            if self.hot(c[1]) {
+                self.tip = Some(if have {
+                    "Friends playing Pixel Horde in a co-op lobby, and invites you got. Your friend hosts, you press Join.".into()
+                } else {
+                    why_not()
                 });
             }
         }

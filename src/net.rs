@@ -373,6 +373,20 @@ pub struct Friend {
     pub online: bool,
     /// playing Pixel Horde right now
     pub here: bool,
+    /// the co-op lobby they are in (0: none), for "Join a friend"
+    pub lobby: u64,
+}
+
+/// Why Steam couldn't start, for the menu (empty when it did, or before it was tried).
+pub fn steam_error() -> String {
+    STEAM_ERR.lock().map(|e| e.clone()).unwrap_or_default()
+}
+static STEAM_ERR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+#[allow(dead_code)]
+fn set_steam_error(e: String) {
+    if let Ok(mut s) = STEAM_ERR.lock() {
+        *s = e;
+    }
 }
 
 pub trait Link {
@@ -1185,7 +1199,7 @@ pub mod tcp {
 #[cfg(feature = "steam")]
 mod steam_impl {
     use super::direct;
-    use super::{Ev, Friend, Link, APP_ID};
+    use super::{set_steam_error, Ev, Friend, Link, APP_ID};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use steamworks::networking_types::{NetworkingIdentity, SendFlags};
@@ -1197,7 +1211,23 @@ mod steam_impl {
         client: Client,
         joins: Arc<Mutex<Vec<u64>>>,
         lobby: Arc<Mutex<Option<Result<(u64, bool), String>>>>,
+        /// lobby invites that arrived while the game runs: (friend, lobby)
+        invites: Arc<Mutex<Vec<(u64, u64)>>>,
         _cbs: Vec<steamworks::CallbackHandle>,
+    }
+
+    /// A friend invited us to their lobby (Steam sends this to the running game). steamworks-rs
+    /// has no wrapper for it, so it is declared here.
+    struct LobbyInvite {
+        user: u64,
+        lobby: u64,
+    }
+    unsafe impl steamworks::Callback for LobbyInvite {
+        const ID: i32 = sys::LobbyInvite_t_k_iCallback as i32;
+        unsafe fn from_raw(raw: *mut std::ffi::c_void) -> Self {
+            let r = raw.cast::<sys::LobbyInvite_t>().read_unaligned();
+            LobbyInvite { user: r.m_ulSteamIDUser, lobby: r.m_ulSteamIDLobby }
+        }
     }
 
     /// `+connect_lobby <id>`, the connect string Steam passes on for invites and "Join game".
@@ -1238,9 +1268,16 @@ mod steam_impl {
     impl Steam {
         pub fn init() -> Option<Steam> {
             if !super::write_dll() {
+                set_steam_error("Pixel Horde couldn't write steam_api64.dll next to the game. Move PixelHorde.exe to a folder you can write to (like Desktop or Documents).".into());
                 return None;
             }
-            let client = Client::init_app(APP_ID).ok()?;
+            let client = match Client::init_app(APP_ID) {
+                Ok(c) => c,
+                Err(e) => {
+                    set_steam_error(format!("Steam didn't start for Pixel Horde ({}). Make sure Steam is running and you're logged in, then restart the game.", e));
+                    return None;
+                }
+            };
             let joins: Arc<Mutex<Vec<u64>>> = Arc::default();
             let j = joins.clone();
             // accepting an invite (or "Join game" in the friends list) while the game is running
@@ -1250,6 +1287,13 @@ mod steam_impl {
             let cb2 = client.register_callback(move |r: GameRichPresenceJoinRequested| {
                 if let Some(id) = lobby_arg(&r.connect) {
                     j.lock().unwrap().push(id);
+                }
+            });
+            let invites: Arc<Mutex<Vec<(u64, u64)>>> = Arc::default();
+            let iv = invites.clone();
+            let cb3 = client.register_callback(move |r: LobbyInvite| {
+                if r.lobby != 0 {
+                    iv.lock().unwrap().push((r.user, r.lobby));
                 }
             });
             client.networking_messages().session_request_callback(|r| {
@@ -1262,7 +1306,7 @@ mod steam_impl {
             if let Some(id) = lobby_arg(&args.join(" ")) {
                 joins.lock().unwrap().push(id);
             }
-            Some(Steam { client, joins, lobby: Arc::default(), _cbs: vec![cb, cb2] })
+            Some(Steam { client, joins, lobby: Arc::default(), invites, _cbs: vec![cb, cb2, cb3] })
         }
         pub fn tick(&self) {
             self.client.run_callbacks();
@@ -1273,6 +1317,19 @@ mod steam_impl {
         pub fn take_join(&self) -> Option<u64> {
             self.joins.lock().unwrap().pop()
         }
+        /// An invite a friend sent while the game runs: (friend, lobby).
+        pub fn take_invite(&self) -> Option<(u64, u64)> {
+            self.invites.lock().unwrap().pop()
+        }
+        pub fn friend_name(&self, id: u64) -> String {
+            self.client.friends().get_friend(SteamId::from_raw(id)).name()
+        }
+        /// Every Steam friend, playing Pixel Horde first, with the co-op lobby each is in.
+        pub fn friends(&self) -> Vec<Friend> {
+            let mut v = friend_list(&self.client);
+            v.sort_by_key(|f| (f.lobby == 0, !f.here, !f.online, f.name.to_lowercase()));
+            v
+        }
         pub fn create(&self) {
             let l = self.lobby.clone();
             self.client.matchmaking().create_lobby(LobbyType::FriendsOnly, 4, move |r| {
@@ -1282,7 +1339,7 @@ mod steam_impl {
         pub fn join(&self, id: u64) {
             let l = self.lobby.clone();
             self.client.matchmaking().join_lobby(LobbyId::from_raw(id), move |r| {
-                *l.lock().unwrap() = Some(r.map(|id| (id.raw(), false)).map_err(|_| "Could not join that Steam lobby. It may be full or closed.".to_string()));
+                *l.lock().unwrap() = Some(r.map(|id| (id.raw(), false)).map_err(|_| "Could not join that co-op lobby: it's full, closed, or its game has already started.".to_string()));
             });
         }
         /// A lobby we created or joined: (lobby id, we are the host).
@@ -1310,6 +1367,28 @@ mod steam_impl {
             self.client.friends().set_rich_presence("connect", Some(&format!("+connect_lobby {}", lobby.raw())));
             Box::new(SteamLink { client: self.client.clone(), lobby, known, me, way })
         }
+    }
+
+    /// The Steam friends list. A friend in a co-op lobby shows its id in their rich presence
+    /// (`+connect_lobby <id>`), which Steam shares between friends in the same game.
+    fn friend_list(client: &Client) -> Vec<Friend> {
+        let app = client.utils().app_id();
+        client
+            .friends()
+            .get_friends(FriendFlags::IMMEDIATE)
+            .into_iter()
+            .map(|f| {
+                let online = !matches!(f.state(), FriendState::Offline | FriendState::Invisible);
+                let game = f.game_played().filter(|g| g.game.app_id() == app);
+                let here = game.is_some();
+                let lobby = if here {
+                    f.rich_presence("connect").and_then(|c| lobby_arg(&c)).or_else(|| game.map(|g| g.lobby.raw()).filter(|l| *l != 0)).unwrap_or(0)
+                } else {
+                    0
+                };
+                Friend { id: f.id().raw(), name: f.name(), online, here, lobby }
+            })
+            .collect()
     }
 
     /// How this PC's messages travel.
@@ -1449,19 +1528,7 @@ mod steam_impl {
             self.client.utils().is_overlay_enabled()
         }
         fn friends(&self) -> Vec<Friend> {
-            let app = self.client.utils().app_id();
-            let mut v: Vec<Friend> = self
-                .client
-                .friends()
-                .get_friends(FriendFlags::IMMEDIATE)
-                .into_iter()
-                .map(|f| {
-                    let online = !matches!(f.state(), FriendState::Offline | FriendState::Invisible);
-                    let here = f.game_played().is_some_and(|g| g.game.app_id() == app);
-                    Friend { id: f.id().raw(), name: f.name(), online, here }
-                })
-                .filter(|f| !self.known.iter().any(|k| k.raw() == f.id))
-                .collect();
+            let mut v: Vec<Friend> = friend_list(&self.client).into_iter().filter(|f| !self.known.iter().any(|k| k.raw() == f.id)).collect();
             v.sort_by_key(|f| (!f.here, !f.online, f.name.to_lowercase()));
             v
         }
@@ -1510,6 +1577,15 @@ impl Steam {
     }
     pub fn take_join(&self) -> Option<u64> {
         None
+    }
+    pub fn take_invite(&self) -> Option<(u64, u64)> {
+        None
+    }
+    pub fn friend_name(&self, _id: u64) -> String {
+        String::new()
+    }
+    pub fn friends(&self) -> Vec<Friend> {
+        Vec::new()
     }
     pub fn create(&self) {}
     pub fn join(&self, _id: u64) {}
